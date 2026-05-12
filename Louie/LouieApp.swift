@@ -5,8 +5,8 @@
 //  Created by Timm Preetz on 12.05.26.
 //
 
-import SwiftUI
 import SwiftData
+import SwiftUI
 
 @main
 struct LouieApp: App {

@@ -5,8 +5,8 @@
 //  Created by Timm Preetz on 12.05.26.
 //
 
-import SwiftUI
 import SwiftData
+import SwiftUI
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
@@ -36,6 +36,10 @@ struct ContentView: View {
             }
         } detail: {
             Text("Select an item")
+        }
+        .safeAreaInset(edge: .bottom) {
+            PlayerBar(state: .playing())
+                .padding(.horizontal, 50)
         }
     }
 
