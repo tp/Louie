@@ -58,29 +58,13 @@ public struct PlayerBar: View {
                         Text(song.title)
                             .font(.caption.bold())
                             .lineLimit(1)
-                            .id(song.title)
-                            .transition(
-                                .asymmetric(
-                                    insertion: .move(edge: .trailing).combined(with: .opacity),
-                                    removal: .move(edge: .leading), // no opacity here, else it disappears right away
-                                ),
-                            )
-                            .animation(.snappy(duration: 0.35), value: state.currentSong?.title)
-                            .frame(maxWidth: isExpanded ? 300 : nil, alignment: .leading)
+                            .animatedTextChange(id: song.title, limitFrame: isExpanded)
 
                         Text(song.artist)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .id(song.artist)
-                            .transition(
-                                .asymmetric(
-                                    insertion: .move(edge: .trailing).combined(with: .opacity),
-                                    removal: .move(edge: .leading),
-                                ),
-                            )
-                            .animation(.snappy(duration: 0.35), value: state.currentSong?.artist)
-                            .frame(maxWidth: isExpanded ? 300 : nil, alignment: .leading)
+                            .animatedTextChange(id: song.artist, limitFrame: isExpanded)
                     }
                     .clipped()
                 }
@@ -131,6 +115,21 @@ public struct PlayerBar: View {
         .onTapGesture {
             // ignored; taps on disabled buttons should not collapse the bar
         }
+    }
+}
+
+extension View {
+    func animatedTextChange(id: some Hashable, limitFrame: Bool) -> some View {
+        self
+            .id(id)
+            .transition(
+                .asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading), // no opacity here, else it disappears right away
+                ),
+            )
+            .animation(.snappy(duration: 0.35), value: id)
+            .frame(maxWidth: limitFrame ? 300 : nil, alignment: .leading)
     }
 }
 
