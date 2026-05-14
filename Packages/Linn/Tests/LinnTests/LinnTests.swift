@@ -96,7 +96,8 @@ func previousCanUseCurrentSongCachedFromEarlierUpdates() async throws {
         linn.timeline?.position == 1
     }
 
-    #expect(linn.previousSongs.map(\.title) == ["Zero"])
+    #expect(linn.playlist.songs.map(\.title) == ["Zero", "One", "Two"])
+    #expect(linn.playlist.currentIndex == 1)
 
     linn.previous()
 
@@ -142,10 +143,10 @@ func playSongSelectsPlaylistItemByQueueIndex() async throws {
     linn.start()
     await gateway.send(nowPlaying(index: 0, titles: titles))
     try await waitUntil {
-        linn.upcomingSongs.count == 3
+        linn.playlist.songs.count == 4
     }
 
-    let song = try #require(linn.upcomingSongs.first { $0.title == "Three" })
+    let song = try #require(linn.playlist.songs.first { $0.title == "Three" })
     #expect(song.queueIndex == 3)
 
     linn.play(song)
@@ -157,6 +158,25 @@ func playSongSelectsPlaylistItemByQueueIndex() async throws {
     try await waitUntil {
         await gateway.selectedPlaylistIndexes() == [3]
     }
+}
+
+@Test
+@MainActor
+func playlistTracksDeviceCurrentIndexAndKeepsPreviousItems() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One", "Two", "Three"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 2, titles: titles))
+    try await waitUntil {
+        linn.playlist.currentIndex == 2
+    }
+
+    #expect(linn.playlist.total == 4)
+    #expect(linn.playlist.songs.map(\.title) == titles)
+    #expect(linn.previousSongs.map(\.title) == ["One", "Zero"])
+    #expect(linn.upcomingSongs.map(\.title) == ["Three"])
 }
 
 private actor TestGateway: LinnGateway {

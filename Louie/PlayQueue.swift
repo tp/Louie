@@ -10,50 +10,78 @@ import SwiftUI
 
 public struct PlayQueue: View {
     var linn: Linn
-    @State private var shouldScrollToTopAfterSelection = false
+    @State private var shouldScrollToCurrentOnOpen = true
+    @State private var shouldScrollToCurrentAfterSelection = false
 
     public var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Color.clear
-                    .frame(height: 0)
-                    .id(QueueScrollAnchor.top)
-
                 LazyVStack(spacing: 8) {
-                    ForEach(linn.upcomingSongs) { song in
+                    ForEach(linn.playlist.songs) { song in
                         Button {
-                            shouldScrollToTopAfterSelection = true
+                            shouldScrollToCurrentAfterSelection = true
                             linn.play(song)
                         } label: {
-                            QueueListTile(song: song)
+                            QueueListTile(
+                                song: song,
+                                isCurrent: song.queueIndex == linn.playlist.currentIndex
+                            )
                         }
+                        .id(queueRowID(for: song))
                         .buttonStyle(.plain)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
-                .animation(.snappy(duration: 0.35), value: linn.upcomingSongs.map(\.id))
+                .padding(.vertical, 8)
+                .animation(.snappy(duration: 0.35), value: linn.playlist.songs.map(\.id))
             }
-            .onChange(of: linn.upcomingSongs.map(\.id)) {
-                guard shouldScrollToTopAfterSelection else {
+            .onAppear {
+                scrollToCurrentIfNeeded(with: proxy, animated: false)
+            }
+            .onChange(of: linn.playlist.songs.map(\.id)) {
+                scrollToCurrentIfNeeded(with: proxy, animated: true)
+            }
+            .onChange(of: linn.playlist.currentIndex) {
+                guard shouldScrollToCurrentAfterSelection else {
                     return
                 }
 
-                shouldScrollToTopAfterSelection = false
-                withAnimation(.snappy(duration: 0.35)) {
-                    proxy.scrollTo(QueueScrollAnchor.top, anchor: .top)
-                }
+                shouldScrollToCurrentAfterSelection = false
+                scrollToCurrentIfNeeded(with: proxy, animated: true, force: true)
             }
         }
         .navigationTitle("Queue")
     }
-}
 
-private enum QueueScrollAnchor {
-    case top
+    private func scrollToCurrentIfNeeded(with proxy: ScrollViewProxy, animated: Bool, force: Bool = false) {
+        guard
+            force || shouldScrollToCurrentOnOpen || shouldScrollToCurrentAfterSelection,
+            let currentIndex = linn.playlist.currentIndex,
+            linn.playlist.songs.contains(where: { $0.queueIndex == currentIndex })
+        else {
+            return
+        }
+
+        shouldScrollToCurrentOnOpen = false
+        let scroll = {
+            proxy.scrollTo(currentIndex, anchor: .center)
+        }
+
+        if animated {
+            withAnimation(.snappy(duration: 0.35), scroll)
+        } else {
+            scroll()
+        }
+    }
+
+    private func queueRowID(for song: Linn.Song) -> Int {
+        song.queueIndex ?? song.id.hashValue
+    }
 }
 
 public struct QueueListTile: View {
     var song: Linn.Song
+    var isCurrent = false
 
     public var body: some View {
         HStack(spacing: 12) {
@@ -77,6 +105,11 @@ public struct QueueListTile: View {
             }
 
             Spacer()
+
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tint)
+                .opacity(isCurrent ? 1 : 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -85,6 +118,10 @@ public struct QueueListTile: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(.regularMaterial)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.tint.opacity(isCurrent ? 0.45 : 0), lineWidth: 1)
+        }
     }
 }
 

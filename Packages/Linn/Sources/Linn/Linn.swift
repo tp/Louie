@@ -91,12 +91,23 @@ public final class Linn {
         }
     }
 
+    public struct Playlist: Sendable, Equatable {
+        public var songs: [Song]
+        public var currentIndex: Int?
+        public var total: Int?
+
+        public init(songs: [Song] = [], currentIndex: Int? = nil, total: Int? = nil) {
+            self.songs = songs
+            self.currentIndex = currentIndex
+            self.total = total
+        }
+    }
+
     public let room: String
     public let maximumVolume: Int
     public private(set) var connectionState: ConnectionState = .idle
     public private(set) var currentSong: Song?
-    public private(set) var previousSongs: [Song] = []
-    public private(set) var upcomingSongs: [Song] = []
+    public private(set) var playlist = Playlist()
     public private(set) var playState: PlayState?
     public private(set) var volume: Int?
     public private(set) var isMuted: Bool?
@@ -104,26 +115,44 @@ public final class Linn {
     public private(set) var lastErrorMessage: String?
     public private(set) var songTransitionDirection: SongTransitionDirection = .forward
 
+    public var previousSongs: [Song] {
+        guard let currentIndex = playlist.currentIndex else {
+            return []
+        }
+
+        return playlist.songs
+            .filter { ($0.queueIndex ?? currentIndex) < currentIndex }
+            .sorted { ($0.queueIndex ?? 0) > ($1.queueIndex ?? 0) }
+    }
+
+    public var upcomingSongs: [Song] {
+        guard let currentIndex = playlist.currentIndex else {
+            return []
+        }
+
+        return playlist.songs
+            .filter { ($0.queueIndex ?? currentIndex) > currentIndex }
+            .sorted { ($0.queueIndex ?? 0) < ($1.queueIndex ?? 0) }
+    }
+
     public var hasPrevious: Bool {
-        guard let queueIndex else {
+        guard let currentIndex = playlist.currentIndex else {
             return false
         }
-        return queueIndex > 0
+        return currentIndex > 0
     }
 
     public var hasNext: Bool {
-        guard let queueIndex, let queueLength else {
+        guard let currentIndex = playlist.currentIndex, let total = playlist.total else {
             return false
         }
-        return queueIndex + 1 < queueLength
+        return currentIndex + 1 < total
     }
 
     private var ciGateway: (any LinnGateway)?
     private var configurationLoadAttempted = false
-    private var queueIndex: Int?
-    private var queueLength: Int?
     private var playlistContentRevision: Int?
-    private var playlistSongs: [Int: Song] = [:]
+    private var playlistSongsByIndex: [Int: Song] = [:]
     private var optimisticTransition: OptimisticTransition?
     private var optimisticPlayState: OptimisticPlayState?
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
@@ -193,7 +222,7 @@ public final class Linn {
             self.maximumVolume = maximumVolume
             self.connectionState = connectionState
             self.currentSong = currentSong
-            self.previousSongs = previousSongs
+            installMockPlaylist(previousSongs: previousSongs, currentSong: currentSong)
             self.playState = playState
             self.volume = volume
             self.isMuted = isMuted
@@ -345,15 +374,15 @@ public final class Linn {
         let suppressNowPlayingFields = shouldSuppressNowPlayingFields(incomingQueueIndex: update.queue?.index)
 
         playState = reconciledPlayState(incoming: PlayState(update.playback))
-        queueLength = update.queue?.length ?? queueLength
+        playlist.total = update.queue?.length ?? playlist.total
         if let playlist = update.playlist {
             if let contentRevision = playlist.contentRevision, contentRevision != playlistContentRevision {
-                playlistSongs = [:]
+                playlistSongsByIndex = [:]
                 playlistContentRevision = contentRevision
             }
 
             for item in playlist.items {
-                playlistSongs[item.index] = Song(item)
+                playlistSongsByIndex[item.index] = Song(item)
             }
         }
 
@@ -365,41 +394,41 @@ public final class Linn {
             }
             currentSong = incomingCurrentSong
             if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
-                playlistSongs[incomingQueueIndex] = incomingCurrentSong
+                playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
             }
-            queueIndex = update.queue?.index
+            playlist.currentIndex = update.queue?.index
             timeline = Timeline(update.timeline)
         }
 
-        updateAdjacentSongs()
+        updatePlaylistSongs()
         volume = update.roomState?.volume.map { min($0, maximumVolume) }
         isMuted = update.roomState?.isMuted
     }
 
     private func optimisticallyMoveToSong(offset: Int) {
-        guard let queueIndex else {
+        guard let currentIndex = playlist.currentIndex else {
             timeline = nil
             return
         }
 
-        let targetQueueIndex = queueIndex + offset
+        let targetQueueIndex = currentIndex + offset
         optimisticTransition = OptimisticTransition(
             targetQueueIndex: targetQueueIndex,
             expiresAt: Date().addingTimeInterval(4)
         )
 
-        guard let targetSong = playlistSongs[targetQueueIndex] else {
+        guard let targetSong = playlistSongsByIndex[targetQueueIndex] else {
             currentSong = nil
-            self.queueIndex = targetQueueIndex
+            playlist.currentIndex = targetQueueIndex
             timeline = nil
-            updateAdjacentSongs()
+            updatePlaylistSongs()
             return
         }
 
         currentSong = targetSong
-        self.queueIndex = targetQueueIndex
+        playlist.currentIndex = targetQueueIndex
         timeline = nil
-        updateAdjacentSongs()
+        updatePlaylistSongs()
     }
 
     private func optimisticallySelectSong(_ song: Song, at targetQueueIndex: Int) {
@@ -408,19 +437,21 @@ public final class Linn {
             targetQueueIndex: targetQueueIndex,
             expiresAt: Date().addingTimeInterval(4)
         )
-        playlistSongs[targetQueueIndex] = song
-        currentSong = song
-        queueIndex = targetQueueIndex
+        var selectedSong = song
+        selectedSong.queueIndex = targetQueueIndex
+        playlistSongsByIndex[targetQueueIndex] = selectedSong
+        currentSong = selectedSong
+        playlist.currentIndex = targetQueueIndex
         timeline = nil
-        updateAdjacentSongs()
+        updatePlaylistSongs()
     }
 
     private func updateSongTransitionDirection(incomingQueueIndex: Int?) {
-        guard let queueIndex, let incomingQueueIndex, queueIndex != incomingQueueIndex else {
+        guard let currentIndex = playlist.currentIndex, let incomingQueueIndex, currentIndex != incomingQueueIndex else {
             return
         }
 
-        songTransitionDirection = incomingQueueIndex > queueIndex ? .forward : .backward
+        songTransitionDirection = incomingQueueIndex > currentIndex ? .forward : .backward
     }
 
     private func shouldSuppressNowPlayingFields(incomingQueueIndex: Int?) -> Bool {
@@ -459,20 +490,8 @@ public final class Linn {
         return optimisticPlayState.targetState
     }
 
-    private func updateAdjacentSongs() {
-        guard let queueIndex else {
-            previousSongs = []
-            upcomingSongs = []
-            return
-        }
-
-        previousSongs = playlistSongs
-            .filter { index, _ in index < queueIndex }
-            .sorted { $0.key > $1.key }
-            .map(\.value)
-
-        upcomingSongs = playlistSongs
-            .filter { index, _ in index > queueIndex }
+    private func updatePlaylistSongs() {
+        playlist.songs = playlistSongsByIndex
             .sorted { $0.key < $1.key }
             .map(\.value)
     }
@@ -512,27 +531,59 @@ public final class Linn {
     }
 
     #if DEBUG
+        private func installMockPlaylist(previousSongs: [Song], currentSong: Song?) {
+            playlistSongsByIndex = [:]
+
+            for (index, song) in previousSongs.reversed().enumerated() {
+                var indexedSong = song
+                indexedSong.queueIndex = index
+                playlistSongsByIndex[index] = indexedSong
+            }
+
+            if var currentSong {
+                let currentIndex = previousSongs.count
+                currentSong.queueIndex = currentIndex
+                self.currentSong = currentSong
+                playlistSongsByIndex[currentIndex] = currentSong
+                playlist.currentIndex = currentIndex
+                playlist.total = currentIndex + 1
+            }
+
+            updatePlaylistSongs()
+        }
+
         /// Preview/mock-only adapter from button availability flags to the internal queue shape.
         ///
         /// Production state comes from `CiGateway.NowPlaying.Queue`, where `hasPrevious`
-        /// and `hasNext` are derived from `queueIndex` and `queueLength`. The debug mock
+        /// and `hasNext` are derived from the playlist current index and total. The debug mock
         /// initializer accepts direct booleans because previews usually care about the
         /// visible button states, not a realistic queue position.
         private func setQueueAvailability(hasPrevious: Bool, hasNext: Bool) {
+            var currentIndex = playlist.currentIndex
+            var total = playlist.total
+
             switch (hasPrevious, hasNext) {
             case (true, true):
-                queueIndex = 1
-                queueLength = 3
+                currentIndex = currentIndex ?? 1
+                total = max(total ?? 0, (currentIndex ?? 1) + 2)
             case (true, false):
-                queueIndex = 1
-                queueLength = 2
+                currentIndex = currentIndex ?? 1
+                total = max(total ?? 0, (currentIndex ?? 1) + 1)
             case (false, true):
-                queueIndex = 0
-                queueLength = 2
+                currentIndex = currentIndex ?? 0
+                total = max(total ?? 0, (currentIndex ?? 0) + 2)
             case (false, false):
-                queueIndex = nil
-                queueLength = nil
+                if playlist.songs.isEmpty {
+                    currentIndex = nil
+                    total = nil
+                } else {
+                    currentIndex = currentIndex ?? 0
+                    total = total ?? playlist.songs.count
+                }
             }
+
+            playlist.currentIndex = currentIndex
+            playlist.total = total
         }
     #endif
 }
