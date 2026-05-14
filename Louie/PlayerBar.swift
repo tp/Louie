@@ -198,6 +198,12 @@ extension View {
                 .padding(.bottom, 50)
                 .padding(.horizontal, 50)
             }
+            .task {
+                linn.start()
+            }
+            .onDisappear {
+                linn.stop()
+            }
         }
 
         @ViewBuilder
@@ -233,6 +239,12 @@ extension View {
                 playState: .playing,
                 hasNext: true
             )
+        )
+    }
+
+    #Preview("Interactive Demo") {
+        PlayerBarHarness(
+            linn: Linn(gateway: DemoLinnGateway())
         )
     }
 

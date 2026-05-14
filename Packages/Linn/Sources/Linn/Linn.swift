@@ -3,6 +3,30 @@ import LinnCiGateway
 import Observation
 import OSLog
 
+public protocol LinnGateway: Sendable {
+    func nowPlayingUpdates(
+        room: String?,
+        updateInterval: Int
+    ) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error>
+
+    func play(room: String) async throws
+    func pause(room: String) async throws
+    func previous(room: String) async throws
+    func next(room: String) async throws
+    func setVolume(_ volume: Int, room: String, group: Bool) async throws
+    func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws
+}
+
+public extension LinnGateway {
+    func setVolume(_ volume: Int, room: String) async throws {
+        try await setVolume(volume, room: room, group: true)
+    }
+
+    func setMuted(_ isMuted: Bool, room: String) async throws {
+        try await setMuted(isMuted, room: room, group: true)
+    }
+}
+
 @Observable
 @MainActor
 public final class Linn {
@@ -83,7 +107,7 @@ public final class Linn {
         return queueIndex + 1 < queueLength
     }
 
-    private var ciGateway: CiGateway?
+    private var ciGateway: (any LinnGateway)?
     private var configurationLoadAttempted = false
     private var queueIndex: Int?
     private var queueLength: Int?
@@ -114,6 +138,17 @@ public final class Linn {
         self.room = room
         self.maximumVolume = maximumVolume
         ciGateway = CiGateway(webSocketURL: configuration.ciGatewayWebSocketURL)
+        configurationLoadAttempted = true
+    }
+
+    public init(
+        gateway: any LinnGateway,
+        room: String = "Linn",
+        maximumVolume: Int = 70
+    ) {
+        self.room = room
+        self.maximumVolume = maximumVolume
+        ciGateway = gateway
         configurationLoadAttempted = true
     }
 
@@ -196,7 +231,8 @@ public final class Linn {
             }
 
             do {
-                for try await update in ciGateway.nowPlayingEvents(room: requestedRoom) {
+                let updates = await ciGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
+                for try await update in updates {
                     apply(update)
                     connectionState = .connected
                 }
@@ -375,7 +411,7 @@ public final class Linn {
 
     private func performControl(
         optimisticState: PlayState? = nil,
-        operation: @escaping (CiGateway, String) async throws -> Void
+        operation: @escaping (any LinnGateway, String) async throws -> Void
     ) {
         let previousPlayState = playState
         if let optimisticState {
@@ -431,6 +467,15 @@ public final class Linn {
             }
         }
     #endif
+}
+
+extension CiGateway: LinnGateway {
+    public func nowPlayingUpdates(
+        room: String?,
+        updateInterval: Int
+    ) async -> AsyncThrowingStream<NowPlaying, Error> {
+        nowPlayingEvents(room: room, updateInterval: updateInterval)
+    }
 }
 
 public extension Linn.PlayState {
