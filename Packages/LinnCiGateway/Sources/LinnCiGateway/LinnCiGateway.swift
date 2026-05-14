@@ -290,6 +290,10 @@ public final class CiGateway: Sendable {
         try await sendRoomPlayStateCommand(room: room, skipTrack: 1)
     }
 
+    public func selectPlaylistItem(at index: Int, room: String) async throws {
+        try await sendPlaylistSelectCommand(room: room, index: index)
+    }
+
     public func setVolume(_ volume: Int, room: String, group: Bool = true) async throws {
         try await sendRoomStateCommand(room: room, group: group, volume: max(0, min(100, volume)))
     }
@@ -378,6 +382,13 @@ private extension CiGateway {
         var group: Bool?
         var mute: Bool?
         var volume: Int?
+    }
+
+    struct PlaylistSelectCommand: Encodable {
+        var requestPath = "/V2/playlist/select"
+        var room: String
+        var session: String
+        var index: Int
     }
 
     struct PlaylistSubscriptionRequest: Encodable {
@@ -680,6 +691,19 @@ private extension CiGateway {
                     group: group,
                     mute: mute,
                     volume: volume
+                )
+            }
+        )
+    }
+
+    func sendPlaylistSelectCommand(room: String, index: Int) async throws {
+        try await sendCommand(
+            requestPath: "/V2/playlist/select",
+            build: { session in
+                PlaylistSelectCommand(
+                    room: room,
+                    session: session,
+                    index: index
                 )
             }
         )

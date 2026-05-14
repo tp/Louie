@@ -13,6 +13,7 @@ public protocol LinnGateway: Sendable {
     func pause(room: String) async throws
     func previous(room: String) async throws
     func next(room: String) async throws
+    func selectPlaylistItem(at index: Int, room: String) async throws
     func setVolume(_ volume: Int, room: String, group: Bool) async throws
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws
 }
@@ -57,6 +58,7 @@ public final class Linn {
         public var album: String?
         public var duration: Int?
         public var artworkURL: URL?
+        public var queueIndex: Int?
 
         public init(
             id: String,
@@ -64,7 +66,8 @@ public final class Linn {
             artist: String? = nil,
             album: String? = nil,
             duration: Int? = nil,
-            artworkURL: URL? = nil
+            artworkURL: URL? = nil,
+            queueIndex: Int? = nil
         ) {
             self.id = id
             self.title = title
@@ -72,6 +75,7 @@ public final class Linn {
             self.album = album
             self.duration = duration
             self.artworkURL = artworkURL
+            self.queueIndex = queueIndex
         }
     }
 
@@ -311,6 +315,17 @@ public final class Linn {
         }
     }
 
+    public func play(_ song: Song) {
+        guard let targetQueueIndex = song.queueIndex else {
+            return
+        }
+
+        optimisticallySelectSong(song, at: targetQueueIndex)
+        performControl { ciGateway, room in
+            try await ciGateway.selectPlaylistItem(at: targetQueueIndex, room: room)
+        }
+    }
+
     public func setVolume(_ volume: Int) {
         let clampedVolume = max(0, min(maximumVolume, volume))
         self.volume = clampedVolume
@@ -344,7 +359,10 @@ public final class Linn {
 
         if !suppressNowPlayingFields {
             updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
-            let incomingCurrentSong = Song(update.currentItem)
+            var incomingCurrentSong = Song(update.currentItem)
+            if let incomingQueueIndex = update.queue?.index {
+                incomingCurrentSong?.queueIndex = incomingQueueIndex
+            }
             currentSong = incomingCurrentSong
             if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
                 playlistSongs[incomingQueueIndex] = incomingCurrentSong
@@ -380,6 +398,19 @@ public final class Linn {
 
         currentSong = targetSong
         self.queueIndex = targetQueueIndex
+        timeline = nil
+        updateAdjacentSongs()
+    }
+
+    private func optimisticallySelectSong(_ song: Song, at targetQueueIndex: Int) {
+        updateSongTransitionDirection(incomingQueueIndex: targetQueueIndex)
+        optimisticTransition = OptimisticTransition(
+            targetQueueIndex: targetQueueIndex,
+            expiresAt: Date().addingTimeInterval(4)
+        )
+        playlistSongs[targetQueueIndex] = song
+        currentSong = song
+        queueIndex = targetQueueIndex
         timeline = nil
         updateAdjacentSongs()
     }
@@ -568,7 +599,8 @@ public extension Linn.Song {
             artist: item.artist,
             album: item.album,
             duration: item.duration,
-            artworkURL: item.artworkURL
+            artworkURL: item.artworkURL,
+            queueIndex: item.index
         )
     }
 }

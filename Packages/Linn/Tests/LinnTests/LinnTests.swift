@@ -132,9 +132,37 @@ func streamQueueIndexMovementUpdatesSongTransitionDirection() async throws {
     #expect(linn.songTransitionDirection == .backward)
 }
 
+@Test
+@MainActor
+func playSongSelectsPlaylistItemByQueueIndex() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One", "Two", "Three"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles))
+    try await waitUntil {
+        linn.upcomingSongs.count == 3
+    }
+
+    let song = try #require(linn.upcomingSongs.first { $0.title == "Three" })
+    #expect(song.queueIndex == 3)
+
+    linn.play(song)
+
+    #expect(linn.currentSong?.title == "Three")
+    #expect(linn.timeline == nil)
+    #expect(linn.songTransitionDirection == .forward)
+
+    try await waitUntil {
+        await gateway.selectedPlaylistIndexes() == [3]
+    }
+}
+
 private actor TestGateway: LinnGateway {
     private let stream: AsyncThrowingStream<CiGateway.NowPlaying, Error>
     private let continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
+    private var selectedIndexes: [Int] = []
 
     init() {
         let source = AsyncThrowingStream<CiGateway.NowPlaying, Error>.makeStream()
@@ -157,12 +185,20 @@ private actor TestGateway: LinnGateway {
 
     func next(room _: String) async throws {}
 
+    func selectPlaylistItem(at index: Int, room _: String) async throws {
+        selectedIndexes.append(index)
+    }
+
     func setVolume(_: Int, room _: String, group _: Bool) async throws {}
 
     func setMuted(_: Bool, room _: String, group _: Bool) async throws {}
 
     func send(_ update: CiGateway.NowPlaying) {
         continuation.yield(update)
+    }
+
+    func selectedPlaylistIndexes() -> [Int] {
+        selectedIndexes
     }
 }
 
@@ -218,4 +254,18 @@ private func waitUntil(
     }
 
     #expect(condition())
+}
+
+@MainActor
+private func waitUntil(
+    _ condition: @MainActor () async -> Bool
+) async throws {
+    for _ in 0 ..< 50 {
+        if await condition() {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+
+    #expect(await condition())
 }

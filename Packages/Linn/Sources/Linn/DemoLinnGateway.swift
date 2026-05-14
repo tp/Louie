@@ -145,6 +145,20 @@
             yieldSnapshot()
         }
 
+        public func selectPlaylistItem(at index: Int, room _: String) async throws {
+            guard songs.indices.contains(index) else {
+                return
+            }
+
+            currentIndex = index
+            position = 0
+            transportState = .buffering
+            yieldSnapshot()
+            try await Task.sleep(for: .milliseconds(350))
+            transportState = .play
+            yieldSnapshot()
+        }
+
         public func setVolume(_ volume: Int, room _: String, group _: Bool) async throws {
             self.volume = max(0, min(100, volume))
             yieldSnapshot()
@@ -257,6 +271,62 @@
                 artist: "Lorde",
                 album: "Melodrama",
                 duration: 189,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-the-louvre",
+                title: "The Louvre",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 272,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-liability",
+                title: "Liability",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 171,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-hard-feelings-loveless",
+                title: "Hard Feelings/Loveless",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 367,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-sober-ii-melodrama",
+                title: "Sober II (Melodrama)",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 178,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-writer-in-the-dark",
+                title: "Writer in the Dark",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 216,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-supercut",
+                title: "Supercut",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 278,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-liability-reprise",
+                title: "Liability (Reprise)",
+                artist: "Lorde",
+                album: "Melodrama",
+                duration: 136,
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
             ),
         ]
