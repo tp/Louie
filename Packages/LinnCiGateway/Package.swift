@@ -18,7 +18,7 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "LinnCiGateway",
-            exclude: ["openapi.yaml"]
+            exclude: ["openapi.original.yaml", "openapi.yaml"]
         ),
         .testTarget(
             name: "LinnCiGatewayTests",

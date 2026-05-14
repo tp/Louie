@@ -91,6 +91,7 @@ public final class CiGateway: Sendable {
             public var artist: String?
             public var duration: Int?
             public var artworkURL: URL?
+            public var isCurrent: Bool
 
             public init(
                 index: Int,
@@ -98,7 +99,8 @@ public final class CiGateway: Sendable {
                 album: String? = nil,
                 artist: String? = nil,
                 duration: Int? = nil,
-                artworkURL: URL? = nil
+                artworkURL: URL? = nil,
+                isCurrent: Bool = false
             ) {
                 self.index = index
                 self.displayName = displayName
@@ -106,6 +108,7 @@ public final class CiGateway: Sendable {
                 self.artist = artist
                 self.duration = duration
                 self.artworkURL = artworkURL
+                self.isCurrent = isCurrent
             }
 
             public var id: Int {
@@ -183,6 +186,7 @@ public final class CiGateway: Sendable {
         case noRoomsAvailable
         case invalidURL(String)
         case timedOut(String)
+        case commandFailed(code: Int, message: String)
     }
 
     public let webSocketURL: URL
@@ -267,47 +271,45 @@ public final class CiGateway: Sendable {
 }
 
 private extension CiGateway {
-    struct SessionCreateRequest: Encodable {
-        var requestPath = "/session/create"
-        var timeout: Int
-        var userAgent: String
-    }
-
-    struct SubscriptionRequest: Encodable {
+    struct WebSocketRequest<Body: Encodable>: Encodable {
         var requestPath: String
-        var tag: String
-        var room: String
-        var session: String
-        var update: Int
-        var filter: [String]?
-    }
+        var body: Body
 
-    struct TopologyRequest: Encodable {
-        var requestPath = "/house/topology"
-        var session: String
-        var filter = ["$.rooms[*].id", "$.rooms[*].name"]
+        enum CodingKeys: String, CodingKey {
+            case requestPath
+        }
+
+        func encode(to encoder: Encoder) throws {
+            try body.encode(to: encoder)
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(requestPath, forKey: .requestPath)
+        }
     }
 
     struct GatewayEnvelope: Decodable {
         var requestPath: String?
         var tag: String?
+        var errorCode: Int?
+        var message: String?
     }
 
     enum NowPlayingUpdate {
-        case playState(
+        case transport(
             room: String?,
             session: String?,
-            playback: NowPlaying.Playback?,
-            queue: NowPlaying.Queue?,
-            currentItem: NowPlaying.CurrentItem?,
-            timeline: NowPlaying.Timeline?
+            playback: NowPlaying.Playback
         )
-        case position(
+        case seek(
             room: String?,
             session: String?,
             timeline: NowPlaying.Timeline
         )
-        case roomState(
+        case metadata(
+            room: String?,
+            session: String?,
+            currentItem: NowPlaying.CurrentItem?
+        )
+        case volume(
             room: String?,
             session: String?,
             roomState: NowPlaying.RoomState
@@ -324,62 +326,14 @@ private extension CiGateway {
         case pause
     }
 
-    struct RoomPlayStateCommand: Encodable {
-        var requestPath = "/room/play_state/set"
-        var tag: String
-        var room: String
-        var session: String
-        var action: PlayStateAction?
-        var skipTrack: Int?
-
-        enum CodingKeys: String, CodingKey {
-            case requestPath
-            case tag
-            case room
-            case session
-            case action
-            case skipTrack = "skip_track"
-        }
-    }
-
-    struct RoomStateCommand: Encodable {
-        var requestPath = "/room/state/set"
-        var tag: String
-        var room: String
-        var session: String
-        var group: Bool?
-        var mute: Bool?
-        var volume: Int?
-    }
-
-    struct PlaylistSelectCommand: Encodable {
-        var requestPath = "/V2/playlist/select"
-        var tag: String
-        var room: String
-        var session: String
-        var index: Int
-    }
-
-    struct PlaylistSubscriptionRequest: Encodable {
-        var requestPath = "/V2/playlist/subscribe"
-        var tag: String
-        var room: String
-        var session: String
-        var index = 0
-        var count = 100
-        var concise = false
-    }
-
-    struct MetadataResponse<Metadata: Decodable>: Decodable {
-        var data: MetadataData?
-
-        struct MetadataData: Decodable {
-            var metadata: Metadata?
-        }
-    }
-
     static func createSession(on socket: URLSessionWebSocketTask, timeout: Int, userAgent: String) async throws -> String {
-        try await send(SessionCreateRequest(timeout: timeout, userAgent: userAgent), on: socket)
+        try await send(
+            WebSocketRequest(
+                requestPath: "/session/create",
+                body: SessionCreatePostRequest(userAgent: userAgent, timeout: timeout)
+            ),
+            on: socket
+        )
 
         while !Task.isCancelled {
             let message = try await receiveText(from: socket, timeout: .milliseconds(timeout), context: "session create")
@@ -404,34 +358,38 @@ private extension CiGateway {
         timeout: Int,
         on socket: URLSessionWebSocketTask
     ) async throws -> String {
-        logger.info("Requesting Linn house topology")
-        try await send(TopologyRequest(session: session), on: socket)
+        logger.info("Requesting Linn V2 topology status")
+        try await send(
+            V2TopologyStatusGetRequest(tag: "topology-status", session: session),
+            requestPath: "/V2/topology/status",
+            on: socket
+        )
 
         while !Task.isCancelled {
             let message = try await receiveText(from: socket, timeout: .milliseconds(timeout), context: "house topology")
             let envelope = try JSONDecoder().decode(GatewayEnvelope.self, from: Data(message.utf8))
-            guard envelope.requestPath == "/house/topology" else {
+            guard envelope.requestPath == "/V2/topology/status" else {
                 continue
             }
 
-            let response = try JSONDecoder().decode(HouseTopologyResponse.self, from: Data(message.utf8))
+            let response = try JSONDecoder().decode(V2TopologyStatusResponse.self, from: Data(message.utf8))
             guard let rooms = response.data?.rooms, !rooms.isEmpty else {
                 throw GatewayError.noRoomsAvailable
             }
 
-            let roomNames = rooms.map { $0.name ?? $0.id ?? "<unnamed>" }.joined(separator: ", ")
+            let roomNames = rooms.map { $0.name ?? $0.udn ?? "<unnamed>" }.joined(separator: ", ")
             Self.logger.info("Received Linn rooms: \(roomNames, privacy: .public)")
 
             if let preferredRoom, !preferredRoom.isEmpty {
-                if let matchingRoom = rooms.first(where: { $0.name == preferredRoom || $0.id == preferredRoom }) {
-                    return matchingRoom.name ?? matchingRoom.id ?? preferredRoom
+                if let matchingRoom = rooms.first(where: { $0.name == preferredRoom || $0.udn == preferredRoom }) {
+                    return matchingRoom.name ?? matchingRoom.udn ?? preferredRoom
                 }
 
                 let availableRooms = rooms.compactMap(\.name).joined(separator: ", ")
                 Self.logger.warning("Requested Linn room \(preferredRoom, privacy: .public) was not found. Available rooms: \(availableRooms, privacy: .public)")
             }
 
-            guard let room = rooms.first?.name ?? rooms.first?.id else {
+            guard let room = rooms.first?.name ?? rooms.first?.udn else {
                 throw GatewayError.noRoomsAvailable
             }
 
@@ -448,17 +406,16 @@ private extension CiGateway {
         on socket: URLSessionWebSocketTask
     ) async throws {
         try await send(
-            SubscriptionRequest(
-                requestPath: "/room/play_state",
+            V2TransportStatusGetRequest(
                 tag: "subscription-play-state",
-                room: room,
                 session: session,
-                update: updateInterval,
-                filter: nil
+                room: room,
+                update: updateInterval
             ),
+            requestPath: "/V2/transport/status",
             on: socket
         )
-        logger.debug("Sent /room/play_state subscription for \(room, privacy: .public)")
+        logger.debug("Sent /V2/transport/status subscription for \(room, privacy: .public)")
     }
 
     static func subscribeToPosition(
@@ -468,17 +425,16 @@ private extension CiGateway {
         on socket: URLSessionWebSocketTask
     ) async throws {
         try await send(
-            SubscriptionRequest(
-                requestPath: "/room/play_state/position",
+            V2TransportStatusGetRequest(
                 tag: "subscription-position",
-                room: room,
                 session: session,
-                update: updateInterval,
-                filter: nil
+                room: room,
+                update: updateInterval
             ),
+            requestPath: "/V2/seek/status",
             on: socket
         )
-        logger.debug("Sent /room/play_state/position subscription for \(room, privacy: .public)")
+        logger.debug("Sent /V2/seek/status subscription for \(room, privacy: .public)")
     }
 
     static func subscribeToRoomState(
@@ -488,17 +444,36 @@ private extension CiGateway {
         on socket: URLSessionWebSocketTask
     ) async throws {
         try await send(
-            SubscriptionRequest(
-                requestPath: "/room/state",
+            V2VolumeStatusGetRequest(
                 tag: "subscription-room-state",
-                room: room,
                 session: session,
+                room: room,
                 update: updateInterval,
-                filter: ["$.mute", "$.volume"]
+                group: true
             ),
+            requestPath: "/V2/volume/status",
             on: socket
         )
-        logger.debug("Sent /room/state subscription for \(room, privacy: .public)")
+        logger.debug("Sent /V2/volume/status subscription for \(room, privacy: .public)")
+    }
+
+    static func subscribeToMetadata(
+        room: String,
+        session: String,
+        updateInterval: Int,
+        on socket: URLSessionWebSocketTask
+    ) async throws {
+        try await send(
+            V2TransportStatusGetRequest(
+                tag: "subscription-metadata",
+                session: session,
+                room: room,
+                update: updateInterval
+            ),
+            requestPath: "/V2/metadata/status",
+            on: socket
+        )
+        logger.debug("Sent /V2/metadata/status subscription for \(room, privacy: .public)")
     }
 
     static func subscribeToPlaylist(
@@ -507,10 +482,22 @@ private extension CiGateway {
         on socket: URLSessionWebSocketTask
     ) async throws {
         try await send(
-            PlaylistSubscriptionRequest(tag: "subscription-playlist", room: room, session: session),
+            V2PlaylistSubscribeGetRequest(
+                tag: "subscription-playlist",
+                session: session,
+                room: room,
+                index: 0,
+                count: 100,
+                concise: false
+            ),
+            requestPath: "/V2/playlist/subscribe",
             on: socket
         )
         logger.debug("Sent /V2/playlist/subscribe for \(room, privacy: .public)")
+    }
+
+    static func send<T: Encodable>(_ value: T, requestPath: String, on socket: URLSessionWebSocketTask) async throws {
+        try await send(WebSocketRequest(requestPath: requestPath, body: value), on: socket)
     }
 
     static func send<T: Encodable>(_ value: T, on socket: URLSessionWebSocketTask) async throws {
@@ -566,52 +553,52 @@ private extension CiGateway {
         let envelope = try decoder.decode(GatewayEnvelope.self, from: data)
 
         switch envelope.requestPath {
-        case "/room/play_state":
-            let response = try decoder.decode(RoomPlayStateResponse.self, from: data)
-            guard let playState = response.data else {
+        case "/V2/transport/status":
+            let response = try decoder.decode(V2TransportStatusResponse.self, from: data)
+            guard let playback = NowPlaying.Playback(response: response) else {
                 return nil
             }
 
-            let trackMetadata: ItemMetaDataTrack?
-            do {
-                trackMetadata = try decoder.decode(MetadataResponse<ItemMetaDataTrack>.self, from: data).data?.metadata
-            } catch {
-                Self.logger.warning("Failed to decode Linn track metadata: \(String(describing: error), privacy: .public)")
-                trackMetadata = nil
-            }
-
-            let duration = trackMetadata?.duration ?? playState.details?.duration
-            return .playState(
+            return .transport(
                 room: response.room,
                 session: response.session,
-                playback: NowPlaying.Playback(playState: playState),
-                queue: NowPlaying.Queue(playState: playState),
-                currentItem: NowPlaying.CurrentItem(metadata: playState.metadata, trackMetadata: trackMetadata),
-                timeline: NowPlaying.Timeline(playState: playState, duration: duration)
+                playback: playback
             )
 
-        case "/room/play_state/position":
-            let response = try decoder.decode(RoomPlayStatePositionResponse.self, from: data)
-            guard let position = response.data else {
+        case "/V2/seek/status":
+            let response = try decoder.decode(V2SeekStatusResponse.self, from: data)
+            guard let timeline = NowPlaying.Timeline(response: response) else {
                 return nil
             }
 
-            return .position(
+            return .seek(
                 room: response.room,
                 session: response.session,
-                timeline: NowPlaying.Timeline(position: position)
+                timeline: timeline
             )
 
-        case "/room/state":
-            let response = try decoder.decode(RoomStateResponse.self, from: data)
-            guard let state = response.data else {
+        case "/V2/metadata/status":
+            let response = try decoder.decode(V2MetadataStatusResponse.self, from: data)
+            guard response.metadata != nil else {
                 return nil
             }
 
-            return .roomState(
+            return .metadata(
                 room: response.room,
                 session: response.session,
-                roomState: NowPlaying.RoomState(volume: state.volume, isMuted: state.mute)
+                currentItem: NowPlaying.CurrentItem(response: response)
+            )
+
+        case "/V2/volume/status":
+            let response = try decoder.decode(V2VolumeStatusResponse.self, from: data)
+            guard let roomState = NowPlaying.RoomState(response: response) else {
+                return nil
+            }
+
+            return .volume(
+                room: response.room,
+                session: response.session,
+                roomState: roomState
             )
 
         case "/V2/playlist/subscribe":
@@ -734,7 +721,7 @@ private actor CiGatewayConnection {
 
     func selectPlaylistItem(at index: Int, room: String) async throws {
         try await sendCommand(room: room, requestPath: "/V2/playlist/select") { session, tag in
-            CiGateway.PlaylistSelectCommand(tag: tag, room: room, session: session, index: index)
+            V2PlaylistSelectPostRequest(tag: tag, session: session, room: room, index: index)
         }
     }
 
@@ -902,6 +889,7 @@ private actor CiGatewayConnection {
         try await CiGateway.subscribeToPlayState(room: room, session: session, updateInterval: updateInterval, on: socket)
         try await CiGateway.subscribeToPosition(room: room, session: session, updateInterval: updateInterval, on: socket)
         try await CiGateway.subscribeToRoomState(room: room, session: session, updateInterval: updateInterval, on: socket)
+        try await CiGateway.subscribeToMetadata(room: room, session: session, updateInterval: updateInterval, on: socket)
         try await CiGateway.subscribeToPlaylist(room: room, session: session, on: socket)
 
         subscribedRoom = room
@@ -936,18 +924,27 @@ private actor CiGatewayConnection {
     }
 
     private func completePendingCommand(for envelope: CiGateway.GatewayEnvelope) -> Bool {
-        guard
-            let tag = envelope.tag,
-            let pending = pendingCommands[tag],
-            pending.requestPath == envelope.requestPath
-        else {
+        guard let tag = envelope.tag, let pending = pendingCommands[tag] else {
+            return false
+        }
+
+        guard envelope.requestPath == nil || pending.requestPath == envelope.requestPath else {
             return false
         }
 
         pending.timeoutTask.cancel()
         pendingCommands.removeValue(forKey: tag)
         CiGateway.logger.debug("Matched command ACK \(tag, privacy: .public) for \(pending.requestPath, privacy: .public)")
-        pending.continuation.resume()
+        if let errorCode = envelope.errorCode {
+            pending.continuation.resume(
+                throwing: CiGateway.GatewayError.commandFailed(
+                    code: errorCode,
+                    message: envelope.message ?? "Gateway command failed"
+                )
+            )
+        } else {
+            pending.continuation.resume()
+        }
         return true
     }
 
@@ -1018,14 +1015,15 @@ private actor CiGatewayConnection {
         action: CiGateway.PlayStateAction? = nil,
         skipTrack: Int? = nil
     ) async throws {
-        try await sendCommand(room: room, requestPath: "/room/play_state/set") { session, tag in
-            CiGateway.RoomPlayStateCommand(
-                tag: tag,
-                room: room,
-                session: session,
-                action: action,
-                skipTrack: skipTrack
-            )
+        if let action {
+            let requestPath = action == .play ? "/V2/transport/play" : "/V2/transport/pause"
+            try await sendCommand(room: room, requestPath: requestPath) { session, tag in
+                V2TransportPlayPostRequest(tag: tag, session: session, room: room)
+            }
+        } else {
+            try await sendCommand(room: room, requestPath: "/V2/transport/skip_track") { session, tag in
+                V2TransportSkipTrackPostRequest(tag: tag, session: session, room: room, skipTrack: skipTrack)
+            }
         }
     }
 
@@ -1064,25 +1062,23 @@ private actor CiGatewayConnection {
     private func send(_ command: CoalescedCommand) async throws {
         switch command {
         case let .volume(room, group, value):
-            try await sendCommand(room: room, requestPath: "/room/state/set") { session, tag in
-                CiGateway.RoomStateCommand(
+            try await sendCommand(room: room, requestPath: "/V2/volume/set_vol") { session, tag in
+                V2VolumeSetVolPostRequest(
                     tag: tag,
-                    room: room,
                     session: session,
-                    group: group,
-                    mute: nil,
-                    volume: value
+                    room: room,
+                    volume: value,
+                    group: group
                 )
             }
         case let .mute(room, group, value):
-            try await sendCommand(room: room, requestPath: "/room/state/set") { session, tag in
-                CiGateway.RoomStateCommand(
+            try await sendCommand(room: room, requestPath: "/V2/volume/set_mute") { session, tag in
+                V2VolumeSetMutePostRequest(
                     tag: tag,
-                    room: room,
                     session: session,
-                    group: group,
+                    room: room,
                     mute: value,
-                    volume: nil
+                    group: group
                 )
             }
         }
@@ -1160,7 +1156,7 @@ private actor CiGatewayConnection {
                 Task {
                     do {
                         CiGateway.logger.debug("Sending command \(tag, privacy: .public) for \(requestPath, privacy: .public)")
-                        try await CiGateway.send(command, on: socket)
+                        try await CiGateway.send(command, requestPath: requestPath, on: socket)
                     } catch {
                         self.failPendingCommand(tag: tag, throwing: error)
                     }
@@ -1217,27 +1213,27 @@ private actor CiGatewayConnection {
 }
 
 private extension CiGateway.NowPlaying.TransportState {
-    init(_ transportState: RoomPlayState.TransportState) {
-        switch transportState {
-        case .stop:
+    init(_ transportState: String) {
+        switch transportState.lowercased() {
+        case "stop", "stopped":
             self = .stop
-        case .play:
+        case "play", "playing":
             self = .play
-        case .pause:
+        case "pause", "paused":
             self = .pause
-        case .buffering:
+        case "buffering":
             self = .buffering
-        case .waiting:
+        case "waiting":
             self = .waiting
-        case .unknown:
+        default:
             self = .unknown
         }
     }
 }
 
 private extension CiGateway.NowPlaying.Playback {
-    init?(playState: RoomPlayState) {
-        guard let transportState = playState.transportState.map(CiGateway.NowPlaying.TransportState.init) else {
+    init?(response: V2TransportStatusResponse) {
+        guard let transportState = response.data?.transportState.map(CiGateway.NowPlaying.TransportState.init) else {
             return nil
         }
 
@@ -1246,12 +1242,23 @@ private extension CiGateway.NowPlaying.Playback {
 }
 
 private extension CiGateway.NowPlaying.Queue {
-    init?(playState: RoomPlayState) {
-        guard playState.queueIndex != nil || playState.queueLength != nil else {
+    init?(playlist: CiGateway.NowPlaying.Playlist) {
+        let selectedIndex = playlist.items.first { $0.isCurrent }?.index
+        guard selectedIndex != nil || playlist.total != nil else {
             return nil
         }
 
-        self.init(index: playState.queueIndex, length: playState.queueLength)
+        self.init(index: selectedIndex, length: playlist.total)
+    }
+}
+
+private extension CiGateway.NowPlaying.RoomState {
+    init?(response: V2VolumeStatusResponse) {
+        guard let data = response.data, data.volume != nil || data.mute != nil else {
+            return nil
+        }
+
+        self.init(volume: data.volume, isMuted: data.mute)
     }
 }
 
@@ -1282,71 +1289,59 @@ private extension CiGateway.NowPlaying.PlaylistItem {
             album: metadata.album,
             artist: metadata.artist?.joined(separator: ", "),
             duration: metadata.duration,
-            artworkURL: metadata.artUri.flatMap(URL.init(string:))
+            artworkURL: metadata.artUri.flatMap(URL.init(string:)),
+            isCurrent: metadata.playing == true || metadata.selected == true
         )
     }
 }
 
 private extension CiGateway.NowPlaying.CurrentItem {
-    init?(metadata: ItemMetaData?, trackMetadata: ItemMetaDataTrack?) {
-        guard let metadata else {
+    init?(response: V2MetadataStatusResponse) {
+        guard let metadata = response.metadata else {
             return nil
         }
 
+        let id = metadata.artUri ?? metadata.line1 ?? response.room ?? "current"
         self.init(
-            id: metadata.id,
-            kind: metadata._class,
-            displayName: metadata.name,
+            id: id,
+            kind: "metadata",
+            displayName: metadata.line1,
             artworkURL: metadata.artUri.flatMap(URL.init(string:)),
-            track: CiGateway.NowPlaying.Track(trackMetadata: trackMetadata)
+            track: CiGateway.NowPlaying.Track(metadata: metadata)
         )
     }
 }
 
 private extension CiGateway.NowPlaying.Track {
-    init?(trackMetadata: ItemMetaDataTrack?) {
+    init?(metadata: V2MetadataStatusData?) {
         guard
-            let trackMetadata,
-            trackMetadata.title != nil || trackMetadata.album != nil || trackMetadata.artist != nil
+            let metadata,
+            metadata.line1 != nil || metadata.line2 != nil || metadata.line3 != nil
         else {
             return nil
         }
 
         self.init(
-            title: trackMetadata.title,
-            album: trackMetadata.album,
-            artist: trackMetadata.artist?.joined(separator: ", ")
+            title: metadata.line1,
+            album: metadata.line3,
+            artist: metadata.line2
         )
     }
 }
 
 private extension CiGateway.NowPlaying.Timeline {
-    init?(playState: RoomPlayState, duration: Int?) {
-        let seekableRange = CiGateway.NowPlaying.SeekableRange(
-            lowerBound: playState.positionMin,
-            upperBound: playState.positionMax
-        )
-        let hasSeekableRange = seekableRange.lowerBound != nil || seekableRange.upperBound != nil
-        guard playState.position != nil || duration != nil || hasSeekableRange else {
+    init?(response: V2SeekStatusResponse) {
+        guard let seek = response.data, seek.elapsed != nil || seek.duration != nil || seek.seekable != nil else {
             return nil
         }
 
+        let seekableRange = seek.seekable == true
+            ? CiGateway.NowPlaying.SeekableRange(lowerBound: 0, upperBound: seek.duration)
+            : nil
         self.init(
-            position: playState.position,
-            duration: duration,
-            seekableRange: hasSeekableRange ? seekableRange : nil
-        )
-    }
-
-    init(position: RoomPlayStatePositionResponseData) {
-        let seekableRange = CiGateway.NowPlaying.SeekableRange(
-            lowerBound: position.positionMin,
-            upperBound: position.positionMax
-        )
-        let hasSeekableRange = seekableRange.lowerBound != nil || seekableRange.upperBound != nil
-        self.init(
-            position: position.position,
-            seekableRange: hasSeekableRange ? seekableRange : nil
+            position: seek.elapsed,
+            duration: seek.duration,
+            seekableRange: seekableRange
         )
     }
 
@@ -1363,14 +1358,11 @@ private extension CiGateway.NowPlaying.Timeline {
 private extension CiGateway.NowPlaying {
     mutating func merge(_ update: CiGateway.NowPlayingUpdate) {
         switch update {
-        case let .playState(room, session, playback, queue, currentItem, timeline):
+        case let .transport(room, session, playback):
             mergeContext(room: room, session: session)
             self.playback = playback
-            self.queue = queue
-            self.currentItem = currentItem
-            self.timeline = timeline
 
-        case let .position(room, session, timeline):
+        case let .seek(room, session, timeline):
             mergeContext(room: room, session: session)
             if self.timeline == nil {
                 self.timeline = timeline
@@ -1378,13 +1370,20 @@ private extension CiGateway.NowPlaying {
                 self.timeline?.mergePosition(timeline)
             }
 
-        case let .roomState(room, session, roomState):
+        case let .metadata(room, session, currentItem):
+            mergeContext(room: room, session: session)
+            self.currentItem = currentItem
+
+        case let .volume(room, session, roomState):
             mergeContext(room: room, session: session)
             self.roomState = roomState
 
         case let .playlist(room, session, playlist):
             mergeContext(room: room, session: session)
             self.playlist = playlist
+            if let queue = CiGateway.NowPlaying.Queue(playlist: playlist) {
+                self.queue = queue
+            }
         }
     }
 
