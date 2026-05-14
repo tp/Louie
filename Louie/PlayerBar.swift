@@ -59,14 +59,22 @@ public struct PlayerBar: View {
                         Text(song.title)
                             .font(.caption.bold())
                             .lineLimit(1)
-                            .animatedTextChange(id: song.title, limitFrame: isExpanded)
+                            .animatedTextChange(
+                                id: song.title,
+                                direction: state.songTransitionDirection,
+                                limitFrame: isExpanded
+                            )
 
                         if let artist = song.artist {
                             Text(artist)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                                .animatedTextChange(id: artist, limitFrame: isExpanded)
+                                .animatedTextChange(
+                                    id: artist,
+                                    direction: state.songTransitionDirection,
+                                    limitFrame: isExpanded
+                                )
                         }
                     }
                     .clipped()
@@ -75,14 +83,22 @@ public struct PlayerBar: View {
                         Text(statusTitle)
                             .font(.caption.bold())
                             .lineLimit(1)
-                            .animatedTextChange(id: statusTitle, limitFrame: isExpanded)
+                            .animatedTextChange(
+                                id: statusTitle,
+                                direction: state.songTransitionDirection,
+                                limitFrame: isExpanded
+                            )
 
                         if let statusSubtitle {
                             Text(statusSubtitle)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                                .animatedTextChange(id: statusSubtitle, limitFrame: isExpanded)
+                                .animatedTextChange(
+                                    id: statusSubtitle,
+                                    direction: state.songTransitionDirection,
+                                    limitFrame: isExpanded
+                                )
                         }
                     }
                     .clipped()
@@ -168,13 +184,20 @@ public struct PlayerBar: View {
 }
 
 extension View {
-    func animatedTextChange(id: some Hashable, limitFrame: Bool) -> some View {
-        self
+    func animatedTextChange(
+        id: some Hashable,
+        direction: Linn.SongTransitionDirection,
+        limitFrame: Bool
+    ) -> some View {
+        let insertionEdge: Edge = direction == .forward ? .trailing : .leading
+        let removalEdge: Edge = direction == .forward ? .leading : .trailing
+
+        return self
             .id(id)
             .transition(
                 .asymmetric(
-                    insertion: .move(edge: .trailing).combined(with: .opacity),
-                    removal: .move(edge: .leading) // no opacity here, else it disappears right away
+                    insertion: .move(edge: insertionEdge).combined(with: .opacity),
+                    removal: .move(edge: removalEdge) // no opacity here, else it disappears right away
                 )
             )
             .animation(.snappy(duration: 0.35), value: id)

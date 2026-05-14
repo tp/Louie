@@ -45,6 +45,11 @@ public final class Linn {
         case buffering
     }
 
+    public enum SongTransitionDirection: Sendable, Equatable {
+        case forward
+        case backward
+    }
+
     public struct Song: Sendable, Equatable, Identifiable {
         public var id: String
         public var title: String
@@ -86,12 +91,14 @@ public final class Linn {
     public let maximumVolume: Int
     public private(set) var connectionState: ConnectionState = .idle
     public private(set) var currentSong: Song?
+    public private(set) var previousSongs: [Song] = []
     public private(set) var upcomingSongs: [Song] = []
     public private(set) var playState: PlayState?
     public private(set) var volume: Int?
     public private(set) var isMuted: Bool?
     public private(set) var timeline: Timeline?
     public private(set) var lastErrorMessage: String?
+    public private(set) var songTransitionDirection: SongTransitionDirection = .forward
 
     public var hasPrevious: Bool {
         guard let queueIndex else {
@@ -111,6 +118,7 @@ public final class Linn {
     private var configurationLoadAttempted = false
     private var queueIndex: Int?
     private var queueLength: Int?
+    private var playlistContentRevision: Int?
     private var playlistSongs: [Int: Song] = [:]
     private var optimisticTransition: OptimisticTransition?
     private var optimisticPlayState: OptimisticPlayState?
@@ -167,10 +175,12 @@ public final class Linn {
             maximumVolume: Int = 70,
             connectionState: ConnectionState = .connected,
             currentSong: Song? = nil,
+            previousSongs: [Song] = [],
             playState: PlayState? = nil,
             volume: Int? = nil,
             isMuted: Bool? = nil,
             timeline: Timeline? = nil,
+            songTransitionDirection: SongTransitionDirection = .forward,
             hasPrevious: Bool = false,
             hasNext: Bool = false,
             lastErrorMessage: String? = nil
@@ -179,10 +189,12 @@ public final class Linn {
             self.maximumVolume = maximumVolume
             self.connectionState = connectionState
             self.currentSong = currentSong
+            self.previousSongs = previousSongs
             self.playState = playState
             self.volume = volume
             self.isMuted = isMuted
             self.timeline = timeline
+            self.songTransitionDirection = songTransitionDirection
             self.lastErrorMessage = lastErrorMessage
             ciGateway = nil
             configurationLoadAttempted = true
@@ -281,6 +293,8 @@ public final class Linn {
         guard hasPrevious else {
             return
         }
+        songTransitionDirection = .backward
+        optimisticallyMoveToSong(offset: -1)
         performControl { ciGateway, room in
             try await ciGateway.previous(room: room)
         }
@@ -290,7 +304,8 @@ public final class Linn {
         guard hasNext else {
             return
         }
-        optimisticallyAdvanceToNextSong()
+        songTransitionDirection = .forward
+        optimisticallyMoveToSong(offset: 1)
         performControl { ciGateway, room in
             try await ciGateway.next(room: room)
         }
@@ -317,48 +332,64 @@ public final class Linn {
         playState = reconciledPlayState(incoming: PlayState(update.playback))
         queueLength = update.queue?.length ?? queueLength
         if let playlist = update.playlist {
-            playlistSongs = Dictionary(
-                uniqueKeysWithValues: playlist.items.compactMap { item in
-                    Song(item).map { (item.index, $0) }
-                }
-            )
+            if let contentRevision = playlist.contentRevision, contentRevision != playlistContentRevision {
+                playlistSongs = [:]
+                playlistContentRevision = contentRevision
+            }
+
+            for item in playlist.items {
+                playlistSongs[item.index] = Song(item)
+            }
         }
 
         if !suppressNowPlayingFields {
-            currentSong = Song(update.currentItem)
+            updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
+            let incomingCurrentSong = Song(update.currentItem)
+            currentSong = incomingCurrentSong
+            if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
+                playlistSongs[incomingQueueIndex] = incomingCurrentSong
+            }
             queueIndex = update.queue?.index
             timeline = Timeline(update.timeline)
         }
 
-        updateUpcomingSongs()
+        updateAdjacentSongs()
         volume = update.roomState?.volume.map { min($0, maximumVolume) }
         isMuted = update.roomState?.isMuted
     }
 
-    private func optimisticallyAdvanceToNextSong() {
+    private func optimisticallyMoveToSong(offset: Int) {
         guard let queueIndex else {
             timeline = nil
             return
         }
 
-        let targetQueueIndex = queueIndex + 1
+        let targetQueueIndex = queueIndex + offset
         optimisticTransition = OptimisticTransition(
             targetQueueIndex: targetQueueIndex,
             expiresAt: Date().addingTimeInterval(4)
         )
 
-        guard let nextSong = playlistSongs[targetQueueIndex] else {
+        guard let targetSong = playlistSongs[targetQueueIndex] else {
             currentSong = nil
             self.queueIndex = targetQueueIndex
             timeline = nil
-            updateUpcomingSongs()
+            updateAdjacentSongs()
             return
         }
 
-        currentSong = nextSong
+        currentSong = targetSong
         self.queueIndex = targetQueueIndex
         timeline = nil
-        updateUpcomingSongs()
+        updateAdjacentSongs()
+    }
+
+    private func updateSongTransitionDirection(incomingQueueIndex: Int?) {
+        guard let queueIndex, let incomingQueueIndex, queueIndex != incomingQueueIndex else {
+            return
+        }
+
+        songTransitionDirection = incomingQueueIndex > queueIndex ? .forward : .backward
     }
 
     private func shouldSuppressNowPlayingFields(incomingQueueIndex: Int?) -> Bool {
@@ -397,11 +428,17 @@ public final class Linn {
         return optimisticPlayState.targetState
     }
 
-    private func updateUpcomingSongs() {
+    private func updateAdjacentSongs() {
         guard let queueIndex else {
+            previousSongs = []
             upcomingSongs = []
             return
         }
+
+        previousSongs = playlistSongs
+            .filter { index, _ in index < queueIndex }
+            .sorted { $0.key > $1.key }
+            .map(\.value)
 
         upcomingSongs = playlistSongs
             .filter { index, _ in index > queueIndex }

@@ -27,7 +27,10 @@ let package = Package(
         ),
         .testTarget(
             name: "LinnTests",
-            dependencies: ["Linn"]
+            dependencies: [
+                "Linn",
+                .product(name: "LinnCiGateway", package: "LinnCiGateway"),
+            ]
         ),
     ],
     swiftLanguageModes: [.v6]
