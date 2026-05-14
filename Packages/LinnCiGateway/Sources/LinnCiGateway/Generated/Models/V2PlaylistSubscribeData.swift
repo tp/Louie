@@ -18,9 +18,10 @@ internal struct V2PlaylistSubscribeData: Sendable, Codable, Hashable {
     internal var count: Int?
     /** Total number of children that are available to be fetched. */
     internal var total: Int?
-    internal var children: V2PlaylistBrowseIndex?
+    /** Index of a position in a rooms playlist and the item metadata it contains. */
+    internal var children: [String: V2PlaylistItemMetadata]?
 
-    internal init(contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: V2PlaylistBrowseIndex? = nil) {
+    internal init(contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [String: V2PlaylistItemMetadata]? = nil) {
         self.contentRevision = contentRevision
         self.index = index
         self.count = count

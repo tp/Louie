@@ -14,9 +14,9 @@ internal struct TitleAlbumArtist: Sendable, Codable, Hashable {
     /** Album name */
     internal var album: String?
     /** Artist name */
-    internal var artist: String?
+    internal var artist: [String]?
 
-    internal init(title: String? = nil, album: String? = nil, artist: String? = nil) {
+    internal init(title: String? = nil, album: String? = nil, artist: [String]? = nil) {
         self.title = title
         self.album = album
         self.artist = artist

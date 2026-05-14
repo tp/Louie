@@ -12,21 +12,13 @@ internal struct ItemMetaDataAlbum: Sendable, Codable, Hashable {
 
     /** Track title */
     internal var title: String?
-    /** Album name */
-    internal var album: String?
-    /** Artist name */
-    internal var artist: String?
 
-    internal init(title: String? = nil, album: String? = nil, artist: String? = nil) {
+    internal init(title: String? = nil) {
         self.title = title
-        self.album = album
-        self.artist = artist
     }
 
     internal enum CodingKeys: String, CodingKey, CaseIterable {
         case title
-        case album
-        case artist
     }
 
     // Encodable protocol methods
@@ -34,8 +26,6 @@ internal struct ItemMetaDataAlbum: Sendable, Codable, Hashable {
     internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(title, forKey: .title)
-        try container.encodeIfPresent(album, forKey: .album)
-        try container.encodeIfPresent(artist, forKey: .artist)
     }
 }
 

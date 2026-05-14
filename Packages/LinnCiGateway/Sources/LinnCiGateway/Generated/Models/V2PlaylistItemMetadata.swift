@@ -22,16 +22,25 @@ internal struct V2PlaylistItemMetadata: Sendable, Codable, Hashable {
     internal var name: String?
     /** URL for associated logo/album art for item. Can be null. */
     internal var artUri: String?
+    /** Album name */
+    internal var album: String?
+    /** Artist name */
+    internal var artist: [String]?
+    /** Duration of the item in seconds. 0 if unknown */
+    internal var duration: Int?
     /** List of action ids of actions that are valid for this item's class but which this particular item does not currently support (e.g. can't favourite a curerntly favourited item).  */
     internal var disabledActions: [String]?
 
-    internal init(_class: String, buffering: Bool? = nil, playing: Bool? = nil, selected: Bool? = nil, name: String? = nil, artUri: String? = nil, disabledActions: [String]? = nil) {
+    internal init(_class: String, buffering: Bool? = nil, playing: Bool? = nil, selected: Bool? = nil, name: String? = nil, artUri: String? = nil, album: String? = nil, artist: [String]? = nil, duration: Int? = nil, disabledActions: [String]? = nil) {
         self._class = _class
         self.buffering = buffering
         self.playing = playing
         self.selected = selected
         self.name = name
         self.artUri = artUri
+        self.album = album
+        self.artist = artist
+        self.duration = duration
         self.disabledActions = disabledActions
     }
 
@@ -42,6 +51,9 @@ internal struct V2PlaylistItemMetadata: Sendable, Codable, Hashable {
         case selected
         case name
         case artUri = "art_uri"
+        case album
+        case artist
+        case duration
         case disabledActions
     }
 
@@ -55,6 +67,9 @@ internal struct V2PlaylistItemMetadata: Sendable, Codable, Hashable {
         try container.encodeIfPresent(selected, forKey: .selected)
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(artUri, forKey: .artUri)
+        try container.encodeIfPresent(album, forKey: .album)
+        try container.encodeIfPresent(artist, forKey: .artist)
+        try container.encodeIfPresent(duration, forKey: .duration)
         try container.encodeIfPresent(disabledActions, forKey: .disabledActions)
     }
 }

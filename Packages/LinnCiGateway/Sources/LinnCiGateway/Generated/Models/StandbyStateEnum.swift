@@ -9,7 +9,7 @@ import Foundation
 
 /** The standby state of a room. */
 internal enum StandbyStateEnum: String, Sendable, Codable, CaseIterable {
-    case _false = "false"
+    case off = "OFF"
     case mixed = "MIXED"
-    case _true = "true"
+    case on = "ON"
 }

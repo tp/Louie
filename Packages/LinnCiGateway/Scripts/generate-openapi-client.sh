@@ -20,6 +20,21 @@ mkdir -p "$(dirname "${SPEC_PATH}")" "${WORK_DIR}"
 echo "Downloading OpenAPI document from ${SPEC_URL}"
 curl --fail --location --silent --show-error "${SPEC_URL}" --output "${SPEC_PATH}"
 
+# YAML 1.1 parsers treat unquoted ON/OFF as booleans. The Linn spec uses
+# those strings for StandbyStateEnum, so normalize them before generation.
+perl -0pi -e 's/^([[:space:]]*-[[:space:]]*)(OFF|MIXED|ON)[[:space:]]*$/$1"$2"/mg; s/^([[:space:]]*standbyState:[[:space:]]*)(OFF|MIXED|ON)[[:space:]]*$/$1"$2"/mg' "${SPEC_PATH}"
+
+# The live gateway sends track artists as an array of strings, even though the
+# published schema currently says the field is a single string.
+perl -0pi -e 's/(      artist:\r?\n)        type: string\r?\n(        description: Artist name\r?\n)/$1        type: array\n        items:\n          type: string\n$2/g' "${SPEC_PATH}"
+
+# Playlist children are returned as an object keyed by playlist index, not as a
+# literal "index" property.
+perl -0pi -e "s~  V2PlaylistBrowseIndex:\r?\n    type: object\r?\n    description: Index of a position in a rooms playlist and the item metadata it contains\.\r?\n    properties:\r?\n      index:\r?\n        \\\$ref: '#/definitions/V2PlaylistItemMetadata'\r?\n~  V2PlaylistBrowseIndex:\n    type: object\n    description: Index of a position in a rooms playlist and the item metadata it contains.\n    additionalProperties:\n      \\\$ref: '#/definitions/V2PlaylistItemMetadata'\n~g" "${SPEC_PATH}"
+
+# Playlist item metadata includes track details in live responses.
+perl -0pi -e 's/(      art_uri:\r?\n        type: string\r?\n        description: URL for associated logo\/album art for item\. Can be null\.\r?\n)(      disabledActions:\r?\n)/$1      album:\n        type: string\n        description: Album name\n      artist:\n        type: array\n        items:\n          type: string\n        description: Artist name\n      duration:\n        type: integer\n        format: int32\n        description: Duration of the item in seconds. 0 if unknown\n$2/g' "${SPEC_PATH}"
+
 rm -rf "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 

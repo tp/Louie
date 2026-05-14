@@ -24,18 +24,18 @@ internal struct ItemMetaDataTrack: Sendable, Codable, Hashable {
     internal var name: String?
     /** URL for associated logo/album art for item. Can be null. */
     internal var artUri: String?
+    /** Album name */
+    internal var album: String?
+    /** Artist name */
+    internal var artist: [String]?
+    /** Duration of the item in seconds. 0 if unknown */
+    internal var duration: Int?
     /** List of action ids of actions that are valid for this item's class but which this particular item does not currently support (e.g. can't favourite a curerntly favourited item).  */
     internal var disabledActions: [String]?
     /** Track title */
     internal var title: String?
-    /** Album name */
-    internal var album: String?
-    /** Artist name */
-    internal var artist: String?
-    /** Duration of the item in seconds. 0 if unknown */
-    internal var duration: Int?
 
-    internal init(id: String, _class: String, buffering: Bool? = nil, playing: Bool? = nil, selected: Bool? = nil, name: String? = nil, artUri: String? = nil, disabledActions: [String]? = nil, title: String? = nil, album: String? = nil, artist: String? = nil, duration: Int? = nil) {
+    internal init(id: String, _class: String, buffering: Bool? = nil, playing: Bool? = nil, selected: Bool? = nil, name: String? = nil, artUri: String? = nil, album: String? = nil, artist: [String]? = nil, duration: Int? = nil, disabledActions: [String]? = nil, title: String? = nil) {
         self.id = id
         self._class = _class
         self.buffering = buffering
@@ -43,11 +43,11 @@ internal struct ItemMetaDataTrack: Sendable, Codable, Hashable {
         self.selected = selected
         self.name = name
         self.artUri = artUri
-        self.disabledActions = disabledActions
-        self.title = title
         self.album = album
         self.artist = artist
         self.duration = duration
+        self.disabledActions = disabledActions
+        self.title = title
     }
 
     internal enum CodingKeys: String, CodingKey, CaseIterable {
@@ -58,11 +58,11 @@ internal struct ItemMetaDataTrack: Sendable, Codable, Hashable {
         case selected
         case name
         case artUri = "art_uri"
-        case disabledActions
-        case title
         case album
         case artist
         case duration
+        case disabledActions
+        case title
     }
 
     // Encodable protocol methods
@@ -76,11 +76,11 @@ internal struct ItemMetaDataTrack: Sendable, Codable, Hashable {
         try container.encodeIfPresent(selected, forKey: .selected)
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(artUri, forKey: .artUri)
-        try container.encodeIfPresent(disabledActions, forKey: .disabledActions)
-        try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(album, forKey: .album)
         try container.encodeIfPresent(artist, forKey: .artist)
         try container.encodeIfPresent(duration, forKey: .duration)
+        try container.encodeIfPresent(disabledActions, forKey: .disabledActions)
+        try container.encodeIfPresent(title, forKey: .title)
     }
 }
 

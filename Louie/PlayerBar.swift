@@ -5,10 +5,11 @@
 //  Created by Timm Preetz on 12.05.26.
 //
 
+import Linn
 import SwiftUI
 
 public struct PlayerBar: View {
-    var state: PlayerState
+    var state: Linn
 
     @State var isExpanded = true
 
@@ -44,7 +45,7 @@ public struct PlayerBar: View {
     @ViewBuilder
     var currentSong: some View {
         HStack {
-            AsyncImage(url: state.currentSong?.artwork) { image in
+            AsyncImage(url: state.currentSong?.artworkURL) { image in
                 image.resizable()
             } placeholder: {
                 Color.gray
@@ -60,11 +61,29 @@ public struct PlayerBar: View {
                             .lineLimit(1)
                             .animatedTextChange(id: song.title, limitFrame: isExpanded)
 
-                        Text(song.artist)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        if let artist = song.artist {
+                            Text(artist)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .animatedTextChange(id: artist, limitFrame: isExpanded)
+                        }
+                    }
+                    .clipped()
+                } else {
+                    VStack(alignment: .leading) {
+                        Text(statusTitle)
+                            .font(.caption.bold())
                             .lineLimit(1)
-                            .animatedTextChange(id: song.artist, limitFrame: isExpanded)
+                            .animatedTextChange(id: statusTitle, limitFrame: isExpanded)
+
+                        if let statusSubtitle {
+                            Text(statusSubtitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .animatedTextChange(id: statusSubtitle, limitFrame: isExpanded)
+                        }
                     }
                     .clipped()
                 }
@@ -81,9 +100,9 @@ public struct PlayerBar: View {
 
             Group {
                 if let playState = state.playState {
-                    if playState == .paused || playState == .playing {
+                    switch playState {
+                    case .playing, .paused, .stopped:
                         let symbolName = playState == .playing ? "pause.fill" : "play.fill"
-
                         Button {
                             state.playPause()
 
@@ -94,7 +113,7 @@ public struct PlayerBar: View {
                         .contentTransition(.symbolEffect(.replace))
                         .transition(.opacity.combined(with: .scale(scale: 0.85)))
 
-                    } else {
+                    case .loading, .buffering:
                         ProgressView().controlSize(.small)
                             .transition(.opacity.combined(with: .scale(scale: 0.85)))
                     }
@@ -116,6 +135,36 @@ public struct PlayerBar: View {
             // ignored; taps on disabled buttons should not collapse the bar
         }
     }
+
+    private var statusTitle: String {
+        switch state.connectionState {
+        case .idle:
+            "No song"
+        case .connecting:
+            "Connecting"
+        case .connected:
+            "No song"
+        case .failed:
+            "Linn unavailable"
+        }
+    }
+
+    private var statusSubtitle: String? {
+        if let message = state.lastErrorMessage {
+            return message
+        }
+
+        switch state.connectionState {
+        case .idle:
+            return nil
+        case .connecting:
+            return "Waiting for gateway"
+        case .connected:
+            return "No now playing info"
+        case let .failed(message):
+            return message
+        }
+    }
 }
 
 extension View {
@@ -125,8 +174,8 @@ extension View {
             .transition(
                 .asymmetric(
                     insertion: .move(edge: .trailing).combined(with: .opacity),
-                    removal: .move(edge: .leading), // no opacity here, else it disappears right away
-                ),
+                    removal: .move(edge: .leading) // no opacity here, else it disappears right away
+                )
             )
             .animation(.snappy(duration: 0.35), value: id)
             .frame(maxWidth: limitFrame ? 300 : nil, alignment: .leading)
@@ -136,29 +185,15 @@ extension View {
 // MARK: - Previews
 
 #if DEBUG
-    extension PlayerState {
-        static func empty() -> PlayerState {
-            PlayerState()
-        }
-
-        static func playing() -> PlayerState {
-            let state = PlayerState()
-            state.currentSong = Song(title: "Chainsmoking", artist: "Jacob Banks", artwork: URL(string: "https://static.qobuz.com/images/covers/mb/x1/brogg6xqdx1mb_230.jpg"))
-            state.hasNext = true
-            state.playState = .playing
-            return state
-        }
-    }
-
     private struct PlayerBarHarness: View {
-        var playerState: PlayerState
+        var linn: Linn
 
         var body: some View {
             ZStack(alignment: .bottom) {
                 background
 
                 PlayerBar(
-                    state: playerState,
+                    state: linn
                 )
                 .padding(.bottom, 50)
                 .padding(.horizontal, 50)
@@ -175,18 +210,30 @@ extension View {
                     Color.white,
                 ],
                 startPoint: .topLeading,
-                endPoint: .bottomTrailing,
+                endPoint: .bottomTrailing
             )
             .ignoresSafeArea()
         }
     }
 
     #Preview("Empty") {
-        PlayerBarHarness(playerState: .empty())
+        PlayerBarHarness(linn: Linn(mockRoom: "Main Room"))
     }
 
     #Preview("Playing") {
-        PlayerBarHarness(playerState: .playing())
+        PlayerBarHarness(
+            linn: Linn(
+                mockRoom: "Main Room",
+                currentSong: Linn.Song(
+                    id: "chainsmoking",
+                    title: "Chainsmoking",
+                    artist: "Jacob Banks",
+                    artworkURL: URL(string: "https://static.qobuz.com/images/covers/mb/x1/brogg6xqdx1mb_230.jpg")
+                ),
+                playState: .playing,
+                hasNext: true
+            )
+        )
     }
 
 #endif

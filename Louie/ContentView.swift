@@ -5,12 +5,23 @@
 //  Created by Timm Preetz on 12.05.26.
 //
 
+import Linn
 import SwiftData
 import SwiftUI
 
 struct ContentView: View {
+    @State private var linn = Linn()
+
+    var body: some View {
+        ContentViewBody(linn: linn)
+    }
+}
+
+private struct ContentViewBody: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var items: [Item]
+
+    var linn: Linn
 
     var body: some View {
         NavigationSplitView {
@@ -38,8 +49,14 @@ struct ContentView: View {
             Text("Select an item")
         }
         .safeAreaInset(edge: .bottom) {
-            PlayerBar(state: .playing())
+            PlayerBar(state: linn)
                 .padding(.horizontal, 50)
+        }
+        .task {
+            linn.start()
+        }
+        .onDisappear {
+            linn.stop()
         }
     }
 
@@ -59,7 +76,27 @@ struct ContentView: View {
     }
 }
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
-}
+#if DEBUG
+    private struct ContentViewPreview: View {
+        @State private var linn = Linn(
+            mockRoom: "Main Room",
+            currentSong: Linn.Song(
+                id: "chainsmoking",
+                title: "Chainsmoking",
+                artist: "Jacob Banks",
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/mb/x1/brogg6xqdx1mb_230.jpg")
+            ),
+            playState: .playing,
+            hasNext: true
+        )
+
+        var body: some View {
+            ContentViewBody(linn: linn)
+        }
+    }
+
+    #Preview {
+        ContentViewPreview()
+            .modelContainer(for: Item.self, inMemory: true)
+    }
+#endif
