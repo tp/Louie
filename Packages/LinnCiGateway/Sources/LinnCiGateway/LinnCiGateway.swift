@@ -189,8 +189,8 @@ public final class CiGateway: Sendable {
     public let userAgent: String
     public let sessionTimeout: Int
 
-    private let urlSession: URLSession
-    private static let logger = Logger(subsystem: "Louie.LinnCiGateway", category: "CiGateway")
+    private let connection: CiGatewayConnection
+    fileprivate static let logger = Logger(subsystem: "Louie.LinnCiGateway", category: "CiGateway")
 
     public init(
         webSocketURL: URL,
@@ -201,7 +201,19 @@ public final class CiGateway: Sendable {
         self.webSocketURL = webSocketURL
         self.userAgent = userAgent
         self.sessionTimeout = sessionTimeout
-        self.urlSession = urlSession
+        connection = CiGatewayConnection(
+            webSocketURL: webSocketURL,
+            userAgent: userAgent,
+            sessionTimeout: sessionTimeout,
+            urlSession: urlSession
+        )
+    }
+
+    deinit {
+        let connection = connection
+        Task {
+            await connection.close()
+        }
     }
 
     public convenience init(
@@ -222,84 +234,35 @@ public final class CiGateway: Sendable {
         room: String? = nil,
         updateInterval: Int = 1
     ) -> AsyncThrowingStream<NowPlaying, Error> {
-        let webSocketURL = webSocketURL
-        let userAgent = userAgent
-        let sessionTimeout = sessionTimeout
-        let urlSession = urlSession
-
-        return AsyncThrowingStream { continuation in
-            let socket = urlSession.webSocketTask(with: webSocketURL)
-            let task = Task {
-                do {
-                    Self.logger.info("Opening websocket \(webSocketURL.absoluteString, privacy: .public)")
-                    socket.resume()
-
-                    Self.logger.info("Creating gateway session")
-                    let session = try await Self.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent)
-                    Self.logger.info("Gateway session created \(session, privacy: .public)")
-
-                    let room = try await Self.resolveRoom(preferredRoom: room, session: session, timeout: sessionTimeout, on: socket)
-                    Self.logger.info("Using Linn room \(room, privacy: .public)")
-
-                    try await Self.subscribeToPlayState(room: room, session: session, updateInterval: updateInterval, on: socket)
-                    try await Self.subscribeToPosition(room: room, session: session, updateInterval: updateInterval, on: socket)
-                    try await Self.subscribeToRoomState(room: room, session: session, updateInterval: updateInterval, on: socket)
-                    try await Self.subscribeToPlaylist(room: room, session: session, on: socket)
-                    Self.logger.info("Subscribed to now-playing updates for \(room, privacy: .public)")
-
-                    var current = NowPlaying(room: room, session: session)
-                    continuation.yield(current)
-
-                    while !Task.isCancelled {
-                        let message = try await Self.receiveText(from: socket)
-                        guard let update = try Self.decodeNowPlayingUpdate(from: message) else {
-                            continue
-                        }
-                        current.merge(update)
-                        continuation.yield(current)
-                    }
-
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-
-                socket.cancel(with: .goingAway, reason: nil)
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-                socket.cancel(with: .goingAway, reason: nil)
-            }
-        }
+        connection.nowPlayingEvents(room: room, updateInterval: updateInterval)
     }
 
     public func play(room: String) async throws {
-        try await sendRoomPlayStateCommand(room: room, action: .play)
+        try await connection.play(room: room)
     }
 
     public func pause(room: String) async throws {
-        try await sendRoomPlayStateCommand(room: room, action: .pause)
+        try await connection.pause(room: room)
     }
 
     public func previous(room: String) async throws {
-        try await sendRoomPlayStateCommand(room: room, skipTrack: -1)
+        try await connection.previous(room: room)
     }
 
     public func next(room: String) async throws {
-        try await sendRoomPlayStateCommand(room: room, skipTrack: 1)
+        try await connection.next(room: room)
     }
 
     public func selectPlaylistItem(at index: Int, room: String) async throws {
-        try await sendPlaylistSelectCommand(room: room, index: index)
+        try await connection.selectPlaylistItem(at: index, room: room)
     }
 
     public func setVolume(_ volume: Int, room: String, group: Bool = true) async throws {
-        try await sendRoomStateCommand(room: room, group: group, volume: max(0, min(100, volume)))
+        try await connection.setVolume(max(0, min(100, volume)), room: room, group: group)
     }
 
     public func setMuted(_ isMuted: Bool, room: String, group: Bool = true) async throws {
-        try await sendRoomStateCommand(room: room, group: group, mute: isMuted)
+        try await connection.setMuted(isMuted, room: room, group: group)
     }
 }
 
@@ -312,6 +275,7 @@ private extension CiGateway {
 
     struct SubscriptionRequest: Encodable {
         var requestPath: String
+        var tag: String
         var room: String
         var session: String
         var update: Int
@@ -326,6 +290,7 @@ private extension CiGateway {
 
     struct GatewayEnvelope: Decodable {
         var requestPath: String?
+        var tag: String?
     }
 
     enum NowPlayingUpdate {
@@ -361,6 +326,7 @@ private extension CiGateway {
 
     struct RoomPlayStateCommand: Encodable {
         var requestPath = "/room/play_state/set"
+        var tag: String
         var room: String
         var session: String
         var action: PlayStateAction?
@@ -368,6 +334,7 @@ private extension CiGateway {
 
         enum CodingKeys: String, CodingKey {
             case requestPath
+            case tag
             case room
             case session
             case action
@@ -377,6 +344,7 @@ private extension CiGateway {
 
     struct RoomStateCommand: Encodable {
         var requestPath = "/room/state/set"
+        var tag: String
         var room: String
         var session: String
         var group: Bool?
@@ -386,6 +354,7 @@ private extension CiGateway {
 
     struct PlaylistSelectCommand: Encodable {
         var requestPath = "/V2/playlist/select"
+        var tag: String
         var room: String
         var session: String
         var index: Int
@@ -393,6 +362,7 @@ private extension CiGateway {
 
     struct PlaylistSubscriptionRequest: Encodable {
         var requestPath = "/V2/playlist/subscribe"
+        var tag: String
         var room: String
         var session: String
         var index = 0
@@ -480,6 +450,7 @@ private extension CiGateway {
         try await send(
             SubscriptionRequest(
                 requestPath: "/room/play_state",
+                tag: "subscription-play-state",
                 room: room,
                 session: session,
                 update: updateInterval,
@@ -499,6 +470,7 @@ private extension CiGateway {
         try await send(
             SubscriptionRequest(
                 requestPath: "/room/play_state/position",
+                tag: "subscription-position",
                 room: room,
                 session: session,
                 update: updateInterval,
@@ -518,6 +490,7 @@ private extension CiGateway {
         try await send(
             SubscriptionRequest(
                 requestPath: "/room/state",
+                tag: "subscription-room-state",
                 room: room,
                 session: session,
                 update: updateInterval,
@@ -534,7 +507,7 @@ private extension CiGateway {
         on socket: URLSessionWebSocketTask
     ) async throws {
         try await send(
-            PlaylistSubscriptionRequest(room: room, session: session),
+            PlaylistSubscriptionRequest(tag: "subscription-playlist", room: room, session: session),
             on: socket
         )
         logger.debug("Sent /V2/playlist/subscribe for \(room, privacy: .public)")
@@ -657,78 +630,588 @@ private extension CiGateway {
             return nil
         }
     }
+}
 
-    func sendRoomPlayStateCommand(
-        room: String,
-        action: PlayStateAction? = nil,
-        skipTrack: Int? = nil
-    ) async throws {
-        try await sendCommand(
-            requestPath: "/room/play_state/set",
-            build: { session in
-                RoomPlayStateCommand(
-                    room: room,
-                    session: session,
-                    action: action,
-                    skipTrack: skipTrack
-                )
-            }
-        )
+private actor CiGatewayConnection {
+    private struct PendingCommand {
+        var requestPath: String
+        var continuation: CheckedContinuation<Void, Error>
+        var timeoutTask: Task<Void, Never>
     }
 
-    func sendRoomStateCommand(
-        room: String,
-        group: Bool?,
-        mute: Bool? = nil,
-        volume: Int? = nil
+    private enum CoalescingLane: Hashable {
+        case volume
+        case mute
+    }
+
+    private enum CoalescedCommand: Sendable {
+        case volume(room: String, group: Bool, value: Int)
+        case mute(room: String, group: Bool, value: Bool)
+    }
+
+    private struct QueuedCoalescedCommand {
+        var id: UUID
+        var command: CoalescedCommand
+        var continuation: CheckedContinuation<Void, Error>
+    }
+
+    private let webSocketURL: URL
+    private let userAgent: String
+    private let sessionTimeout: Int
+    private let urlSession: URLSession
+
+    private var socket: URLSessionWebSocketTask?
+    private var session: String?
+    private var resolvedRoom: String?
+    private var receiveTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var isStarting = false
+
+    private var streamID: UUID?
+    private var continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation?
+    private var current: CiGateway.NowPlaying?
+    private var streamPreferredRoom: String?
+    private var streamUpdateInterval: Int?
+    private var subscribedRoom: String?
+    private var subscriptionUpdateInterval: Int?
+
+    private var pendingCommands: [String: PendingCommand] = [:]
+    private var nextTagIndex = 0
+    private var coalescingInFlight: Set<CoalescingLane> = []
+    private var queuedCoalescedCommands: [CoalescingLane: QueuedCoalescedCommand] = [:]
+
+    init(
+        webSocketURL: URL,
+        userAgent: String,
+        sessionTimeout: Int,
+        urlSession: URLSession
+    ) {
+        self.webSocketURL = webSocketURL
+        self.userAgent = userAgent
+        self.sessionTimeout = sessionTimeout
+        self.urlSession = urlSession
+    }
+
+    nonisolated func nowPlayingEvents(
+        room: String?,
+        updateInterval: Int
+    ) -> AsyncThrowingStream<CiGateway.NowPlaying, Error> {
+        let id = UUID()
+        return AsyncThrowingStream { continuation in
+            let attachTask = Task {
+                await self.attachNowPlayingStream(
+                    id: id,
+                    continuation: continuation,
+                    preferredRoom: room,
+                    updateInterval: updateInterval
+                )
+            }
+
+            continuation.onTermination = { _ in
+                attachTask.cancel()
+                Task {
+                    await self.detachNowPlayingStream(id: id)
+                }
+            }
+        }
+    }
+
+    func play(room: String) async throws {
+        try await sendPlayStateCommand(room: room, action: .play)
+    }
+
+    func pause(room: String) async throws {
+        try await sendPlayStateCommand(room: room, action: .pause)
+    }
+
+    func previous(room: String) async throws {
+        try await sendPlayStateCommand(room: room, skipTrack: -1)
+    }
+
+    func next(room: String) async throws {
+        try await sendPlayStateCommand(room: room, skipTrack: 1)
+    }
+
+    func selectPlaylistItem(at index: Int, room: String) async throws {
+        try await sendCommand(room: room, requestPath: "/V2/playlist/select") { session, tag in
+            CiGateway.PlaylistSelectCommand(tag: tag, room: room, session: session, index: index)
+        }
+    }
+
+    func setVolume(_ volume: Int, room: String, group: Bool) async throws {
+        try await sendCoalesced(.volume(room: room, group: group, value: volume), lane: .volume)
+    }
+
+    func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws {
+        try await sendCoalesced(.mute(room: room, group: group, value: isMuted), lane: .mute)
+    }
+
+    func close() {
+        receiveTask?.cancel()
+        receiveTask = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        socket = nil
+        session = nil
+        resolvedRoom = nil
+        subscribedRoom = nil
+        subscriptionUpdateInterval = nil
+        continuation?.finish()
+        continuation = nil
+        streamID = nil
+        streamPreferredRoom = nil
+        streamUpdateInterval = nil
+        finishPendingCommands(throwing: CancellationError())
+        finishQueuedCoalescedCommands(throwing: CancellationError())
+    }
+
+    private func attachNowPlayingStream(
+        id: UUID,
+        continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation,
+        preferredRoom: String?,
+        updateInterval: Int
+    ) async {
+        guard !Task.isCancelled else {
+            return
+        }
+
+        streamID = id
+        self.continuation = continuation
+        streamPreferredRoom = preferredRoom
+        streamUpdateInterval = updateInterval
+
+        do {
+            try await ensureConnected(preferredRoom: preferredRoom, updateInterval: updateInterval, subscribe: true)
+            if let current {
+                continuation.yield(current)
+            }
+        } catch {
+            finishNowPlayingStream(id: id, throwing: error)
+        }
+    }
+
+    private func detachNowPlayingStream(id: UUID) {
+        guard streamID == id else {
+            return
+        }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        continuation = nil
+        streamID = nil
+        streamPreferredRoom = nil
+        streamUpdateInterval = nil
+    }
+
+    private func finishNowPlayingStream(id: UUID?, throwing error: Error? = nil) {
+        guard id == nil || streamID == id else {
+            return
+        }
+
+        if let error {
+            continuation?.finish(throwing: error)
+        } else {
+            continuation?.finish()
+        }
+        continuation = nil
+        streamID = nil
+        streamPreferredRoom = nil
+        streamUpdateInterval = nil
+    }
+
+    private func ensureConnected(
+        preferredRoom: String?,
+        updateInterval: Int?,
+        subscribe: Bool
     ) async throws {
-        try await sendCommand(
-            requestPath: "/room/state/set",
-            build: { session in
-                RoomStateCommand(
+        while isStarting {
+            try await Task.sleep(for: .milliseconds(50))
+            if socket != nil {
+                break
+            }
+        }
+
+        if socket == nil {
+            try await openConnection(preferredRoom: preferredRoom)
+        }
+
+        if subscribe, let updateInterval {
+            try await subscribeToNowPlaying(preferredRoom: preferredRoom, updateInterval: updateInterval)
+        }
+    }
+
+    private func openConnection(preferredRoom: String?) async throws {
+        isStarting = true
+        defer {
+            isStarting = false
+        }
+
+        let webSocketURL = webSocketURL
+        let socket = urlSession.webSocketTask(with: webSocketURL)
+        CiGateway.logger.info("Opening websocket \(webSocketURL.absoluteString, privacy: .public)")
+        socket.resume()
+
+        do {
+            CiGateway.logger.info("Creating gateway session")
+            let session = try await CiGateway.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent)
+            CiGateway.logger.info("Gateway session created \(session, privacy: .public)")
+
+            let room = try await CiGateway.resolveRoom(preferredRoom: preferredRoom, session: session, timeout: sessionTimeout, on: socket)
+            CiGateway.logger.info("Using Linn room \(room, privacy: .public)")
+
+            self.socket = socket
+            self.session = session
+            resolvedRoom = room
+            current = CiGateway.NowPlaying(room: room, session: session)
+            startReceiveLoop(socket: socket)
+        } catch {
+            socket.cancel(with: .goingAway, reason: nil)
+            throw error
+        }
+    }
+
+    private func startReceiveLoop(socket: URLSessionWebSocketTask) {
+        receiveTask?.cancel()
+        receiveTask = Task {
+            do {
+                while !Task.isCancelled {
+                    let message = try await CiGateway.receiveText(from: socket)
+                    handleMessage(message)
+                }
+            } catch is CancellationError {
+            } catch {
+                handleReceiveFailure(error, from: socket)
+            }
+        }
+    }
+
+    private func subscribeToNowPlaying(preferredRoom: String?, updateInterval: Int) async throws {
+        guard let socket, let session else {
+            throw CiGateway.GatewayError.missingSession
+        }
+
+        let room = resolvedRoom ?? preferredRoom.flatMap { $0.isEmpty ? nil : $0 }
+        guard let room else {
+            throw CiGateway.GatewayError.noRoomsAvailable
+        }
+
+        if subscribedRoom == room, subscriptionUpdateInterval == updateInterval {
+            return
+        }
+
+        try await CiGateway.subscribeToPlayState(room: room, session: session, updateInterval: updateInterval, on: socket)
+        try await CiGateway.subscribeToPosition(room: room, session: session, updateInterval: updateInterval, on: socket)
+        try await CiGateway.subscribeToRoomState(room: room, session: session, updateInterval: updateInterval, on: socket)
+        try await CiGateway.subscribeToPlaylist(room: room, session: session, on: socket)
+
+        subscribedRoom = room
+        subscriptionUpdateInterval = updateInterval
+        CiGateway.logger.info("Subscribed to now-playing updates for \(room, privacy: .public)")
+    }
+
+    private func handleMessage(_ message: String) {
+        let data = Data(message.utf8)
+        do {
+            let envelope = try JSONDecoder().decode(CiGateway.GatewayEnvelope.self, from: data)
+            if completePendingCommand(for: envelope) {
+                return
+            }
+
+            guard let update = try CiGateway.decodeNowPlayingUpdate(from: message) else {
+                return
+            }
+
+            if current == nil {
+                let room = resolvedRoom ?? ""
+                let session = session ?? ""
+                current = CiGateway.NowPlaying(room: room, session: session)
+            }
+            current?.merge(update)
+            if let current {
+                continuation?.yield(current)
+            }
+        } catch {
+            CiGateway.logger.warning("Failed to handle gateway websocket message: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    private func completePendingCommand(for envelope: CiGateway.GatewayEnvelope) -> Bool {
+        guard
+            let tag = envelope.tag,
+            let pending = pendingCommands[tag],
+            pending.requestPath == envelope.requestPath
+        else {
+            return false
+        }
+
+        pending.timeoutTask.cancel()
+        pendingCommands.removeValue(forKey: tag)
+        CiGateway.logger.debug("Matched command ACK \(tag, privacy: .public) for \(pending.requestPath, privacy: .public)")
+        pending.continuation.resume()
+        return true
+    }
+
+    private func handleReceiveFailure(_ error: Error, from failedSocket: URLSessionWebSocketTask) {
+        guard socket === failedSocket else {
+            return
+        }
+
+        CiGateway.logger.warning("Gateway websocket receive loop failed: \(String(describing: error), privacy: .public)")
+        tearDownDroppedConnection()
+        finishPendingCommands(throwing: error)
+        finishQueuedCoalescedCommands(throwing: error)
+
+        if continuation != nil {
+            startReconnectLoop()
+        }
+    }
+
+    private func tearDownDroppedConnection() {
+        receiveTask = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        session = nil
+        resolvedRoom = nil
+        subscribedRoom = nil
+        subscriptionUpdateInterval = nil
+    }
+
+    private func startReconnectLoop() {
+        guard reconnectTask == nil else {
+            return
+        }
+
+        reconnectTask = Task {
+            var delay = Duration.milliseconds(500)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: delay)
+                    try await self.reconnectNowPlayingStream()
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    CiGateway.logger.warning("Gateway websocket reconnect failed: \(String(describing: error), privacy: .public)")
+                    delay = min(delay * 2, .seconds(10))
+                }
+            }
+        }
+    }
+
+    private func reconnectNowPlayingStream() async throws {
+        guard let continuation, let updateInterval = streamUpdateInterval else {
+            reconnectTask = nil
+            return
+        }
+
+        try await ensureConnected(preferredRoom: streamPreferredRoom, updateInterval: updateInterval, subscribe: true)
+        reconnectTask = nil
+
+        if let current {
+            continuation.yield(current)
+        }
+        CiGateway.logger.info("Gateway websocket reconnected")
+    }
+
+    private func sendPlayStateCommand(
+        room: String,
+        action: CiGateway.PlayStateAction? = nil,
+        skipTrack: Int? = nil
+    ) async throws {
+        try await sendCommand(room: room, requestPath: "/room/play_state/set") { session, tag in
+            CiGateway.RoomPlayStateCommand(
+                tag: tag,
+                room: room,
+                session: session,
+                action: action,
+                skipTrack: skipTrack
+            )
+        }
+    }
+
+    private func sendCoalesced(_ command: CoalescedCommand, lane: CoalescingLane) async throws {
+        if coalescingInFlight.contains(lane) {
+            let id = UUID()
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    if let queued = queuedCoalescedCommands[lane] {
+                        CiGateway.logger.debug("Replacing queued \(String(describing: lane), privacy: .public) gateway command")
+                        queued.continuation.resume(throwing: CancellationError())
+                    }
+                    queuedCoalescedCommands[lane] = QueuedCoalescedCommand(
+                        id: id,
+                        command: command,
+                        continuation: continuation
+                    )
+                }
+            } onCancel: {
+                Task {
+                    await self.cancelQueuedCoalescedCommand(id: id, lane: lane)
+                }
+            }
+        }
+
+        coalescingInFlight.insert(lane)
+        do {
+            try await send(command)
+            finishCoalescedLane(lane)
+        } catch {
+            finishCoalescedLane(lane)
+            throw error
+        }
+    }
+
+    private func send(_ command: CoalescedCommand) async throws {
+        switch command {
+        case let .volume(room, group, value):
+            try await sendCommand(room: room, requestPath: "/room/state/set") { session, tag in
+                CiGateway.RoomStateCommand(
+                    tag: tag,
                     room: room,
                     session: session,
                     group: group,
-                    mute: mute,
-                    volume: volume
+                    mute: nil,
+                    volume: value
                 )
             }
-        )
-    }
-
-    func sendPlaylistSelectCommand(room: String, index: Int) async throws {
-        try await sendCommand(
-            requestPath: "/V2/playlist/select",
-            build: { session in
-                PlaylistSelectCommand(
+        case let .mute(room, group, value):
+            try await sendCommand(room: room, requestPath: "/room/state/set") { session, tag in
+                CiGateway.RoomStateCommand(
+                    tag: tag,
                     room: room,
                     session: session,
-                    index: index
+                    group: group,
+                    mute: value,
+                    volume: nil
                 )
             }
+        }
+    }
+
+    private func finishCoalescedLane(_ lane: CoalescingLane) {
+        coalescingInFlight.remove(lane)
+        guard let queued = queuedCoalescedCommands.removeValue(forKey: lane) else {
+            return
+        }
+
+        coalescingInFlight.insert(lane)
+        Task {
+            await self.runQueuedCoalescedCommand(queued, lane: lane)
+        }
+    }
+
+    private func runQueuedCoalescedCommand(_ queued: QueuedCoalescedCommand, lane: CoalescingLane) async {
+        do {
+            try await send(queued.command)
+            queued.continuation.resume()
+            finishCoalescedLane(lane)
+        } catch {
+            queued.continuation.resume(throwing: error)
+            finishCoalescedLane(lane)
+        }
+    }
+
+    private func cancelQueuedCoalescedCommand(id: UUID, lane: CoalescingLane) {
+        guard queuedCoalescedCommands[lane]?.id == id else {
+            return
+        }
+
+        let queued = queuedCoalescedCommands.removeValue(forKey: lane)
+        queued?.continuation.resume(throwing: CancellationError())
+    }
+
+    private func sendCommand<Command: Encodable & Sendable>(
+        room: String,
+        requestPath: String,
+        build: (String, String) -> Command
+    ) async throws {
+        try await ensureConnected(preferredRoom: room, updateInterval: nil, subscribe: false)
+        guard let socket, let session else {
+            throw CiGateway.GatewayError.missingSession
+        }
+
+        let tag = nextCommandTag()
+        try await sendCommandAwaitingAck(
+            build(session, tag),
+            requestPath: requestPath,
+            tag: tag,
+            socket: socket
         )
     }
 
-    func sendCommand<Command: Encodable>(
+    private func sendCommandAwaitingAck<Command: Encodable & Sendable>(
+        _ command: Command,
         requestPath: String,
-        build: (String) -> Command
+        tag: String,
+        socket: URLSessionWebSocketTask
     ) async throws {
-        let socket = urlSession.webSocketTask(with: webSocketURL)
-        socket.resume()
-        defer {
-            socket.cancel(with: .goingAway, reason: nil)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let timeoutTask = Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    self.timeOutPendingCommand(tag: tag, requestPath: requestPath)
+                }
+                pendingCommands[tag] = PendingCommand(
+                    requestPath: requestPath,
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                )
+
+                Task {
+                    do {
+                        CiGateway.logger.debug("Sending command \(tag, privacy: .public) for \(requestPath, privacy: .public)")
+                        try await CiGateway.send(command, on: socket)
+                    } catch {
+                        self.failPendingCommand(tag: tag, throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelPendingCommand(tag: tag)
+            }
+        }
+    }
+
+    private func nextCommandTag() -> String {
+        nextTagIndex += 1
+        return "command-\(nextTagIndex)"
+    }
+
+    private func timeOutPendingCommand(tag: String, requestPath: String) {
+        guard let pending = pendingCommands.removeValue(forKey: tag) else {
+            return
         }
 
-        let session = try await Self.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent)
-        try await Self.send(build(session), on: socket)
+        CiGateway.logger.debug("Command \(tag, privacy: .public) for \(requestPath, privacy: .public) timed out")
+        pending.continuation.resume(throwing: CiGateway.GatewayError.timedOut(requestPath))
+    }
 
-        while !Task.isCancelled {
-            let message = try await Self.receiveText(from: socket)
-            let envelope = try JSONDecoder().decode(GatewayEnvelope.self, from: Data(message.utf8))
-            guard envelope.requestPath == requestPath else {
-                continue
-            }
+    private func failPendingCommand(tag: String, throwing error: Error) {
+        guard let pending = pendingCommands.removeValue(forKey: tag) else {
             return
+        }
+
+        pending.timeoutTask.cancel()
+        pending.continuation.resume(throwing: error)
+    }
+
+    private func cancelPendingCommand(tag: String) {
+        failPendingCommand(tag: tag, throwing: CancellationError())
+    }
+
+    private func finishPendingCommands(throwing error: Error) {
+        for tag in Array(pendingCommands.keys) {
+            failPendingCommand(tag: tag, throwing: error)
+        }
+    }
+
+    private func finishQueuedCoalescedCommands(throwing error: Error) {
+        let queuedCommands = queuedCoalescedCommands.values
+        queuedCoalescedCommands.removeAll()
+        coalescingInFlight.removeAll()
+        for queued in queuedCommands {
+            queued.continuation.resume(throwing: error)
         }
     }
 }
