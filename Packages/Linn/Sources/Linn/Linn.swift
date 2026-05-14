@@ -155,10 +155,13 @@ public final class Linn {
     private var playlistSongsByIndex: [Int: Song] = [:]
     private var optimisticTransition: OptimisticTransition?
     private var optimisticPlayState: OptimisticPlayState?
+    private var playlistSelectionQueue = PlaylistSelectionQueue()
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
 
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
     @ObservationIgnored private var controlTask: Task<Void, Never>?
+    @ObservationIgnored private var playlistSelectionTask: Task<Void, Never>?
+    @ObservationIgnored private var playlistSelectionTimeoutTask: Task<Void, Never>?
 
     private struct OptimisticTransition {
         var targetQueueIndex: Int
@@ -169,6 +172,59 @@ public final class Linn {
         var targetState: PlayState
         var previousState: PlayState?
         var expiresAt: Date
+    }
+
+    private struct PlaylistSelectionJob: Sendable, Equatable {
+        enum Kind: Sendable, Equatable {
+            case skip
+            case queueItem
+        }
+
+        var targetIndex: Int
+        var kind: Kind
+    }
+
+    private struct PlaylistSelectionQueue: Sendable, Equatable {
+        var inFlight: PlaylistSelectionJob?
+        var pending: PlaylistSelectionJob?
+
+        mutating func enqueue(_ job: PlaylistSelectionJob) -> PlaylistSelectionJob? {
+            guard let inFlight else {
+                inFlight = job
+                return job
+            }
+
+            pending = job.targetIndex == inFlight.targetIndex ? nil : job
+            return nil
+        }
+
+        mutating func confirm(targetIndex: Int) -> (confirmed: Bool, next: PlaylistSelectionJob?) {
+            guard inFlight?.targetIndex == targetIndex else {
+                return (false, nil)
+            }
+
+            inFlight = nil
+            return (true, dequeuePending())
+        }
+
+        mutating func fail(targetIndex: Int) -> (failed: Bool, next: PlaylistSelectionJob?) {
+            guard inFlight?.targetIndex == targetIndex else {
+                return (false, nil)
+            }
+
+            inFlight = nil
+            return (true, dequeuePending())
+        }
+
+        private mutating func dequeuePending() -> PlaylistSelectionJob? {
+            guard let pending else {
+                return nil
+            }
+
+            self.pending = nil
+            inFlight = pending
+            return pending
+        }
     }
 
     public init(
@@ -238,6 +294,8 @@ public final class Linn {
     deinit {
         updatesTask?.cancel()
         controlTask?.cancel()
+        playlistSelectionTask?.cancel()
+        playlistSelectionTimeoutTask?.cancel()
     }
 
     public func start() {
@@ -323,25 +381,19 @@ public final class Linn {
     }
 
     public func previous() {
-        guard hasPrevious else {
+        guard hasPrevious, let currentIndex = playlist.currentIndex else {
             return
         }
-        songTransitionDirection = .backward
-        optimisticallyMoveToSong(offset: -1)
-        performControl { ciGateway, room in
-            try await ciGateway.previous(room: room)
-        }
+
+        selectQueueIndex(currentIndex - 1, kind: .skip)
     }
 
     public func next() {
-        guard hasNext else {
+        guard hasNext, let currentIndex = playlist.currentIndex else {
             return
         }
-        songTransitionDirection = .forward
-        optimisticallyMoveToSong(offset: 1)
-        performControl { ciGateway, room in
-            try await ciGateway.next(room: room)
-        }
+
+        selectQueueIndex(currentIndex + 1, kind: .skip)
     }
 
     public func play(_ song: Song) {
@@ -349,10 +401,7 @@ public final class Linn {
             return
         }
 
-        optimisticallySelectSong(song, at: targetQueueIndex)
-        performControl { ciGateway, room in
-            try await ciGateway.selectPlaylistItem(at: targetQueueIndex, room: room)
-        }
+        selectQueueIndex(targetQueueIndex, optimisticSong: song, kind: .queueItem)
     }
 
     public func setVolume(_ volume: Int) {
@@ -400,24 +449,36 @@ public final class Linn {
             timeline = Timeline(update.timeline)
         }
 
+        reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
         updatePlaylistSongs()
         volume = update.roomState?.volume.map { min($0, maximumVolume) }
         isMuted = update.roomState?.isMuted
     }
 
-    private func optimisticallyMoveToSong(offset: Int) {
-        guard let currentIndex = playlist.currentIndex else {
-            timeline = nil
+    private func selectQueueIndex(
+        _ targetQueueIndex: Int,
+        optimisticSong: Song? = nil,
+        kind: PlaylistSelectionJob.Kind
+    ) {
+        if targetQueueIndex < 0 {
+            return
+        }
+        if let total = playlist.total, targetQueueIndex >= total {
             return
         }
 
-        let targetQueueIndex = currentIndex + offset
+        optimisticallySelectQueueIndex(targetQueueIndex, song: optimisticSong ?? playlistSongsByIndex[targetQueueIndex])
+        enqueuePlaylistSelection(PlaylistSelectionJob(targetIndex: targetQueueIndex, kind: kind))
+    }
+
+    private func optimisticallySelectQueueIndex(_ targetQueueIndex: Int, song: Song?) {
+        updateSongTransitionDirection(incomingQueueIndex: targetQueueIndex)
         optimisticTransition = OptimisticTransition(
             targetQueueIndex: targetQueueIndex,
             expiresAt: Date().addingTimeInterval(4)
         )
 
-        guard let targetSong = playlistSongsByIndex[targetQueueIndex] else {
+        guard var selectedSong = song else {
             currentSong = nil
             playlist.currentIndex = targetQueueIndex
             timeline = nil
@@ -425,25 +486,73 @@ public final class Linn {
             return
         }
 
-        currentSong = targetSong
-        playlist.currentIndex = targetQueueIndex
-        timeline = nil
-        updatePlaylistSongs()
-    }
-
-    private func optimisticallySelectSong(_ song: Song, at targetQueueIndex: Int) {
-        updateSongTransitionDirection(incomingQueueIndex: targetQueueIndex)
-        optimisticTransition = OptimisticTransition(
-            targetQueueIndex: targetQueueIndex,
-            expiresAt: Date().addingTimeInterval(4)
-        )
-        var selectedSong = song
         selectedSong.queueIndex = targetQueueIndex
         playlistSongsByIndex[targetQueueIndex] = selectedSong
         currentSong = selectedSong
         playlist.currentIndex = targetQueueIndex
         timeline = nil
         updatePlaylistSongs()
+    }
+
+    private func enqueuePlaylistSelection(_ job: PlaylistSelectionJob) {
+        lastErrorMessage = nil
+
+        guard ciGateway != nil else {
+            return
+        }
+
+        if let jobToSend = playlistSelectionQueue.enqueue(job) {
+            sendPlaylistSelection(jobToSend)
+        }
+    }
+
+    private func sendPlaylistSelection(_ job: PlaylistSelectionJob) {
+        guard let ciGateway else {
+            return
+        }
+
+        playlistSelectionTimeoutTask?.cancel()
+        playlistSelectionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            self?.playlistSelectionTimedOut(job)
+        }
+
+        playlistSelectionTask = Task { [ciGateway, room] in
+            do {
+                try await ciGateway.selectPlaylistItem(at: job.targetIndex, room: room)
+            } catch is CancellationError {
+            } catch {
+                let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
+                if failure.failed {
+                    playlistSelectionTimeoutTask?.cancel()
+                    lastErrorMessage = String(describing: error)
+                }
+                if let nextJob = failure.next {
+                    sendPlaylistSelection(nextJob)
+                }
+            }
+        }
+    }
+
+    private func reconcilePlaylistSelectionConfirmation(incomingQueueIndex: Int?) {
+        guard let incomingQueueIndex else {
+            return
+        }
+
+        let confirmation = playlistSelectionQueue.confirm(targetIndex: incomingQueueIndex)
+        if confirmation.confirmed {
+            playlistSelectionTimeoutTask?.cancel()
+        }
+        if let nextJob = confirmation.next {
+            sendPlaylistSelection(nextJob)
+        }
+    }
+
+    private func playlistSelectionTimedOut(_ job: PlaylistSelectionJob) {
+        let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
+        if let nextJob = failure.next {
+            sendPlaylistSelection(nextJob)
+        }
     }
 
     private func updateSongTransitionDirection(incomingQueueIndex: Int?) {

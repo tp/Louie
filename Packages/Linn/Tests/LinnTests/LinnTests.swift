@@ -37,6 +37,8 @@ func nextUsesForwardDirectionAndSuppressesStaleNowPlayingFields() async throws {
 
     #expect(linn.currentSong?.title == "Two")
     #expect(linn.timeline?.position == 9)
+    #expect(await gateway.selectedPlaylistIndexes() == [2])
+    #expect(await gateway.nextCallCount() == 0)
 }
 
 @Test
@@ -73,6 +75,8 @@ func previousUsesBackwardDirectionAndSuppressesStaleNowPlayingFields() async thr
 
     #expect(linn.currentSong?.title == "Zero")
     #expect(linn.timeline?.position == 7)
+    #expect(await gateway.selectedPlaylistIndexes() == [0])
+    #expect(await gateway.previousCallCount() == 0)
 }
 
 @Test
@@ -179,10 +183,44 @@ func playlistTracksDeviceCurrentIndexAndKeepsPreviousItems() async throws {
     #expect(linn.upcomingSongs.map(\.title) == ["Three"])
 }
 
+@Test
+@MainActor
+func rapidPlaylistSelectionsSendOnlyFirstAndLatestPendingTarget() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One", "Two", "Three"]
+
+    await gateway.suspendSelections()
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles))
+    try await waitUntil {
+        linn.currentSong?.title == "Zero"
+    }
+
+    linn.next()
+    linn.next()
+    linn.next()
+
+    try await waitUntil {
+        await gateway.selectedPlaylistIndexes() == [1]
+    }
+
+    await gateway.send(nowPlaying(index: 1, titles: titles))
+    try await waitUntil {
+        await gateway.selectedPlaylistIndexes() == [1, 3]
+    }
+
+    await gateway.resumeSelections()
+}
+
 private actor TestGateway: LinnGateway {
     private let stream: AsyncThrowingStream<CiGateway.NowPlaying, Error>
     private let continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
     private var selectedIndexes: [Int] = []
+    private var previousCalls = 0
+    private var nextCalls = 0
+    private var shouldSuspendSelections = false
+    private var suspendedSelections: [CheckedContinuation<Void, Never>] = []
 
     init() {
         let source = AsyncThrowingStream<CiGateway.NowPlaying, Error>.makeStream()
@@ -201,12 +239,21 @@ private actor TestGateway: LinnGateway {
 
     func pause(room _: String) async throws {}
 
-    func previous(room _: String) async throws {}
+    func previous(room _: String) async throws {
+        previousCalls += 1
+    }
 
-    func next(room _: String) async throws {}
+    func next(room _: String) async throws {
+        nextCalls += 1
+    }
 
     func selectPlaylistItem(at index: Int, room _: String) async throws {
         selectedIndexes.append(index)
+        if shouldSuspendSelections {
+            await withCheckedContinuation { continuation in
+                suspendedSelections.append(continuation)
+            }
+        }
     }
 
     func setVolume(_: Int, room _: String, group _: Bool) async throws {}
@@ -219,6 +266,27 @@ private actor TestGateway: LinnGateway {
 
     func selectedPlaylistIndexes() -> [Int] {
         selectedIndexes
+    }
+
+    func previousCallCount() -> Int {
+        previousCalls
+    }
+
+    func nextCallCount() -> Int {
+        nextCalls
+    }
+
+    func suspendSelections() {
+        shouldSuspendSelections = true
+    }
+
+    func resumeSelections() {
+        shouldSuspendSelections = false
+        let continuations = suspendedSelections
+        suspendedSelections.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 }
 
