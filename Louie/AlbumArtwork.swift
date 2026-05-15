@@ -26,19 +26,32 @@ struct AlbumArtwork: View {
       .aspectRatio(1, contentMode: .fill)
       .overlay {
         AsyncImage(url: url) { image in
-          if url?.absoluteString.contains("_rectangle.") == true {
-            image.resizable()
-              .scaledToFit()
+          if usesBlurredFill {
+            ZStack {
+              image.resizable()
+                .scaledToFill()
+                .blur(radius: 8)
+                .saturation(1.15)
+                .overlay(Color.black.opacity(0.18))
+
+              image.resizable()
+                .scaledToFit()
+                .aspectRatio(1, contentMode: .fit)
+                .scaleEffect(0.9)
+            }
           } else {
             image.resizable()
               .scaledToFill()
           }
-
         } placeholder: {
           Color.clear
         }
       }
       .clipShape(RoundedRectangle(cornerRadius: 6))
+  }
+
+  private var usesBlurredFill: Bool {
+    url?.absoluteString.contains("_rectangle.") == true
   }
 }
 
