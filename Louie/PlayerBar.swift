@@ -142,8 +142,9 @@ public struct PlayerBar: View {
             Button("Next", systemImage: "forward.fill") {
                 state.next()
             }
-
             .disabled(!state.hasNext)
+
+            PlayerBarVolumeButton(state: state)
         }
         .tint(.primary)
         .labelStyle(.iconOnly)
@@ -179,6 +180,79 @@ public struct PlayerBar: View {
             return "No now playing info"
         case let .failed(message):
             return message
+        }
+    }
+}
+
+private struct PlayerBarVolumeButton: View {
+    var state: Linn
+
+    @State private var isShowingPopover = false
+    @State private var localVolume = 0
+    @State private var volumeUpdateTask: Task<Void, Never>?
+
+    private var volumeRange: ClosedRange<Int> {
+        0 ... state.maximumVolume
+    }
+
+    private var displayedVolume: Int {
+        if isShowingPopover {
+            localVolume
+        } else {
+            state.volume ?? localVolume
+        }
+    }
+
+    var body: some View {
+        Button {
+            localVolume = displayedVolume
+            isShowingPopover = true
+        } label: {
+            VolumeRadialDisplay(value: displayedVolume, range: volumeRange)
+                .frame(width: 40, height: 40)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Volume")
+        .accessibilityValue("\(displayedVolume)")
+        .popover(isPresented: $isShowingPopover) {
+            VStack(spacing: 14) {
+                VolumeRadialControl(value: $localVolume, range: volumeRange)
+                    .frame(width: 180, height: 180)
+
+                Text("Volume")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .presentationCompactAdaptation(.popover)
+            .onAppear {
+                localVolume = displayedVolume
+            }
+            .onChange(of: localVolume) { _, newValue in
+                scheduleVolumeUpdate(newValue)
+            }
+            .onChange(of: state.volume) { _, newValue in
+                guard let newValue, !isShowingPopover else {
+                    return
+                }
+
+                localVolume = newValue
+            }
+            .onDisappear {
+                volumeUpdateTask?.cancel()
+                state.setVolume(localVolume)
+            }
+        }
+    }
+
+    private func scheduleVolumeUpdate(_ volume: Int) {
+        volumeUpdateTask?.cancel()
+        volumeUpdateTask = Task { [state] in
+            try? await Task.sleep(for: .milliseconds(180))
+            await MainActor.run {
+                state.setVolume(volume)
+            }
         }
     }
 }
