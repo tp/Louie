@@ -10,6 +10,7 @@ import SwiftUI
 
 public struct PlayQueue: View {
     var linn: Linn
+
     @State private var shouldScrollToCurrentOnOpen = true
     @State private var shouldScrollToCurrentAfterSelection = false
 
@@ -21,6 +22,7 @@ public struct PlayQueue: View {
                         Button {
                             shouldScrollToCurrentAfterSelection = true
                             linn.play(song)
+                            scrollToSong(song, with: proxy)
                         } label: {
                             QueueListTile(
                                 song: song,
@@ -35,6 +37,8 @@ public struct PlayQueue: View {
                 .padding(.vertical, 8)
                 .animation(.snappy(duration: 0.35), value: linn.playlist.songs.map(\.id))
             }
+            .contentMargins(.horizontal, 20, for: .scrollContent)
+            .bottomPlayerBarClearance()
             .onAppear {
                 scrollToCurrentIfNeeded(with: proxy, animated: false)
             }
@@ -51,6 +55,17 @@ public struct PlayQueue: View {
             }
         }
         .navigationTitle("Queue")
+        .navigationBarTitleDisplayMode(.large)
+    }
+
+    private func scrollToSong(_ song: Linn.Song, with proxy: ScrollViewProxy) {
+        let id = queueRowID(for: song)
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.snappy(duration: 0.35)) {
+                proxy.scrollTo(id, anchor: .top)
+            }
+        }
     }
 
     private func scrollToCurrentIfNeeded(with proxy: ScrollViewProxy, animated: Bool, force: Bool = false) {
@@ -64,7 +79,7 @@ public struct PlayQueue: View {
 
         shouldScrollToCurrentOnOpen = false
         let scroll = {
-            proxy.scrollTo(currentIndex, anchor: .center)
+            proxy.scrollTo(currentIndex, anchor: .top)
         }
 
         if animated {
@@ -136,11 +151,6 @@ public struct QueueListTile: View {
                 }
                 .onDisappear {
                     linn.stop()
-                }
-                .safeAreaInset(edge: .bottom) {
-                    PlayerBar(state: linn)
-                        .padding(.horizontal, 50)
-                        .padding(.bottom, 8)
                 }
         }
     }

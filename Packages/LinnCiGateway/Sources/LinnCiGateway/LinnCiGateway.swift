@@ -180,6 +180,128 @@ public final class CiGateway: Sendable {
         }
     }
 
+    public struct MediaService: Sendable, Equatable, Identifiable {
+        public var id: String
+        public var name: String
+        public var kind: String?
+
+        public init(id: String, name: String, kind: String? = nil) {
+            self.id = id
+            self.name = name
+            self.kind = kind
+        }
+    }
+
+    public struct MediaItem: Sendable, Equatable, Identifiable {
+        public var id: String
+        public var kind: String
+        public var name: String?
+        public var title: String?
+        public var album: String?
+        public var artists: [String]
+        public var artworkURL: URL?
+        public var duration: Int?
+        public var containedKinds: [String]
+        public var childCount: Int?
+        public var isFavourite: Bool?
+        public var disabledActions: [String]
+        public var albumID: String?
+        public var artistID: String?
+
+        public init(
+            id: String,
+            kind: String,
+            name: String? = nil,
+            title: String? = nil,
+            album: String? = nil,
+            artists: [String] = [],
+            artworkURL: URL? = nil,
+            duration: Int? = nil,
+            containedKinds: [String] = [],
+            childCount: Int? = nil,
+            isFavourite: Bool? = nil,
+            disabledActions: [String] = [],
+            albumID: String? = nil,
+            artistID: String? = nil
+        ) {
+            self.id = id
+            self.kind = kind
+            self.name = name
+            self.title = title
+            self.album = album
+            self.artists = artists
+            self.artworkURL = artworkURL
+            self.duration = duration
+            self.containedKinds = containedKinds
+            self.childCount = childCount
+            self.isFavourite = isFavourite
+            self.disabledActions = disabledActions
+            self.albumID = albumID
+            self.artistID = artistID
+        }
+
+        public var displayTitle: String? {
+            title ?? name
+        }
+
+        public var canFavourite: Bool {
+            isFavourite != nil && !disabledActions.contains("favourite")
+        }
+
+        public var isContainer: Bool {
+            kind.contains("container")
+                || kind.contains("album")
+                || kind.contains("playlist")
+                || kind.hasPrefix("md.qobuz")
+                || childCount != nil
+                || !containedKinds.isEmpty
+        }
+    }
+
+    public struct MediaPage: Sendable, Equatable {
+        public var id: String?
+        public var contentRevision: Int?
+        public var index: Int
+        public var count: Int
+        public var total: Int?
+        public var alpha: [Int?]?
+        public var children: [MediaItem]
+
+        public init(
+            id: String? = nil,
+            contentRevision: Int? = nil,
+            index: Int = 0,
+            count: Int = 0,
+            total: Int? = nil,
+            alpha: [Int?]? = nil,
+            children: [MediaItem] = []
+        ) {
+            self.id = id
+            self.contentRevision = contentRevision
+            self.index = index
+            self.count = count
+            self.total = total
+            self.alpha = alpha
+            self.children = children
+        }
+    }
+
+    public enum MediaSearchType: String, Sendable, Equatable, CaseIterable {
+        case albums
+        case artists
+        case tracks
+        case playlists
+        case composers
+        case stations
+    }
+
+    public enum QueuePlacement: String, Sendable, Equatable, CaseIterable {
+        case now
+        case next
+        case last
+        case replace
+    }
+
     public enum GatewayError: Error, Sendable {
         case nonTextMessage
         case missingSession
@@ -267,6 +389,41 @@ public final class CiGateway: Sendable {
 
     public func setMuted(_ isMuted: Bool, room: String, group: Bool = true) async throws {
         try await connection.setMuted(isMuted, room: room, group: group)
+    }
+
+    public func mediaServices(room: String) async throws -> [MediaService] {
+        try await connection.mediaServices(room: room)
+    }
+
+    public func qobuzService(room: String) async throws -> MediaService? {
+        try await mediaServices(room: room).first { $0.name.localizedCaseInsensitiveCompare("Qobuz") == .orderedSame }
+    }
+
+    public func browse(
+        mediaID: String,
+        index: Int = 0,
+        count: Int = 50,
+        browseType: String = ""
+    ) async throws -> MediaPage {
+        try await connection.browse(mediaID: mediaID, index: index, count: count, browseType: browseType)
+    }
+
+    public func search(
+        serviceID: String,
+        query: String,
+        type: MediaSearchType,
+        index: Int = 0,
+        count: Int = 25
+    ) async throws -> MediaPage {
+        try await connection.search(serviceID: serviceID, query: query, type: type, index: index, count: count)
+    }
+
+    public func select(mediaID: String, room: String, queue: QueuePlacement = .replace) async throws {
+        try await connection.select(mediaID: mediaID, room: room, queue: queue)
+    }
+
+    public func setFavourite(mediaID: String, isFavourite: Bool) async throws {
+        try await connection.setFavourite(mediaID: mediaID, isFavourite: isFavourite)
     }
 }
 
@@ -626,6 +783,12 @@ private actor CiGatewayConnection {
         var timeoutTask: Task<Void, Never>
     }
 
+    private struct PendingResponse {
+        var requestPath: String
+        var continuation: CheckedContinuation<Data, Error>
+        var timeoutTask: Task<Void, Never>
+    }
+
     private enum CoalescingLane: Hashable {
         case volume
         case mute
@@ -663,6 +826,7 @@ private actor CiGatewayConnection {
     private var subscriptionUpdateInterval: Int?
 
     private var pendingCommands: [String: PendingCommand] = [:]
+    private var pendingResponses: [String: PendingResponse] = [:]
     private var nextTagIndex = 0
     private var coalescingInFlight: Set<CoalescingLane> = []
     private var queuedCoalescedCommands: [CoalescingLane: QueuedCoalescedCommand] = [:]
@@ -733,6 +897,83 @@ private actor CiGatewayConnection {
         try await sendCoalesced(.mute(room: room, group: group, value: isMuted), lane: .mute)
     }
 
+    func mediaServices(room: String) async throws -> [CiGateway.MediaService] {
+        let response: V2ServicesStatusResponse = try await sendRequest(
+            room: room,
+            requestPath: "/V2/services/status"
+        ) { session, tag in
+            V2ServicesStatusGetRequest(tag: tag, session: session, room: room, update: 0)
+        }
+
+        return response.data?.children?.compactMap(CiGateway.MediaService.init) ?? []
+    }
+
+    func browse(mediaID: String, index: Int, count: Int, browseType: String) async throws -> CiGateway.MediaPage {
+        let response: MediaBrowseResponse = try await sendRequest(
+            preferredRoom: resolvedRoom,
+            requestPath: "/V2/media/browse"
+        ) { session, tag in
+            V2MediaBrowseGetRequest(
+                tag: tag,
+                session: session,
+                mediaId: mediaID,
+                index: index,
+                count: count,
+                browseType: browseType
+            )
+        }
+
+        return CiGateway.MediaPage(response.data)
+    }
+
+    func search(
+        serviceID: String,
+        query: String,
+        type: CiGateway.MediaSearchType,
+        index: Int,
+        count: Int
+    ) async throws -> CiGateway.MediaPage {
+        let response: MediaBrowseResponse = try await sendRequest(
+            preferredRoom: resolvedRoom,
+            requestPath: "/V2/services/search"
+        ) { session, tag in
+            V2ServicesSearchGetRequest(
+                tag: tag,
+                session: session,
+                mediaId: serviceID,
+                searchArg: query,
+                searchType: type.rawValue,
+                index: index,
+                count: count
+            )
+        }
+
+        return CiGateway.MediaPage(response.data)
+    }
+
+    func select(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
+        try await sendCommand(room: room, requestPath: "/V2/media/select") { session, tag in
+            V2MediaSelectPostRequest(
+                tag: tag,
+                session: session,
+                room: room,
+                mediaId: mediaID,
+                queue: queue.rawValue
+            )
+        }
+    }
+
+    func setFavourite(mediaID: String, isFavourite: Bool) async throws {
+        try await sendSessionCommand(requestPath: "/V2/media/favourite") { session, tag in
+            V2MediaFavouritePostRequest(
+                tag: tag,
+                session: session,
+                mediaId: mediaID,
+                favourite: isFavourite
+            )
+        }
+    }
+
     func close() {
         receiveTask?.cancel()
         receiveTask = nil
@@ -750,6 +991,7 @@ private actor CiGatewayConnection {
         streamPreferredRoom = nil
         streamUpdateInterval = nil
         finishPendingCommands(throwing: CancellationError())
+        finishPendingResponses(throwing: CancellationError())
         finishQueuedCoalescedCommands(throwing: CancellationError())
     }
 
@@ -813,12 +1055,12 @@ private actor CiGatewayConnection {
     ) async throws {
         while isStarting {
             try await Task.sleep(for: .milliseconds(50))
-            if socket != nil {
+            if socket != nil, session != nil {
                 break
             }
         }
 
-        if socket == nil {
+        if socket == nil || session == nil {
             try await openConnection(preferredRoom: preferredRoom)
         }
 
@@ -901,6 +1143,9 @@ private actor CiGatewayConnection {
         let data = Data(message.utf8)
         do {
             let envelope = try JSONDecoder().decode(CiGateway.GatewayEnvelope.self, from: data)
+            if completePendingResponse(for: envelope, data: data) {
+                return
+            }
             if completePendingCommand(for: envelope) {
                 return
             }
@@ -948,6 +1193,31 @@ private actor CiGatewayConnection {
         return true
     }
 
+    private func completePendingResponse(for envelope: CiGateway.GatewayEnvelope, data: Data) -> Bool {
+        guard let tag = envelope.tag, let pending = pendingResponses[tag] else {
+            return false
+        }
+
+        guard envelope.requestPath == nil || pending.requestPath == envelope.requestPath else {
+            return false
+        }
+
+        pending.timeoutTask.cancel()
+        pendingResponses.removeValue(forKey: tag)
+        CiGateway.logger.debug("Matched response \(tag, privacy: .public) for \(pending.requestPath, privacy: .public)")
+        if let errorCode = envelope.errorCode {
+            pending.continuation.resume(
+                throwing: CiGateway.GatewayError.commandFailed(
+                    code: errorCode,
+                    message: envelope.message ?? "Gateway request failed"
+                )
+            )
+        } else {
+            pending.continuation.resume(returning: data)
+        }
+        return true
+    }
+
     private func handleReceiveFailure(_ error: Error, from failedSocket: URLSessionWebSocketTask) {
         guard socket === failedSocket else {
             return
@@ -956,6 +1226,7 @@ private actor CiGatewayConnection {
         CiGateway.logger.warning("Gateway websocket receive loop failed: \(String(describing: error), privacy: .public)")
         tearDownDroppedConnection()
         finishPendingCommands(throwing: error)
+        finishPendingResponses(throwing: error)
         finishQueuedCoalescedCommands(throwing: error)
 
         if continuation != nil {
@@ -1135,6 +1406,52 @@ private actor CiGatewayConnection {
         )
     }
 
+    private func sendSessionCommand<Command: Encodable & Sendable>(
+        requestPath: String,
+        build: (String, String) -> Command
+    ) async throws {
+        try await ensureConnected(preferredRoom: resolvedRoom, updateInterval: nil, subscribe: false)
+        guard let socket, let session else {
+            throw CiGateway.GatewayError.missingSession
+        }
+
+        let tag = nextCommandTag()
+        try await sendCommandAwaitingAck(
+            build(session, tag),
+            requestPath: requestPath,
+            tag: tag,
+            socket: socket
+        )
+    }
+
+    private func sendRequest<Response: Decodable & Sendable, Command: Encodable & Sendable>(
+        room: String,
+        requestPath: String,
+        build: (String, String) -> Command
+    ) async throws -> Response {
+        try await sendRequest(preferredRoom: room, requestPath: requestPath, build: build)
+    }
+
+    private func sendRequest<Response: Decodable & Sendable, Command: Encodable & Sendable>(
+        preferredRoom: String?,
+        requestPath: String,
+        build: (String, String) -> Command
+    ) async throws -> Response {
+        try await ensureConnected(preferredRoom: preferredRoom, updateInterval: nil, subscribe: false)
+        guard let socket, let session else {
+            throw CiGateway.GatewayError.missingSession
+        }
+
+        let tag = nextCommandTag()
+        let data = try await sendCommandAwaitingResponse(
+            build(session, tag),
+            requestPath: requestPath,
+            tag: tag,
+            socket: socket
+        )
+        return try JSONDecoder().decode(Response.self, from: data)
+    }
+
     private func sendCommandAwaitingAck<Command: Encodable & Sendable>(
         _ command: Command,
         requestPath: String,
@@ -1169,6 +1486,40 @@ private actor CiGatewayConnection {
         }
     }
 
+    private func sendCommandAwaitingResponse<Command: Encodable & Sendable>(
+        _ command: Command,
+        requestPath: String,
+        tag: String,
+        socket: URLSessionWebSocketTask
+    ) async throws -> Data {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let timeoutTask = Task {
+                    try? await Task.sleep(for: .seconds(5))
+                    self.timeOutPendingResponse(tag: tag, requestPath: requestPath)
+                }
+                pendingResponses[tag] = PendingResponse(
+                    requestPath: requestPath,
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                )
+
+                Task {
+                    do {
+                        CiGateway.logger.debug("Sending request \(tag, privacy: .public) for \(requestPath, privacy: .public)")
+                        try await CiGateway.send(command, requestPath: requestPath, on: socket)
+                    } catch {
+                        self.failPendingResponse(tag: tag, throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelPendingResponse(tag: tag)
+            }
+        }
+    }
+
     private func nextCommandTag() -> String {
         nextTagIndex += 1
         return "command-\(nextTagIndex)"
@@ -1183,8 +1534,26 @@ private actor CiGatewayConnection {
         pending.continuation.resume(throwing: CiGateway.GatewayError.timedOut(requestPath))
     }
 
+    private func timeOutPendingResponse(tag: String, requestPath: String) {
+        guard let pending = pendingResponses.removeValue(forKey: tag) else {
+            return
+        }
+
+        CiGateway.logger.debug("Request \(tag, privacy: .public) for \(requestPath, privacy: .public) timed out")
+        pending.continuation.resume(throwing: CiGateway.GatewayError.timedOut(requestPath))
+    }
+
     private func failPendingCommand(tag: String, throwing error: Error) {
         guard let pending = pendingCommands.removeValue(forKey: tag) else {
+            return
+        }
+
+        pending.timeoutTask.cancel()
+        pending.continuation.resume(throwing: error)
+    }
+
+    private func failPendingResponse(tag: String, throwing error: Error) {
+        guard let pending = pendingResponses.removeValue(forKey: tag) else {
             return
         }
 
@@ -1196,9 +1565,19 @@ private actor CiGatewayConnection {
         failPendingCommand(tag: tag, throwing: CancellationError())
     }
 
+    private func cancelPendingResponse(tag: String) {
+        failPendingResponse(tag: tag, throwing: CancellationError())
+    }
+
     private func finishPendingCommands(throwing error: Error) {
         for tag in Array(pendingCommands.keys) {
             failPendingCommand(tag: tag, throwing: error)
+        }
+    }
+
+    private func finishPendingResponses(throwing error: Error) {
+        for tag in Array(pendingResponses.keys) {
+            failPendingResponse(tag: tag, throwing: error)
         }
     }
 
@@ -1209,6 +1588,51 @@ private actor CiGatewayConnection {
         for queued in queuedCommands {
             queued.continuation.resume(throwing: error)
         }
+    }
+}
+
+private extension CiGateway.MediaService {
+    init?(_ service: V2ServicesStatusItem) {
+        guard let id = service.id, let name = service.name else {
+            return nil
+        }
+
+        self.init(id: id, name: name, kind: service._class)
+    }
+}
+
+private extension CiGateway.MediaPage {
+    init(_ data: MediaBrowseData?) {
+        self.init(
+            id: data?.id,
+            contentRevision: data?.contentRevision,
+            index: data?.index ?? 0,
+            count: data?.count ?? data?.children?.count ?? 0,
+            total: data?.total,
+            alpha: data?.alpha,
+            children: data?.children?.map(CiGateway.MediaItem.init) ?? []
+        )
+    }
+}
+
+private extension CiGateway.MediaItem {
+    init(_ metadata: ItemMetaData) {
+        self.init(
+            id: metadata.id,
+            kind: metadata._class,
+            name: metadata.name,
+            title: metadata.title,
+            album: metadata.album,
+            artists: metadata.artist ?? [],
+            artworkURL: metadata.artUri.flatMap(URL.init(string:)),
+            duration: metadata.duration,
+            containedKinds: metadata.containedClasses ?? [],
+            childCount: metadata.count,
+            isFavourite: metadata.isFavourite,
+            disabledActions: metadata.disabledActions ?? [],
+            albumID: metadata.albumId,
+            artistID: metadata.artistId
+        )
     }
 }
 

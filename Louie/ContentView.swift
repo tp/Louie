@@ -6,7 +6,6 @@
 //
 
 import Linn
-import SwiftData
 import SwiftUI
 
 struct ContentView: View {
@@ -18,41 +17,30 @@ struct ContentView: View {
 }
 
 private struct ContentViewBody: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
-
     var linn: Linn
+
+    @State private var selectedSection: AppSection? = .home
+    @State private var libraryPath: [LibraryRoute] = []
 
     var body: some View {
         NavigationSplitView {
-//            List {
-//                ForEach(items) { item in
-//                    NavigationLink {
-//                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-//                    } label: {
-//                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-//                    }
-//                }
-//                .onDelete(perform: deleteItems)
-//            }
-            PlayQueue(linn: linn)
-                .safeAreaInset(edge: .bottom) {
-                    PlayerBar(state: linn)
-                        .padding(.horizontal, 50)
-                        .padding(.bottom, 8)
+            List(selection: $selectedSection) {
+                NavigationLink(value: AppSection.home) {
+                    Label(AppSection.home.title, systemImage: AppSection.home.systemImage)
                 }
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        EditButton()
+
+                Section("Music") {
+                    NavigationLink(value: AppSection.library) {
+                        Label(AppSection.library.title, systemImage: AppSection.library.systemImage)
                     }
-                    ToolbarItem {
-                        Button(action: addItem) {
-                            Label("Add Item", systemImage: "plus")
-                        }
-                    }
+
+                    queueLink
                 }
+            }
+            .navigationTitle("Louie")
         } detail: {
-            Text("Select an item")
+            detailContent
+                .playerBarOverlay(linn: linn)
         }
         .task {
             linn.start()
@@ -62,35 +50,42 @@ private struct ContentViewBody: View {
         }
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
+    @ViewBuilder
+    private var detailContent: some View {
+        switch selectedSection ?? .home {
+        case .home:
+            NavigationStack {
+                HomeView(linn: linn)
+            }
+        case .library:
+            NavigationStack(path: $libraryPath) {
+                LibraryBrowser(linn: linn)
+                    .navigationDestination(for: LibraryRoute.self) { route in
+                        switch route {
+                        case let .item(itemRoute):
+                            LibraryItemDetailView(linn: linn, route: itemRoute)
+                        }
+                    }
+            }
+        case .queue:
+            NavigationStack {
+                PlayQueue(linn: linn)
+            }
         }
     }
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
-            }
+    @ViewBuilder
+    private var queueLink: some View {
+        NavigationLink(value: AppSection.queue) {
+            Label(AppSection.queue.title, systemImage: AppSection.queue.systemImage)
         }
+        .badge(linn.upcomingSongs.count)
     }
 }
 
 #if DEBUG
     private struct ContentViewPreview: View {
-        @State private var linn = Linn(
-            mockRoom: "Main Room",
-            currentSong: Linn.Song(
-                id: "chainsmoking",
-                title: "Chainsmoking",
-                artist: "Jacob Banks",
-                artworkURL: URL(string: "https://static.qobuz.com/images/covers/mb/x1/brogg6xqdx1mb_230.jpg")
-            ),
-            playState: .playing,
-            hasNext: true
-        )
+        @State private var linn = Linn(gateway: DemoLinnGateway())
 
         var body: some View {
             ContentViewBody(linn: linn)
@@ -99,6 +94,5 @@ private struct ContentViewBody: View {
 
     #Preview {
         ContentViewPreview()
-            .modelContainer(for: Item.self, inMemory: true)
     }
 #endif

@@ -16,6 +16,11 @@ public protocol LinnGateway: Sendable {
     func selectPlaylistItem(at index: Int, room: String) async throws
     func setVolume(_ volume: Int, room: String, group: Bool) async throws
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws
+    func mediaServices(room: String) async throws -> [CiGateway.MediaService]
+    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> CiGateway.MediaPage
+    func searchMedia(serviceID: String, query: String, type: CiGateway.MediaSearchType, index: Int, count: Int) async throws -> CiGateway.MediaPage
+    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws
+    func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws
 }
 
 public extension LinnGateway {
@@ -103,9 +108,265 @@ public final class Linn {
         }
     }
 
+    public enum SearchType: String, Sendable, Equatable, CaseIterable, Identifiable {
+        case albums
+        case artists
+        case tracks
+        case playlists
+        case composers
+        case stations
+
+        public var id: String {
+            rawValue
+        }
+    }
+
+    public enum QueuePlacement: String, Sendable, Equatable, CaseIterable, Identifiable {
+        case now
+        case next
+        case last
+        case replace
+
+        public var id: String {
+            rawValue
+        }
+    }
+
+    public struct LibraryService: Sendable, Equatable, Identifiable {
+        public var id: String
+        public var name: String
+        public var kind: String?
+
+        public init(id: String, name: String, kind: String? = nil) {
+            self.id = id
+            self.name = name
+            self.kind = kind
+        }
+    }
+
+    public struct LibraryItem: Sendable, Equatable, Identifiable {
+        public var id: String
+        public var kind: String
+        public var title: String
+        public var subtitle: String?
+        public var album: String?
+        public var artists: [String]
+        public var artworkURL: URL?
+        public var duration: Int?
+        public var containedKinds: [String]
+        public var childCount: Int?
+        public var isFavourite: Bool?
+        public var canFavourite: Bool
+
+        public init(
+            id: String,
+            kind: String,
+            title: String,
+            subtitle: String? = nil,
+            album: String? = nil,
+            artists: [String] = [],
+            artworkURL: URL? = nil,
+            duration: Int? = nil,
+            containedKinds: [String] = [],
+            childCount: Int? = nil,
+            isFavourite: Bool? = nil,
+            canFavourite: Bool = false
+        ) {
+            self.id = id
+            self.kind = kind
+            self.title = title
+            self.subtitle = subtitle
+            self.album = album
+            self.artists = artists
+            self.artworkURL = artworkURL
+            self.duration = duration
+            self.containedKinds = containedKinds
+            self.childCount = childCount
+            self.isFavourite = isFavourite
+            self.canFavourite = canFavourite
+        }
+
+        public var isContainer: Bool {
+            kind.contains("container")
+                || kind.contains("album")
+                || kind.contains("playlist")
+                || kind.hasPrefix("md.qobuz")
+                || childCount != nil
+                || !containedKinds.isEmpty
+        }
+    }
+
+    public struct LibraryPage: Sendable, Equatable {
+        public var id: String?
+        public var contentRevision: Int?
+        public var index: Int
+        public var count: Int
+        public var total: Int?
+        public var items: [LibraryItem]
+
+        public init(
+            id: String? = nil,
+            contentRevision: Int? = nil,
+            index: Int = 0,
+            count: Int = 0,
+            total: Int? = nil,
+            items: [LibraryItem] = []
+        ) {
+            self.id = id
+            self.contentRevision = contentRevision
+            self.index = index
+            self.count = count
+            self.total = total
+            self.items = items
+        }
+    }
+
+    public struct LibrarySection: Sendable, Equatable, Identifiable {
+        public enum Kind: String, Sendable, Equatable {
+            case favourites
+            case recommendations
+            case playlists
+            case purchases
+            case browse
+        }
+
+        public var id: String
+        public var title: String
+        public var kind: Kind
+        public var path: [String]
+        public var source: LibraryItem?
+        public var items: [LibraryItem]
+
+        public init(
+            id: String,
+            title: String,
+            kind: Kind,
+            path: [String] = [],
+            source: LibraryItem? = nil,
+            items: [LibraryItem] = []
+        ) {
+            self.id = id
+            self.title = title
+            self.kind = kind
+            self.path = path
+            self.source = source
+            self.items = items
+        }
+    }
+
+    public struct Library: Sendable, Equatable {
+        public enum Availability: Sendable, Equatable {
+            case unavailable
+            case loading
+            case available
+            case failed(String)
+        }
+
+        public struct Qobuz: Sendable, Equatable {
+            public var root: LibrarySection?
+            public var discover: LibraryItem?
+            public var genres: LibraryItem?
+            public var myQobuz: LibraryItem?
+            public var favouriteArtists: LibrarySection?
+            public var favouriteAlbums: LibrarySection?
+            public var favouritePlaylists: LibrarySection?
+            public var myPlaylists: LibrarySection?
+            public var purchases: LibrarySection?
+            public var recommendations: [LibrarySection]
+            public var browseSections: [LibrarySection]
+
+            public init(sections: [LibrarySection] = []) {
+                root = sections.first { Self.normalized($0.path) == ["qobuz"] }
+                discover = Self.rootItem(in: root, title: "discover", kindContains: "discover")
+                genres = Self.rootItem(in: root, title: "genres", kindContains: "genres")
+                myQobuz = Self.rootItem(in: root, title: "my qobuz", kindContains: "myqobuz")
+                favouriteArtists = Self.section(
+                    in: sections,
+                    matchingPathSuffixes: [
+                        ["my qobuz", "favourites", "artist"],
+                        ["my qobuz", "favourites", "artists"],
+                    ]
+                )
+                favouriteAlbums = Self.section(
+                    in: sections,
+                    matchingPathSuffixes: [
+                        ["my qobuz", "favourites", "album"],
+                        ["my qobuz", "favourites", "albums"],
+                    ]
+                )
+                favouritePlaylists = Self.section(
+                    in: sections,
+                    matchingPathSuffixes: [
+                        ["my qobuz", "favourites", "playlist"],
+                        ["my qobuz", "favourites", "playlists"],
+                    ]
+                )
+                myPlaylists = Self.section(in: sections, matchingPathSuffixes: [["my qobuz", "my playlists"]])
+                purchases = Self.section(in: sections, matchingPathSuffixes: [["my qobuz", "purchased"]])
+                recommendations = sections.filter { $0.kind == .recommendations }
+                browseSections = sections.filter { $0.kind == .browse }
+            }
+
+            private static func rootItem(
+                in root: LibrarySection?,
+                title: String,
+                kindContains kind: String
+            ) -> LibraryItem? {
+                root?.items.first {
+                    $0.title.lowercased() == title
+                        || $0.kind.lowercased().contains(kind)
+                }
+            }
+
+            private static func section(
+                in sections: [LibrarySection],
+                matchingPathSuffixes suffixes: [[String]]
+            ) -> LibrarySection? {
+                sections.first { section in
+                    let path = normalized(section.path)
+                    return suffixes.contains { hasSuffix($0, in: path) }
+                }
+            }
+
+            private static func hasSuffix(_ suffix: [String], in path: [String]) -> Bool {
+                guard suffix.count <= path.count else {
+                    return false
+                }
+                return Array(path.suffix(suffix.count)) == suffix
+            }
+
+            private static func normalized(_ path: [String]) -> [String] {
+                path.map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+            }
+        }
+
+        public var availability: Availability
+        public var qobuzService: LibraryService?
+        public var rootPage: LibraryPage?
+        public var sections: [LibrarySection]
+        public var qobuz: Qobuz
+
+        public init(
+            availability: Availability = .unavailable,
+            qobuzService: LibraryService? = nil,
+            rootPage: LibraryPage? = nil,
+            sections: [LibrarySection] = [],
+            qobuz: Qobuz? = nil
+        ) {
+            self.availability = availability
+            self.qobuzService = qobuzService
+            self.rootPage = rootPage
+            self.sections = sections
+            self.qobuz = qobuz ?? Qobuz(sections: sections)
+        }
+    }
+
     public let room: String
     public let maximumVolume: Int
     public private(set) var connectionState: ConnectionState = .idle
+    public private(set) var library = Library()
     public private(set) var currentSong: Song?
     public private(set) var playlist = Playlist()
     public private(set) var playState: PlayState?
@@ -156,12 +417,15 @@ public final class Linn {
     private var optimisticTransition: OptimisticTransition?
     private var optimisticPlayState: OptimisticPlayState?
     private var playlistSelectionQueue = PlaylistSelectionQueue()
+    private var libraryContentRevision: Int?
+    private var libraryPageCache: [LibraryCacheKey: LibraryPage] = [:]
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
 
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
     @ObservationIgnored private var controlTask: Task<Void, Never>?
     @ObservationIgnored private var playlistSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var playlistSelectionTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var libraryTask: Task<Void, Never>?
 
     private struct OptimisticTransition {
         var targetQueueIndex: Int
@@ -225,6 +489,11 @@ public final class Linn {
             inFlight = pending
             return pending
         }
+    }
+
+    private struct LibraryCacheKey: Sendable, Hashable {
+        var mediaID: String
+        var browseType: String
     }
 
     public init(
@@ -296,6 +565,7 @@ public final class Linn {
         controlTask?.cancel()
         playlistSelectionTask?.cancel()
         playlistSelectionTimeoutTask?.cancel()
+        libraryTask?.cancel()
     }
 
     public func start() {
@@ -349,11 +619,14 @@ public final class Linn {
                 connectionState = .failed(message)
             }
         }
+
+        loadLibrary()
     }
 
     public func stop() {
         updatesTask?.cancel()
         updatesTask = nil
+        libraryTask?.cancel()
         guard ciGateway != nil else {
             return
         }
@@ -416,6 +689,404 @@ public final class Linn {
         self.isMuted = isMuted
         performControl { ciGateway, room in
             try await ciGateway.setMuted(isMuted, room: room)
+        }
+    }
+
+    public func loadLibrary() {
+        if library.availability == .loading {
+            return
+        }
+
+        libraryTask?.cancel()
+
+        guard let ciGateway else {
+            library = Library(availability: .unavailable)
+            libraryContentRevision = nil
+            libraryPageCache = [:]
+            return
+        }
+
+        library.availability = .loading
+        libraryTask = Task { [weak self, ciGateway, room] in
+            guard let self else {
+                return
+            }
+
+            do {
+                let services = try await ciGateway.mediaServices(room: room)
+                guard let qobuzService = services.first(where: { $0.name.localizedCaseInsensitiveCompare("Qobuz") == .orderedSame }) else {
+                    applyUnavailableLibrary()
+                    return
+                }
+
+                let rootPage = try await ciGateway.browseMedia(
+                    mediaID: qobuzService.id,
+                    index: 0,
+                    count: 50,
+                    browseType: ""
+                )
+                let libraryRootPage = LibraryPage(rootPage)
+                reconcileLibraryRevision(libraryRootPage.contentRevision)
+                cache(libraryRootPage, mediaID: qobuzService.id, browseType: "")
+
+                let sections = await buildLibrarySections(
+                    rootPage: libraryRootPage,
+                    gateway: ciGateway
+                )
+                library = Library(
+                    availability: .available,
+                    qobuzService: LibraryService(qobuzService),
+                    rootPage: libraryRootPage,
+                    sections: sections
+                )
+            } catch is CancellationError {
+            } catch {
+                let message = String(describing: error)
+                Self.logger.error("Qobuz library load failed: \(message, privacy: .public)")
+                library.availability = .failed(message)
+            }
+        }
+    }
+
+    public func refreshLibrary() {
+        libraryContentRevision = nil
+        libraryPageCache = [:]
+        loadLibrary()
+    }
+
+    public func browse(_ item: LibraryItem, index: Int = 0, count: Int = 50, browseType: String = "") async throws -> LibraryPage {
+        if index == 0, let cached = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: browseType)] {
+            return cached
+        }
+
+        guard let ciGateway else {
+            throw LibraryError.unavailable
+        }
+
+        let page = try await ciGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
+        let libraryPage = LibraryPage(page)
+        reconcileLibraryRevision(libraryPage.contentRevision)
+        if index == 0 {
+            cache(libraryPage, mediaID: item.id, browseType: browseType)
+        }
+        return libraryPage
+    }
+
+    public func searchLibrary(
+        query: String,
+        type: SearchType = .albums,
+        index: Int = 0,
+        count: Int = 25
+    ) async throws -> LibraryPage {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return LibraryPage(id: "search", index: index)
+        }
+        guard let ciGateway, let serviceID = library.qobuzService?.id else {
+            throw LibraryError.unavailable
+        }
+
+        let page = try await ciGateway.searchMedia(
+            serviceID: serviceID,
+            query: trimmedQuery,
+            type: CiGateway.MediaSearchType(type),
+            index: index,
+            count: count
+        )
+        return LibraryPage(page)
+    }
+
+    public func play(_ item: LibraryItem, placement: QueuePlacement = .replace) {
+        guard ciGateway != nil else {
+            return
+        }
+
+        performControl { ciGateway, room in
+            try await ciGateway.selectMedia(
+                mediaID: item.id,
+                room: room,
+                queue: CiGateway.QueuePlacement(placement)
+            )
+        }
+    }
+
+    public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {
+        guard item.canFavourite, let ciGateway else {
+            return
+        }
+
+        updateLibraryItem(id: item.id, isFavourite: isFavourite)
+        controlTask?.cancel()
+        controlTask = Task { [weak self, ciGateway] in
+            do {
+                try await ciGateway.setMediaFavourite(mediaID: item.id, isFavourite: isFavourite)
+            } catch is CancellationError {
+            } catch {
+                self?.updateLibraryItem(id: item.id, isFavourite: item.isFavourite)
+                self?.lastErrorMessage = String(describing: error)
+            }
+        }
+    }
+
+    private enum LibraryError: Error, LocalizedError {
+        case unavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable:
+                "Qobuz library is unavailable"
+            }
+        }
+    }
+
+    private func applyUnavailableLibrary() {
+        library = Library(availability: .unavailable)
+        libraryContentRevision = nil
+        libraryPageCache = [:]
+    }
+
+    private func buildLibrarySections(
+        rootPage: LibraryPage,
+        gateway: any LinnGateway
+    ) async -> [LibrarySection] {
+        var sections: [LibrarySection] = []
+        var rootBrowseItems: [LibraryItem] = []
+
+        for item in rootPage.items {
+            let sectionKind = classifiedSectionKind(for: item)
+            if sectionKind != .browse {
+                if let section = await librarySection(
+                    for: item,
+                    kind: sectionKind,
+                    gateway: gateway,
+                    path: ["Qobuz", item.title]
+                ) {
+                    sections.append(section)
+                }
+                continue
+            }
+
+            if isPersonalLibraryFolder(item) {
+                let personalSections = await personalLibrarySections(
+                    for: item,
+                    gateway: gateway,
+                    path: ["Qobuz", item.title]
+                )
+                sections.append(contentsOf: personalSections)
+                rootBrowseItems.append(item)
+            } else {
+                rootBrowseItems.append(item)
+            }
+        }
+
+        if !rootBrowseItems.isEmpty {
+            sections.insert(
+                LibrarySection(
+                    id: rootPage.id ?? "qobuz-root",
+                    title: "Qobuz",
+                    kind: .browse,
+                    path: ["Qobuz"],
+                    items: rootBrowseItems
+                ),
+                at: 0
+            )
+        }
+
+        return sections
+    }
+
+    private func personalLibrarySections(
+        for item: LibraryItem,
+        gateway: any LinnGateway,
+        path: [String]
+    ) async -> [LibrarySection] {
+        let items = await browseSectionItems(item, gateway: gateway)
+        var sections: [LibrarySection] = []
+
+        for child in items {
+            if isFavouritesFolder(child) {
+                let favouriteSections = await favouriteLibrarySections(
+                    for: child,
+                    gateway: gateway,
+                    path: path + [child.title]
+                )
+                sections.append(contentsOf: favouriteSections)
+                continue
+            }
+
+            let sectionKind = classifiedSectionKind(for: child)
+            guard sectionKind != .browse else {
+                continue
+            }
+            if let section = await librarySection(
+                for: child,
+                kind: sectionKind,
+                gateway: gateway,
+                path: path + [child.title]
+            ) {
+                sections.append(section)
+            }
+        }
+
+        return sections
+    }
+
+    private func favouriteLibrarySections(
+        for item: LibraryItem,
+        gateway: any LinnGateway,
+        path: [String]
+    ) async -> [LibrarySection] {
+        let items = await browseSectionItems(item, gateway: gateway)
+        let sectionFolders = items.filter(isFavouriteSectionFolder)
+        guard !sectionFolders.isEmpty else {
+            return [
+                LibrarySection(
+                    id: item.id,
+                    title: item.title,
+                    kind: .favourites,
+                    path: path,
+                    source: item,
+                    items: items
+                ),
+            ]
+        }
+
+        var sections: [LibrarySection] = []
+        for sectionFolder in sectionFolders {
+            if let section = await librarySection(
+                for: sectionFolder,
+                kind: .favourites,
+                gateway: gateway,
+                path: path + [sectionFolder.title]
+            ) {
+                sections.append(section)
+            }
+        }
+        return sections
+    }
+
+    private func librarySection(
+        for item: LibraryItem,
+        kind: LibrarySection.Kind,
+        gateway: any LinnGateway,
+        path: [String]
+    ) async -> LibrarySection? {
+        let items = await browseSectionItems(item, gateway: gateway)
+        guard !items.isEmpty else {
+            return nil
+        }
+
+        return LibrarySection(
+            id: item.id,
+            title: item.title,
+            kind: kind,
+            path: path,
+            source: item,
+            items: items
+        )
+    }
+
+    private func browseSectionItems(
+        _ item: LibraryItem,
+        gateway: any LinnGateway
+    ) async -> [LibraryItem] {
+        let page = try? await gateway.browseMedia(mediaID: item.id, index: 0, count: 50, browseType: "")
+        let libraryPage = page.map(LibraryPage.init)
+        if let libraryPage {
+            reconcileLibraryRevision(libraryPage.contentRevision)
+            cache(libraryPage, mediaID: item.id, browseType: "")
+        }
+        return libraryPage?.items ?? []
+    }
+
+    private func isPersonalLibraryFolder(_ item: LibraryItem) -> Bool {
+        let title = item.title.lowercased()
+        let kind = item.kind.lowercased()
+        return kind.hasPrefix("md.qobuz")
+            && (
+                title == "my qobuz"
+                    || title == "my music"
+                    || title == "my library"
+                    || title == "library"
+            )
+    }
+
+    private func isFavouritesFolder(_ item: LibraryItem) -> Bool {
+        let title = item.title.lowercased()
+        return title == "favourites"
+            || title == "favorites"
+            || title == "liked"
+    }
+
+    private func isFavouriteSectionFolder(_ item: LibraryItem) -> Bool {
+        let title = item.title.lowercased()
+        return title == "album"
+            || title == "albums"
+            || title == "artist"
+            || title == "artists"
+            || title == "playlist"
+            || title == "playlists"
+    }
+
+    private func classifiedSectionKind(for item: LibraryItem) -> LibrarySection.Kind {
+        let title = item.title.lowercased()
+
+        if title.contains("favourite") || title.contains("favorite") || title.contains("liked") {
+            return .favourites
+        }
+        if title.contains("recommend") || title.contains("for you") {
+            return .recommendations
+        }
+        if title.contains("playlist") {
+            return .playlists
+        }
+        if title.contains("purchase") || title.contains("purchased") || title.contains("owned") {
+            return .purchases
+        }
+        return .browse
+    }
+
+    private func reconcileLibraryRevision(_ contentRevision: Int?) {
+        guard let contentRevision else {
+            return
+        }
+        if let libraryContentRevision, libraryContentRevision != contentRevision {
+            libraryPageCache = [:]
+        }
+        libraryContentRevision = contentRevision
+    }
+
+    private func cache(_ page: LibraryPage, mediaID: String, browseType: String) {
+        libraryPageCache[LibraryCacheKey(mediaID: mediaID, browseType: browseType)] = page
+    }
+
+    private func updateLibraryItem(id: String, isFavourite: Bool?) {
+        func updated(_ item: LibraryItem) -> LibraryItem {
+            guard item.id == id else {
+                return item
+            }
+            var item = item
+            item.isFavourite = isFavourite
+            return item
+        }
+
+        var updatedLibrary = library
+        if var rootPage = updatedLibrary.rootPage {
+            rootPage.items = rootPage.items.map(updated)
+            updatedLibrary.rootPage = rootPage
+        }
+        updatedLibrary.sections = updatedLibrary.sections.map { section in
+            var section = section
+            section.source = section.source.map(updated)
+            section.items = section.items.map(updated)
+            return section
+        }
+        updatedLibrary.qobuz = Library.Qobuz(sections: updatedLibrary.sections)
+        library = updatedLibrary
+        libraryPageCache = libraryPageCache.mapValues { page in
+            var page = page
+            page.items = page.items.map(updated)
+            return page
         }
     }
 
@@ -704,6 +1375,22 @@ extension CiGateway: LinnGateway {
     ) async -> AsyncThrowingStream<NowPlaying, Error> {
         nowPlayingEvents(room: room, updateInterval: updateInterval)
     }
+
+    public func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> MediaPage {
+        try await browse(mediaID: mediaID, index: index, count: count, browseType: browseType)
+    }
+
+    public func searchMedia(serviceID: String, query: String, type: MediaSearchType, index: Int, count: Int) async throws -> MediaPage {
+        try await search(serviceID: serviceID, query: query, type: type, index: index, count: count)
+    }
+
+    public func selectMedia(mediaID: String, room: String, queue: QueuePlacement) async throws {
+        try await select(mediaID: mediaID, room: room, queue: queue)
+    }
+
+    public func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws {
+        try await setFavourite(mediaID: mediaID, isFavourite: isFavourite)
+    }
 }
 
 public extension Linn.PlayState {
@@ -775,6 +1462,80 @@ public extension Linn.Timeline {
             duration: timeline.duration,
             progress: timeline.progress
         )
+    }
+}
+
+public extension Linn.LibraryService {
+    init(_ service: CiGateway.MediaService) {
+        self.init(id: service.id, name: service.name, kind: service.kind)
+    }
+}
+
+public extension Linn.LibraryPage {
+    init(_ page: CiGateway.MediaPage) {
+        self.init(
+            id: page.id,
+            contentRevision: page.contentRevision,
+            index: page.index,
+            count: page.count,
+            total: page.total,
+            items: page.children.map(Linn.LibraryItem.init)
+        )
+    }
+}
+
+public extension Linn.LibraryItem {
+    init(_ item: CiGateway.MediaItem) {
+        let title = item.displayTitle?.isEmpty == false ? item.displayTitle! : item.id
+        let subtitle = item.artists.isEmpty ? item.album : item.artists.joined(separator: ", ")
+        self.init(
+            id: item.id,
+            kind: item.kind,
+            title: title,
+            subtitle: subtitle,
+            album: item.album,
+            artists: item.artists,
+            artworkURL: item.artworkURL,
+            duration: item.duration,
+            containedKinds: item.containedKinds,
+            childCount: item.childCount,
+            isFavourite: item.isFavourite,
+            canFavourite: item.canFavourite
+        )
+    }
+}
+
+public extension CiGateway.MediaSearchType {
+    init(_ type: Linn.SearchType) {
+        switch type {
+        case .albums:
+            self = .albums
+        case .artists:
+            self = .artists
+        case .tracks:
+            self = .tracks
+        case .playlists:
+            self = .playlists
+        case .composers:
+            self = .composers
+        case .stations:
+            self = .stations
+        }
+    }
+}
+
+public extension CiGateway.QueuePlacement {
+    init(_ placement: Linn.QueuePlacement) {
+        switch placement {
+        case .now:
+            self = .now
+        case .next:
+            self = .next
+        case .last:
+            self = .last
+        case .replace:
+            self = .replace
+        }
     }
 }
 

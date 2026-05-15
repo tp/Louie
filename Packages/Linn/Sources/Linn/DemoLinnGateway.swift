@@ -169,6 +169,114 @@
             yieldSnapshot()
         }
 
+        public func mediaServices(room _: String) async throws -> [CiGateway.MediaService] {
+            [
+                CiGateway.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
+            ]
+        }
+
+        public func browseMedia(
+            mediaID: String,
+            index: Int,
+            count: Int,
+            browseType _: String
+        ) async throws -> CiGateway.MediaPage {
+            let children: [CiGateway.MediaItem]
+            switch mediaID {
+            case "service-qobuz":
+                children = [
+                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                ]
+            case "qobuz-myqobuz":
+                children = [
+                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                ]
+            case "qobuz-favourites":
+                children = [
+                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-tracks", kind: "md.container", name: "Tracks"),
+                ]
+            case "qobuz-favourite-albums":
+                children = Self.demoLibraryAlbums
+            case "qobuz-favourite-artists":
+                children = Self.demoLibraryArtists
+            case "qobuz-favourite-playlists", "qobuz-my-playlists":
+                children = Self.demoLibraryPlaylists
+            case "qobuz-purchased":
+                children = Self.demoLibraryAlbums.reversed()
+            case "qobuz-discover":
+                children = [
+                    CiGateway.MediaItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", name: "New Releases"),
+                    CiGateway.MediaItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", name: "Qobuz Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", name: "Most Streamed"),
+                ]
+            case "qobuz-genres":
+                children = [
+                    CiGateway.MediaItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", name: "Jazz"),
+                    CiGateway.MediaItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", name: "Electronic"),
+                    CiGateway.MediaItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", name: "Classical"),
+                ]
+            case "qobuz-album-hit-me-hard-and-soft":
+                children = Self.hitMeHardAndSoftTracks
+            case "qobuz-album-happy-christmas",
+                 "qobuz-album-shostakovich-quartets",
+                 "qobuz-album-birth-of-the-blue",
+                 "qobuz-album-chopin-nocturnes",
+                 "qobuz-album-abbey-road",
+                 "qobuz-album-opus",
+                 "qobuz-album-the-old-country":
+                children = Self.demoTracks(for: mediaID)
+            case "qobuz-playlist-willkommen",
+                 "qobuz-playlist-true-sound-covers",
+                 "qobuz-playlist-grammy-winners-2021":
+                children = Self.demoPlaylistTracks
+            default:
+                children = []
+            }
+
+            let slice = Array(children.dropFirst(index).prefix(count))
+            return CiGateway.MediaPage(
+                id: mediaID,
+                contentRevision: 1,
+                index: index,
+                count: slice.count,
+                total: children.count,
+                children: slice
+            )
+        }
+
+        public func searchMedia(
+            serviceID _: String,
+            query: String,
+            type _: CiGateway.MediaSearchType,
+            index: Int,
+            count: Int
+        ) async throws -> CiGateway.MediaPage {
+            let matches = Self.demoLibraryAlbums.filter {
+                ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
+                    || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
+            }
+            let slice = Array(matches.dropFirst(index).prefix(count))
+            return CiGateway.MediaPage(
+                id: "qobuz-search",
+                contentRevision: 1,
+                index: index,
+                count: slice.count,
+                total: matches.count,
+                children: slice
+            )
+        }
+
+        public func selectMedia(mediaID _: String, room _: String, queue _: CiGateway.QueuePlacement) async throws {}
+
+        public func setMediaFavourite(mediaID _: String, isFavourite _: Bool) async throws {}
+
         private func addSubscription(
             id: UUID,
             room: String,
@@ -329,6 +437,235 @@
                 duration: 136,
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/64/77/0060255747764_230.jpg")
             ),
+            DemoSong(
+                id: "preview-skinny",
+                title: "SKINNY",
+                artist: "Billie Eilish",
+                album: "HIT ME HARD AND SOFT",
+                duration: 219,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-lunch",
+                title: "LUNCH",
+                artist: "Billie Eilish",
+                album: "HIT ME HARD AND SOFT",
+                duration: 180,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-chihiro",
+                title: "CHIHIRO",
+                artist: "Billie Eilish",
+                album: "HIT ME HARD AND SOFT",
+                duration: 303,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-birds-of-a-feather",
+                title: "BIRDS OF A FEATHER",
+                artist: "Billie Eilish",
+                album: "HIT ME HARD AND SOFT",
+                duration: 210,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+            ),
+            DemoSong(
+                id: "preview-wildflower",
+                title: "WILDFLOWER",
+                artist: "Billie Eilish",
+                album: "HIT ME HARD AND SOFT",
+                duration: 261,
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+            ),
         ]
+
+        private static let demoLibraryAlbums: [CiGateway.MediaItem] = [
+            CiGateway.MediaItem(
+                id: "qobuz-album-happy-christmas",
+                kind: "md.album.qobuz",
+                name: "Happy Christmas",
+                album: "Happy Christmas",
+                artists: ["Frank Sinatra"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/25/04/3610152050425_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 50,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-shostakovich-quartets",
+                kind: "md.album.qobuz",
+                name: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                album: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                artists: ["Cuarteto Casals"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/ob/zn/wozp8tpq0znob_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 30,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-hit-me-hard-and-soft",
+                kind: "md.album.qobuz",
+                name: "HIT ME HARD AND SOFT",
+                album: "HIT ME HARD AND SOFT",
+                artists: ["Billie Eilish"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 10,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-birth-of-the-blue",
+                kind: "md.album.qobuz",
+                name: "Birth of the Blue",
+                album: "Birth of the Blue",
+                artists: ["Miles Davis"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/fa/90/ld7wpvuga90fa_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 4,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-chopin-nocturnes",
+                kind: "md.album.qobuz",
+                name: "Chopin: The Complete Nocturnes",
+                album: "Chopin: The Complete Nocturnes",
+                artists: ["Tom Hicks"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/yc/ag/nuuxf36hoagyc_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 21,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-abbey-road",
+                kind: "md.album.qobuz",
+                name: "Abbey Road",
+                album: "Abbey Road",
+                artists: ["The Beatles"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/6b/az/trrcz9pvaaz6b_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 40,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-opus",
+                kind: "md.album.qobuz",
+                name: "Opus",
+                album: "Opus",
+                artists: ["Ryuichi Sakamoto"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/vc/kx/z9mpg2fc7kxvc_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 20,
+                isFavourite: true
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-album-the-old-country",
+                kind: "md.album.qobuz",
+                name: "The Old Country",
+                album: "The Old Country",
+                artists: ["Keith Jarrett"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/4a/4y/rfwy0akjr4y4a_230.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 8,
+                isFavourite: true
+            ),
+        ]
+
+        private static let demoLibraryArtists: [CiGateway.MediaItem] = [
+            CiGateway.MediaItem(
+                id: "qobuz-artist-qrion",
+                kind: "md.artist.qobuz",
+                name: "Qrion",
+                artists: ["Qrion"],
+                artworkURL: URL(string: "https://static.qobuz.com/images/artists/covers/small/afd716d782ba6b056d5a311b0bed0573.jpg"),
+                isFavourite: true
+            ),
+        ]
+
+        private static let demoLibraryPlaylists: [CiGateway.MediaItem] = [
+            CiGateway.MediaItem(
+                id: "qobuz-playlist-willkommen",
+                kind: "md.playlist.qobuz",
+                name: "Willkommen bei Qobuz",
+                artworkURL: URL(string: "https://static.qobuz.com/images/playlists/1285072_2bc9b2d5023757d1a8b10db915efd367_rectangle.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 125
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-playlist-true-sound-covers",
+                kind: "md.playlist.qobuz",
+                name: "True Sound Covers",
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/13/05/0093624980513_300.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 50
+            ),
+            CiGateway.MediaItem(
+                id: "qobuz-playlist-grammy-winners-2021",
+                kind: "md.playlist.qobuz",
+                name: "2021 Grammy Winners",
+                artworkURL: URL(string: "https://static.qobuz.com/images/playlists/5863588_f5111fc6839f22be2f91948ca16dfc71_rectangle.jpg"),
+                containedKinds: ["md.track.qobuz"],
+                childCount: 58,
+                isFavourite: true
+            ),
+        ]
+
+        private static let hitMeHardAndSoftTracks: [CiGateway.MediaItem] = [
+            demoTrack(id: "qobuz-track-skinny", title: "SKINNY", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 219),
+            demoTrack(id: "qobuz-track-lunch", title: "LUNCH", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 180),
+            demoTrack(id: "qobuz-track-chihiro", title: "CHIHIRO", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 303),
+            demoTrack(id: "qobuz-track-birds-of-a-feather", title: "BIRDS OF A FEATHER", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 210),
+            demoTrack(id: "qobuz-track-wildflower", title: "WILDFLOWER", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 261),
+            demoTrack(id: "qobuz-track-the-greatest", title: "THE GREATEST", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 293),
+            demoTrack(id: "qobuz-track-lamour-de-ma-vie", title: "L'AMOUR DE MA VIE", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 333),
+            demoTrack(id: "qobuz-track-the-diner", title: "THE DINER", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 186),
+            demoTrack(id: "qobuz-track-bittersuite", title: "BITTERSUITE", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 298),
+            demoTrack(id: "qobuz-track-blue", title: "BLUE", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 343),
+        ]
+
+        private static let demoPlaylistTracks: [CiGateway.MediaItem] = [
+            demoTrack(id: "qobuz-playlist-track-chainsmoking", title: "Chainsmoking", album: "Preview Queue", artist: "Jacob Banks", duration: 197),
+            demoTrack(id: "qobuz-playlist-track-green-light", title: "Green Light", album: "Melodrama", artist: "Lorde", duration: 234),
+            demoTrack(id: "qobuz-playlist-track-supercut", title: "Supercut", album: "Melodrama", artist: "Lorde", duration: 278),
+            demoTrack(id: "qobuz-playlist-track-bad-guy", title: "bad guy", album: "WHEN WE ALL FALL ASLEEP, WHERE DO WE GO?", artist: "Billie Eilish", duration: 194),
+            demoTrack(id: "qobuz-playlist-track-time", title: "Time", album: "The Old Country", artist: "Keith Jarrett", duration: 298),
+        ]
+
+        private static func demoTracks(for albumID: String) -> [CiGateway.MediaItem] {
+            guard let album = demoLibraryAlbums.first(where: { $0.id == albumID }) else {
+                return []
+            }
+
+            let title = album.displayTitle ?? albumID
+            let artist = album.artists.first ?? "Qobuz"
+            return (1 ... min(album.childCount ?? 6, 8)).map { index in
+                demoTrack(
+                    id: "\(albumID)-track-\(index)",
+                    title: "Track \(index)",
+                    album: title,
+                    artist: artist,
+                    duration: 180 + index * 11,
+                    artworkURL: album.artworkURL
+                )
+            }
+        }
+
+        private static func demoTrack(
+            id: String,
+            title: String,
+            album: String,
+            artist: String,
+            duration: Int,
+            artworkURL: URL? = URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+        ) -> CiGateway.MediaItem {
+            CiGateway.MediaItem(
+                id: id,
+                kind: "md.track.qobuz",
+                title: title,
+                album: album,
+                artists: [artist],
+                artworkURL: artworkURL,
+                duration: duration
+            )
+        }
     }
 #endif

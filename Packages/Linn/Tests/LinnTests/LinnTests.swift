@@ -213,14 +213,167 @@ func rapidPlaylistSelectionsSendOnlyFirstAndLatestPendingTarget() async throws {
     await gateway.resumeSelections()
 }
 
+@Test
+@MainActor
+func libraryDiscoversQobuzAndUsesCachedBrowsedSections() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+
+    #expect(linn.library.qobuzService?.name == "Qobuz")
+    #expect(await gateway.browseCallCount(mediaID: "service-qobuz") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-myqobuz") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-favourites") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-favourite-albums") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-discover") == 0)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-genres") == 0)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-album-happy-christmas") == 0)
+
+    #expect(linn.library.qobuz.discover?.title == "Discover")
+    #expect(linn.library.qobuz.genres?.title == "Genres")
+    #expect(linn.library.qobuz.myQobuz?.title == "My Qobuz")
+    let favourites = try #require(linn.library.qobuz.favouriteAlbums)
+    let source = try #require(favourites.source)
+    #expect(favourites.items.map(\.title) == [
+        "Happy Christmas",
+        "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+    ])
+
+    let browseCountAfterLoad = await gateway.browseCallCount(mediaID: source.id)
+    let favouritesPage = try await linn.browse(source)
+    #expect(favouritesPage.items.map(\.title) == [
+        "Happy Christmas",
+        "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+    ])
+
+    #expect(await gateway.browseCallCount(mediaID: source.id) == browseCountAfterLoad)
+}
+
+@Test
+@MainActor
+func qobuzRootFoldersExposeSectionsWithoutBrowsingMediaItems() async throws {
+    let gateway = TestGateway()
+    await gateway.seedNestedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+
+    #expect(await gateway.browseCallCount(mediaID: "service-qobuz") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-myqobuz") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-favourites") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-favourite-albums") == 1)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-discover") == 0)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-genres") == 0)
+    #expect(await gateway.browseCallCount(mediaID: "qobuz-album-chopin-nocturnes") == 0)
+    #expect(linn.library.qobuz.favouriteAlbums?.items.map(\.title) == ["Chopin: The Complete Nocturnes"])
+}
+
+@Test
+@MainActor
+func libraryRefreshInvalidatesCacheWhenContentRevisionChanges() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+
+    let initialBrowseCount = await gateway.browseCallCount(mediaID: "service-qobuz")
+
+    await gateway.seedQobuzLibrary(contentRevision: 2)
+    linn.refreshLibrary()
+    try await waitUntil {
+        linn.library.rootPage?.contentRevision == 2
+    }
+
+    #expect(await gateway.browseCallCount(mediaID: "service-qobuz") > initialBrowseCount)
+}
+
+@Test
+@MainActor
+func librarySearchResultsReplaceAndMediaItemsCanBeSelected() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+
+    let firstResults = try await linn.searchLibrary(query: "Happy", type: .albums)
+    #expect(firstResults.items.map(\.title) == ["Happy Christmas"])
+
+    let secondResults = try await linn.searchLibrary(query: "Billie", type: .albums)
+    #expect(secondResults.items.map(\.title) == ["HIT ME HARD AND SOFT"])
+
+    let item = try #require(secondResults.items.first)
+    linn.play(item, placement: .next)
+    try await waitUntil {
+        await gateway.selectedMediaItems() == [
+            TestGateway.SelectedMediaItem(mediaID: item.id, room: "Linn", queue: .next),
+        ]
+    }
+}
+
+@Test
+@MainActor
+func libraryFavouriteUpdatesSupportedItems() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+
+    let item = try #require(linn.library.qobuz.favouriteAlbums?.items.first)
+    #expect(item.canFavourite)
+
+    linn.setFavourite(item, isFavourite: false)
+    try await waitUntil {
+        await gateway.favouriteRequests() == [
+            TestGateway.FavouriteRequest(mediaID: item.id, isFavourite: false),
+        ]
+    }
+    #expect(linn.library.qobuz.favouriteAlbums?.items.first?.isFavourite == false)
+}
+
 private actor TestGateway: LinnGateway {
+    struct SelectedMediaItem: Sendable, Equatable {
+        var mediaID: String
+        var room: String
+        var queue: CiGateway.QueuePlacement
+    }
+
+    struct FavouriteRequest: Sendable, Equatable {
+        var mediaID: String
+        var isFavourite: Bool
+    }
+
     private let stream: AsyncThrowingStream<CiGateway.NowPlaying, Error>
     private let continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
     private var selectedIndexes: [Int] = []
+    private var selectedMedia: [SelectedMediaItem] = []
+    private var favourites: [FavouriteRequest] = []
     private var previousCalls = 0
     private var nextCalls = 0
     private var shouldSuspendSelections = false
     private var suspendedSelections: [CheckedContinuation<Void, Never>] = []
+    private var services: [CiGateway.MediaService] = []
+    private var mediaPages: [String: CiGateway.MediaPage] = [:]
+    private var browseCounts: [String: Int] = [:]
 
     init() {
         let source = AsyncThrowingStream<CiGateway.NowPlaying, Error>.makeStream()
@@ -260,12 +413,63 @@ private actor TestGateway: LinnGateway {
 
     func setMuted(_: Bool, room _: String, group _: Bool) async throws {}
 
+    func mediaServices(room _: String) async throws -> [CiGateway.MediaService] {
+        services
+    }
+
+    func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> CiGateway.MediaPage {
+        browseCounts[mediaID, default: 0] += 1
+        return mediaPages[mediaID] ?? CiGateway.MediaPage(id: mediaID)
+    }
+
+    func searchMedia(
+        serviceID _: String,
+        query: String,
+        type _: CiGateway.MediaSearchType,
+        index _: Int,
+        count _: Int
+    ) async throws -> CiGateway.MediaPage {
+        let allItems = mediaPages.values.flatMap(\.children)
+        let matches = allItems.filter {
+            ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
+                || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
+        }
+        return CiGateway.MediaPage(
+            id: "search",
+            contentRevision: mediaPages["service-qobuz"]?.contentRevision,
+            index: 0,
+            count: matches.count,
+            total: matches.count,
+            children: matches
+        )
+    }
+
+    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
+        selectedMedia.append(SelectedMediaItem(mediaID: mediaID, room: room, queue: queue))
+    }
+
+    func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws {
+        favourites.append(FavouriteRequest(mediaID: mediaID, isFavourite: isFavourite))
+    }
+
     func send(_ update: CiGateway.NowPlaying) {
         continuation.yield(update)
     }
 
     func selectedPlaylistIndexes() -> [Int] {
         selectedIndexes
+    }
+
+    func selectedMediaItems() -> [SelectedMediaItem] {
+        selectedMedia
+    }
+
+    func favouriteRequests() -> [FavouriteRequest] {
+        favourites
+    }
+
+    func browseCallCount(mediaID: String) -> Int {
+        browseCounts[mediaID] ?? 0
     }
 
     func previousCallCount() -> Int {
@@ -287,6 +491,266 @@ private actor TestGateway: LinnGateway {
         for continuation in continuations {
             continuation.resume()
         }
+    }
+
+    func seedQobuzLibrary(contentRevision: Int) {
+        services = [
+            CiGateway.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
+        ]
+        mediaPages = [
+            "service-qobuz": CiGateway.MediaPage(
+                id: "service-qobuz",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 3,
+                total: 3,
+                children: [
+                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                ]
+            ),
+            "qobuz-myqobuz": CiGateway.MediaPage(
+                id: "qobuz-myqobuz",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 3,
+                total: 3,
+                children: [
+                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                ]
+            ),
+            "qobuz-favourites": CiGateway.MediaPage(
+                id: "qobuz-favourites",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 3,
+                total: 3,
+                children: [
+                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                ]
+            ),
+            "qobuz-favourite-albums": CiGateway.MediaPage(
+                id: "qobuz-favourite-albums",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 2,
+                total: 2,
+                children: [
+                    CiGateway.MediaItem(
+                        id: "qobuz-album-happy-christmas",
+                        kind: "md.album.qobuz",
+                        name: "Happy Christmas",
+                        album: "Happy Christmas",
+                        artists: ["Frank Sinatra"],
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/25/04/3610152050425_230.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 50,
+                        isFavourite: true,
+                        disabledActions: ["a46"]
+                    ),
+                    CiGateway.MediaItem(
+                        id: "qobuz-album-shostakovich-quartets",
+                        kind: "md.album.qobuz",
+                        name: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                        album: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                        artists: ["Cuarteto Casals"],
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/ob/zn/wozp8tpq0znob_230.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 30,
+                        isFavourite: true
+                    ),
+                ]
+            ),
+            "qobuz-favourite-artists": CiGateway.MediaPage(
+                id: "qobuz-favourite-artists",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 1,
+                total: 1,
+                children: [
+                    CiGateway.MediaItem(
+                        id: "qobuz-artist-qrion",
+                        kind: "md.artist.qobuz",
+                        name: "Qrion",
+                        artists: ["Qrion"],
+                        artworkURL: URL(string: "https://static.qobuz.com/images/artists/covers/small/afd716d782ba6b056d5a311b0bed0573.jpg"),
+                        isFavourite: true
+                    ),
+                ]
+            ),
+            "qobuz-favourite-playlists": CiGateway.MediaPage(
+                id: "qobuz-favourite-playlists",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 2,
+                total: 2,
+                children: [
+                    CiGateway.MediaItem(
+                        id: "qobuz-playlist-willkommen",
+                        kind: "md.playlist.qobuz",
+                        name: "Willkommen bei Qobuz",
+                        artworkURL: URL(string: "https://static.qobuz.com/images/playlists/1285072_2bc9b2d5023757d1a8b10db915efd367_rectangle.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 125
+                    ),
+                    CiGateway.MediaItem(
+                        id: "qobuz-playlist-true-sound-covers",
+                        kind: "md.playlist.qobuz",
+                        name: "True Sound Covers",
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/13/05/0093624980513_300.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 50
+                    ),
+                ]
+            ),
+            "qobuz-my-playlists": CiGateway.MediaPage(
+                id: "qobuz-my-playlists",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 2,
+                total: 2,
+                children: [
+                    CiGateway.MediaItem(
+                        id: "qobuz-playlist-demo",
+                        kind: "md.playlist.qobuz",
+                        name: "Demo",
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/09/32/0088807203209_300.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 17
+                    ),
+                    CiGateway.MediaItem(
+                        id: "qobuz-playlist-cello-henry-bedtime",
+                        kind: "md.playlist.qobuz",
+                        name: "\"Cello\" (Henry bedtime)",
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/43/80/0884977868043_300.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 8
+                    ),
+                ]
+            ),
+            "qobuz-purchased": CiGateway.MediaPage(
+                id: "qobuz-purchased",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 1,
+                total: 1,
+                children: [
+                    CiGateway.MediaItem(
+                        id: "qobuz-album-hit-me-hard-and-soft",
+                        kind: "md.album.qobuz",
+                        name: "HIT ME HARD AND SOFT",
+                        album: "HIT ME HARD AND SOFT",
+                        artists: ["Billie Eilish"],
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 10,
+                        isFavourite: true,
+                        disabledActions: ["a46"]
+                    ),
+                ]
+            ),
+        ]
+    }
+
+    func seedNestedQobuzLibrary(contentRevision: Int) {
+        services = [
+            CiGateway.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.qobuz"),
+        ]
+        mediaPages = [
+            "service-qobuz": CiGateway.MediaPage(
+                id: "service-qobuz",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 3,
+                total: 3,
+                children: [
+                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                ]
+            ),
+            "qobuz-myqobuz": CiGateway.MediaPage(
+                id: "qobuz-myqobuz",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 3,
+                total: 3,
+                children: [
+                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                ]
+            ),
+            "qobuz-favourites": CiGateway.MediaPage(
+                id: "qobuz-favourites",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 3,
+                total: 3,
+                children: [
+                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                ]
+            ),
+            "qobuz-favourite-albums": CiGateway.MediaPage(
+                id: "qobuz-favourite-albums",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 1,
+                total: 1,
+                children: [
+                    CiGateway.MediaItem(
+                        id: "qobuz-album-chopin-nocturnes",
+                        kind: "md.album.qobuz",
+                        name: "Chopin: The Complete Nocturnes",
+                        album: "Chopin: The Complete Nocturnes",
+                        artists: ["Tom Hicks"],
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/yc/ag/nuuxf36hoagyc_230.jpg"),
+                        containedKinds: ["md.track.qobuz"],
+                        childCount: 21,
+                        isFavourite: true
+                    ),
+                ]
+            ),
+            "qobuz-favourite-artists": CiGateway.MediaPage(
+                id: "qobuz-favourite-artists",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 0,
+                total: 0,
+                children: []
+            ),
+            "qobuz-favourite-playlists": CiGateway.MediaPage(
+                id: "qobuz-favourite-playlists",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 0,
+                total: 0,
+                children: []
+            ),
+            "qobuz-my-playlists": CiGateway.MediaPage(
+                id: "qobuz-my-playlists",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 0,
+                total: 0,
+                children: []
+            ),
+            "qobuz-purchased": CiGateway.MediaPage(
+                id: "qobuz-purchased",
+                contentRevision: contentRevision,
+                index: 0,
+                count: 0,
+                total: 0,
+                children: []
+            ),
+        ]
     }
 }
 

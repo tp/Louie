@@ -47,7 +47,12 @@ yq -i '.paths = (.paths | pick([
     "/V2/volume/set_vol",
     "/V2/volume/set_mute",
     "/V2/playlist/subscribe",
-    "/V2/playlist/select"
+    "/V2/playlist/select",
+    "/V2/services/status",
+    "/V2/services/search",
+    "/V2/media/browse",
+    "/V2/media/select",
+    "/V2/media/favourite"
 ]))' "${SPEC_PATH}"
 
 # YAML 1.1 parsers treat unquoted ON/OFF as booleans. The Linn spec uses those
@@ -86,6 +91,51 @@ yq -i '.definitions.V2PlaylistItemMetadata.properties.album = {
     "description": "Duration of the item in seconds. 0 if unknown"
 }' "${SPEC_PATH}"
 
+# Media browse items are modeled in the upstream spec through composed
+# subclasses, but the websocket wrapper maps a flat item model. Keep the
+# generated model broad enough for Qobuz album, track, playlist, and favourite
+# metadata without hand-authoring service-specific response structs.
+yq -i '.definitions.ItemMetaData.properties.title = {
+    "type": "string",
+    "description": "Track title"
+} |
+.definitions.ItemMetaData.properties.album = {
+    "type": "string",
+    "description": "Album name"
+} |
+.definitions.ItemMetaData.properties.artist = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Artist name"
+} |
+.definitions.ItemMetaData.properties.duration = {
+    "type": "integer",
+    "format": "int32",
+    "description": "Duration of the item in seconds. 0 if unknown"
+} |
+.definitions.ItemMetaData.properties.contained_classes = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Array of class ids indicating the type(s) of the content of this item."
+} |
+.definitions.ItemMetaData.properties.count = {
+    "type": "integer",
+    "format": "int32",
+    "description": "Number of direct children of the container. -1 if unknown"
+} |
+.definitions.ItemMetaData.properties.isFavourite = {
+    "type": "boolean",
+    "description": "True if favourited, false if not. The presence of this attribute indicates that the item can be marked as a favourite."
+} |
+.definitions.ItemMetaData.properties.album_id = {
+    "type": "string",
+    "description": "Media id of the album from which this item comes."
+} |
+.definitions.ItemMetaData.properties.artist_id = {
+    "type": "string",
+    "description": "Media id of the artist that created this item."
+}' "${SPEC_PATH}"
+
 # Keep the refined spec small without hand-authoring generated schemas here.
 # This keeps the session helpers, shared request params, and the V2 surfaces
 # the wrapper uses. A few nearby V2 models are cheaper than a brittle script.
@@ -94,7 +144,9 @@ yq -i '.definitions = (.definitions | with_entries(select(
     .key == "SessionData" or
     .key == "SessionResponse" or
     (.key | test("^Param(Tag|Session|Room|Update|Filter)$")) or
-    (.key | test("^V2(TopologyStatus|Transport|Seek|Metadata|Volume|Playlist)"))
+    (.key | test("^V2(TopologyStatus|Transport|Seek|Metadata|Volume|Playlist|ServicesStatus)")) or
+    (.key | test("^MediaBrowse(Response|Data)$")) or
+    .key == "ItemMetaData"
 )))' "${SPEC_PATH}"
 
 rm -rf "${OUTPUT_DIR}"
