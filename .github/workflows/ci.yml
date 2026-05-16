@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    name: Swift packages
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: "26.4.1"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build & test LinnCiGateway
+        working-directory: Packages/LinnCiGateway
+        run: swift test --parallel
+
+      - name: Build & test Linn
+        working-directory: Packages/Linn
+        run: swift test --parallel
+
+  app:
+    name: iOS app
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: "26.4.1"
+
+      - name: Build Louie (generic iOS)
+        run: |
+          xcodebuild \
+            -project Louie.xcodeproj \
+            -scheme Louie \
+            -destination 'generic/platform=iOS' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            build
