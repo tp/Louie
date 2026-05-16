@@ -36,333 +36,6 @@ public extension LinnGateway {
 @Observable
 @MainActor
 public final class Linn {
-    public enum ConnectionState: Sendable, Equatable {
-        case idle
-        case connecting
-        case connected
-        case failed(String)
-    }
-
-    public enum PlayState: Sendable, Equatable {
-        case stopped
-        case playing
-        case paused
-        case loading
-        case buffering
-    }
-
-    public enum SongTransitionDirection: Sendable, Equatable {
-        case forward
-        case backward
-    }
-
-    public struct Song: Sendable, Equatable, Identifiable {
-        public var id: String
-        public var title: String
-        public var artist: String?
-        public var album: String?
-        public var duration: Int?
-        public var artworkURL: URL?
-        public var queueIndex: Int?
-
-        public init(
-            id: String,
-            title: String,
-            artist: String? = nil,
-            album: String? = nil,
-            duration: Int? = nil,
-            artworkURL: URL? = nil,
-            queueIndex: Int? = nil
-        ) {
-            self.id = id
-            self.title = title
-            self.artist = artist
-            self.album = album
-            self.duration = duration
-            self.artworkURL = artworkURL
-            self.queueIndex = queueIndex
-        }
-    }
-
-    public struct Timeline: Sendable, Equatable {
-        public var position: Int?
-        public var duration: Int?
-        public var progress: Double?
-
-        public init(position: Int? = nil, duration: Int? = nil, progress: Double? = nil) {
-            self.position = position
-            self.duration = duration
-            self.progress = progress
-        }
-    }
-
-    public struct Playlist: Sendable, Equatable {
-        public var songs: [Song]
-        public var currentIndex: Int?
-        public var total: Int?
-
-        public init(songs: [Song] = [], currentIndex: Int? = nil, total: Int? = nil) {
-            self.songs = songs
-            self.currentIndex = currentIndex
-            self.total = total
-        }
-    }
-
-    public enum SearchType: String, Sendable, Equatable, CaseIterable, Identifiable {
-        case albums
-        case artists
-        case tracks
-        case playlists
-        case composers
-        case stations
-
-        public var id: String {
-            rawValue
-        }
-    }
-
-    public enum QueuePlacement: String, Sendable, Equatable, CaseIterable, Identifiable {
-        case now
-        case next
-        case last
-        case replace
-
-        public var id: String {
-            rawValue
-        }
-    }
-
-    public struct LibraryService: Sendable, Equatable, Identifiable {
-        public var id: String
-        public var name: String
-        public var kind: String?
-
-        public init(id: String, name: String, kind: String? = nil) {
-            self.id = id
-            self.name = name
-            self.kind = kind
-        }
-    }
-
-    public struct LibraryItem: Sendable, Equatable, Identifiable {
-        public var id: String
-        public var kind: String
-        public var title: String
-        public var subtitle: String?
-        public var album: String?
-        public var artists: [String]
-        public var artworkURL: URL?
-        public var duration: Int?
-        public var containedKinds: [String]
-        public var childCount: Int?
-        public var isFavourite: Bool?
-        public var canFavourite: Bool
-
-        public init(
-            id: String,
-            kind: String,
-            title: String,
-            subtitle: String? = nil,
-            album: String? = nil,
-            artists: [String] = [],
-            artworkURL: URL? = nil,
-            duration: Int? = nil,
-            containedKinds: [String] = [],
-            childCount: Int? = nil,
-            isFavourite: Bool? = nil,
-            canFavourite: Bool = false
-        ) {
-            self.id = id
-            self.kind = kind
-            self.title = title
-            self.subtitle = subtitle
-            self.album = album
-            self.artists = artists
-            self.artworkURL = artworkURL
-            self.duration = duration
-            self.containedKinds = containedKinds
-            self.childCount = childCount
-            self.isFavourite = isFavourite
-            self.canFavourite = canFavourite
-        }
-
-        public var isContainer: Bool {
-            kind.contains("container")
-                || kind.contains("album")
-                || kind.contains("playlist")
-                || kind.hasPrefix("md.qobuz")
-                || childCount != nil
-                || !containedKinds.isEmpty
-        }
-    }
-
-    public struct LibraryPage: Sendable, Equatable {
-        public var id: String?
-        public var contentRevision: Int?
-        public var index: Int
-        public var count: Int
-        public var total: Int?
-        public var items: [LibraryItem]
-
-        public init(
-            id: String? = nil,
-            contentRevision: Int? = nil,
-            index: Int = 0,
-            count: Int = 0,
-            total: Int? = nil,
-            items: [LibraryItem] = []
-        ) {
-            self.id = id
-            self.contentRevision = contentRevision
-            self.index = index
-            self.count = count
-            self.total = total
-            self.items = items
-        }
-    }
-
-    public struct LibrarySection: Sendable, Equatable, Identifiable {
-        public enum Kind: String, Sendable, Equatable {
-            case favourites
-            case recommendations
-            case playlists
-            case purchases
-            case browse
-        }
-
-        public var id: String
-        public var title: String
-        public var kind: Kind
-        public var path: [String]
-        public var source: LibraryItem?
-        public var items: [LibraryItem]
-
-        public init(
-            id: String,
-            title: String,
-            kind: Kind,
-            path: [String] = [],
-            source: LibraryItem? = nil,
-            items: [LibraryItem] = []
-        ) {
-            self.id = id
-            self.title = title
-            self.kind = kind
-            self.path = path
-            self.source = source
-            self.items = items
-        }
-    }
-
-    public struct Library: Sendable, Equatable {
-        public enum Availability: Sendable, Equatable {
-            case unavailable
-            case loading
-            case available
-            case failed(String)
-        }
-
-        public struct Qobuz: Sendable, Equatable {
-            public var root: LibrarySection?
-            public var discover: LibraryItem?
-            public var genres: LibraryItem?
-            public var myQobuz: LibraryItem?
-            public var favouriteArtists: LibrarySection?
-            public var favouriteAlbums: LibrarySection?
-            public var favouritePlaylists: LibrarySection?
-            public var myPlaylists: LibrarySection?
-            public var purchases: LibrarySection?
-            public var recommendations: [LibrarySection]
-            public var browseSections: [LibrarySection]
-
-            public init(sections: [LibrarySection] = []) {
-                root = sections.first { Self.normalized($0.path) == ["qobuz"] }
-                discover = Self.rootItem(in: root, title: "discover", kindContains: "discover")
-                genres = Self.rootItem(in: root, title: "genres", kindContains: "genres")
-                myQobuz = Self.rootItem(in: root, title: "my qobuz", kindContains: "myqobuz")
-                favouriteArtists = Self.section(
-                    in: sections,
-                    matchingPathSuffixes: [
-                        ["my qobuz", "favourites", "artist"],
-                        ["my qobuz", "favourites", "artists"],
-                    ]
-                )
-                favouriteAlbums = Self.section(
-                    in: sections,
-                    matchingPathSuffixes: [
-                        ["my qobuz", "favourites", "album"],
-                        ["my qobuz", "favourites", "albums"],
-                    ]
-                )
-                favouritePlaylists = Self.section(
-                    in: sections,
-                    matchingPathSuffixes: [
-                        ["my qobuz", "favourites", "playlist"],
-                        ["my qobuz", "favourites", "playlists"],
-                    ]
-                )
-                myPlaylists = Self.section(in: sections, matchingPathSuffixes: [["my qobuz", "my playlists"]])
-                purchases = Self.section(in: sections, matchingPathSuffixes: [["my qobuz", "purchased"]])
-                recommendations = sections.filter { $0.kind == .recommendations }
-                browseSections = sections.filter { $0.kind == .browse }
-            }
-
-            private static func rootItem(
-                in root: LibrarySection?,
-                title: String,
-                kindContains kind: String
-            ) -> LibraryItem? {
-                root?.items.first {
-                    $0.title.lowercased() == title
-                        || $0.kind.lowercased().contains(kind)
-                }
-            }
-
-            private static func section(
-                in sections: [LibrarySection],
-                matchingPathSuffixes suffixes: [[String]]
-            ) -> LibrarySection? {
-                sections.first { section in
-                    let path = normalized(section.path)
-                    return suffixes.contains { hasSuffix($0, in: path) }
-                }
-            }
-
-            private static func hasSuffix(_ suffix: [String], in path: [String]) -> Bool {
-                guard suffix.count <= path.count else {
-                    return false
-                }
-                return Array(path.suffix(suffix.count)) == suffix
-            }
-
-            private static func normalized(_ path: [String]) -> [String] {
-                path.map {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                }
-            }
-        }
-
-        public var availability: Availability
-        public var qobuzService: LibraryService?
-        public var rootPage: LibraryPage?
-        public var sections: [LibrarySection]
-        public var qobuz: Qobuz
-
-        public init(
-            availability: Availability = .unavailable,
-            qobuzService: LibraryService? = nil,
-            rootPage: LibraryPage? = nil,
-            sections: [LibrarySection] = [],
-            qobuz: Qobuz? = nil
-        ) {
-            self.availability = availability
-            self.qobuzService = qobuzService
-            self.rootPage = rootPage
-            self.sections = sections
-            self.qobuz = qobuz ?? Qobuz(sections: sections)
-        }
-    }
-
     public let room: String
     public let maximumVolume: Int
     public private(set) var connectionState: ConnectionState = .idle
@@ -436,59 +109,6 @@ public final class Linn {
         var targetState: PlayState
         var previousState: PlayState?
         var expiresAt: Date
-    }
-
-    private struct PlaylistSelectionJob: Sendable, Equatable {
-        enum Kind: Sendable, Equatable {
-            case skip
-            case queueItem
-        }
-
-        var targetIndex: Int
-        var kind: Kind
-    }
-
-    private struct PlaylistSelectionQueue: Sendable, Equatable {
-        var inFlight: PlaylistSelectionJob?
-        var pending: PlaylistSelectionJob?
-
-        mutating func enqueue(_ job: PlaylistSelectionJob) -> PlaylistSelectionJob? {
-            guard let inFlight else {
-                inFlight = job
-                return job
-            }
-
-            pending = job.targetIndex == inFlight.targetIndex ? nil : job
-            return nil
-        }
-
-        mutating func confirm(targetIndex: Int) -> (confirmed: Bool, next: PlaylistSelectionJob?) {
-            guard inFlight?.targetIndex == targetIndex else {
-                return (false, nil)
-            }
-
-            inFlight = nil
-            return (true, dequeuePending())
-        }
-
-        mutating func fail(targetIndex: Int) -> (failed: Bool, next: PlaylistSelectionJob?) {
-            guard inFlight?.targetIndex == targetIndex else {
-                return (false, nil)
-            }
-
-            inFlight = nil
-            return (true, dequeuePending())
-        }
-
-        private mutating func dequeuePending() -> PlaylistSelectionJob? {
-            guard let pending else {
-                return nil
-            }
-
-            self.pending = nil
-            inFlight = pending
-            return pending
-        }
     }
 
     private struct LibraryCacheKey: Sendable, Hashable {
@@ -853,7 +473,7 @@ public final class Linn {
         var rootBrowseItems: [LibraryItem] = []
 
         for item in rootPage.items {
-            let sectionKind = classifiedSectionKind(for: item)
+            let sectionKind = LibraryItemClassifier.sectionKind(for: item)
             if sectionKind != .browse {
                 if let section = await librarySection(
                     for: item,
@@ -866,7 +486,7 @@ public final class Linn {
                 continue
             }
 
-            if isPersonalLibraryFolder(item) {
+            if LibraryItemClassifier.isPersonalLibraryFolder(item) {
                 let personalSections = await personalLibrarySections(
                     for: item,
                     gateway: gateway,
@@ -904,7 +524,7 @@ public final class Linn {
         var sections: [LibrarySection] = []
 
         for child in items {
-            if isFavouritesFolder(child) {
+            if LibraryItemClassifier.isFavouritesFolder(child) {
                 let favouriteSections = await favouriteLibrarySections(
                     for: child,
                     gateway: gateway,
@@ -914,7 +534,7 @@ public final class Linn {
                 continue
             }
 
-            let sectionKind = classifiedSectionKind(for: child)
+            let sectionKind = LibraryItemClassifier.sectionKind(for: child)
             guard sectionKind != .browse else {
                 continue
             }
@@ -937,7 +557,7 @@ public final class Linn {
         path: [String]
     ) async -> [LibrarySection] {
         let items = await browseSectionItems(item, gateway: gateway)
-        let sectionFolders = items.filter(isFavouriteSectionFolder)
+        let sectionFolders = items.filter(LibraryItemClassifier.isFavouriteSectionFolder)
         guard !sectionFolders.isEmpty else {
             return [
                 LibrarySection(
@@ -999,51 +619,42 @@ public final class Linn {
         return libraryPage?.items ?? []
     }
 
-    private func isPersonalLibraryFolder(_ item: LibraryItem) -> Bool {
-        let title = item.title.lowercased()
-        let kind = item.kind.lowercased()
-        return kind.hasPrefix("md.qobuz")
-            && (
-                title == "my qobuz"
-                    || title == "my music"
-                    || title == "my library"
-                    || title == "library"
-            )
-    }
+    private enum LibraryItemClassifier {
+        static let personalLibraryTitles: Set<String> = ["my qobuz", "my music", "my library", "library"]
+        static let favouritesTitles: Set<String> = ["favourites", "favorites", "liked"]
+        static let favouriteSectionTitles: Set<String> = [
+            "album", "albums", "artist", "artists", "playlist", "playlists",
+        ]
 
-    private func isFavouritesFolder(_ item: LibraryItem) -> Bool {
-        let title = item.title.lowercased()
-        return title == "favourites"
-            || title == "favorites"
-            || title == "liked"
-    }
+        static func isPersonalLibraryFolder(_ item: LibraryItem) -> Bool {
+            item.kind.lowercased().hasPrefix("md.qobuz")
+                && personalLibraryTitles.contains(item.title.lowercased())
+        }
 
-    private func isFavouriteSectionFolder(_ item: LibraryItem) -> Bool {
-        let title = item.title.lowercased()
-        return title == "album"
-            || title == "albums"
-            || title == "artist"
-            || title == "artists"
-            || title == "playlist"
-            || title == "playlists"
-    }
+        static func isFavouritesFolder(_ item: LibraryItem) -> Bool {
+            favouritesTitles.contains(item.title.lowercased())
+        }
 
-    private func classifiedSectionKind(for item: LibraryItem) -> LibrarySection.Kind {
-        let title = item.title.lowercased()
+        static func isFavouriteSectionFolder(_ item: LibraryItem) -> Bool {
+            favouriteSectionTitles.contains(item.title.lowercased())
+        }
 
-        if title.contains("favourite") || title.contains("favorite") || title.contains("liked") {
-            return .favourites
+        static func sectionKind(for item: LibraryItem) -> LibrarySection.Kind {
+            let title = item.title.lowercased()
+            if ["favourite", "favorite", "liked"].contains(where: title.contains) {
+                return .favourites
+            }
+            if ["recommend", "for you"].contains(where: title.contains) {
+                return .recommendations
+            }
+            if title.contains("playlist") {
+                return .playlists
+            }
+            if ["purchase", "owned"].contains(where: title.contains) {
+                return .purchases
+            }
+            return .browse
         }
-        if title.contains("recommend") || title.contains("for you") {
-            return .recommendations
-        }
-        if title.contains("playlist") {
-            return .playlists
-        }
-        if title.contains("purchase") || title.contains("purchased") || title.contains("owned") {
-            return .purchases
-        }
-        return .browse
     }
 
     private func reconcileLibraryRevision(_ contentRevision: Int?) {
@@ -1235,39 +846,51 @@ public final class Linn {
     }
 
     private func shouldSuppressNowPlayingFields(incomingQueueIndex: Int?) -> Bool {
-        guard let optimisticTransition else {
-            return false
-        }
-
-        if Date() >= optimisticTransition.expiresAt {
-            self.optimisticTransition = nil
-            return false
-        }
-
-        if incomingQueueIndex == optimisticTransition.targetQueueIndex {
-            self.optimisticTransition = nil
-            return false
-        }
-
-        return true
+        reconcileOptimistic(
+            &optimisticTransition,
+            target: \.targetQueueIndex,
+            expiresAt: \.expiresAt,
+            incoming: incomingQueueIndex,
+            matches: { $0 == $1 }
+        ) != nil
     }
 
     private func reconciledPlayState(incoming: PlayState?) -> PlayState? {
-        guard let optimisticPlayState else {
-            return incoming
+        reconcileOptimistic(
+            &optimisticPlayState,
+            target: \.targetState,
+            expiresAt: \.expiresAt,
+            incoming: incoming,
+            matches: { $0 == $1 }
+        ) ?? incoming
+    }
+
+    /// Holds an optimistic value (queue transition or play-state) until either:
+    /// the device reports a matching state (clear, accept it), the optimistic
+    /// expires (clear, accept whatever just arrived), or neither (keep holding).
+    /// Returns the target value while holding, otherwise nil.
+    private func reconcileOptimistic<State, Target, Incoming>(
+        _ state: inout State?,
+        target: (State) -> Target,
+        expiresAt: (State) -> Date,
+        incoming: Incoming,
+        matches: (Incoming, Target) -> Bool
+    ) -> Target? {
+        guard let current = state else {
+            return nil
         }
 
-        if Date() >= optimisticPlayState.expiresAt {
-            self.optimisticPlayState = nil
-            return incoming
+        if Date() >= expiresAt(current) {
+            state = nil
+            return nil
         }
 
-        if incoming == optimisticPlayState.targetState {
-            self.optimisticPlayState = nil
-            return incoming
+        if matches(incoming, target(current)) {
+            state = nil
+            return nil
         }
 
-        return optimisticPlayState.targetState
+        return target(current)
     }
 
     private func updatePlaylistSongs() {
@@ -1366,266 +989,4 @@ public final class Linn {
             playlist.total = total
         }
     #endif
-}
-
-extension CiGateway: LinnGateway {
-    public func nowPlayingUpdates(
-        room: String?,
-        updateInterval: Int
-    ) async -> AsyncThrowingStream<NowPlaying, Error> {
-        nowPlayingEvents(room: room, updateInterval: updateInterval)
-    }
-
-    public func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> MediaPage {
-        try await browse(mediaID: mediaID, index: index, count: count, browseType: browseType)
-    }
-
-    public func searchMedia(serviceID: String, query: String, type: MediaSearchType, index: Int, count: Int) async throws -> MediaPage {
-        try await search(serviceID: serviceID, query: query, type: type, index: index, count: count)
-    }
-
-    public func selectMedia(mediaID: String, room: String, queue: QueuePlacement) async throws {
-        try await select(mediaID: mediaID, room: room, queue: queue)
-    }
-
-    public func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws {
-        try await setFavourite(mediaID: mediaID, isFavourite: isFavourite)
-    }
-}
-
-public extension Linn.PlayState {
-    init?(_ playback: CiGateway.NowPlaying.Playback?) {
-        guard let transportState = playback?.transportState else {
-            return nil
-        }
-
-        switch transportState {
-        case .play:
-            self = .playing
-        case .pause:
-            self = .paused
-        case .stop:
-            self = .stopped
-        case .buffering, .waiting:
-            self = .buffering
-        case .unknown:
-            self = .stopped
-        }
-    }
-}
-
-public extension Linn.Song {
-    init?(_ item: CiGateway.NowPlaying.CurrentItem?) {
-        guard let item else {
-            return nil
-        }
-
-        let title = item.track?.title ?? item.displayName
-        guard let title, !title.isEmpty else {
-            return nil
-        }
-
-        self.init(
-            id: item.id,
-            title: title,
-            artist: item.track?.artist,
-            album: item.track?.album,
-            artworkURL: item.artworkURL
-        )
-    }
-
-    init?(_ item: CiGateway.NowPlaying.PlaylistItem) {
-        let title = item.displayName
-        guard let title, !title.isEmpty else {
-            return nil
-        }
-
-        self.init(
-            id: "playlist-\(item.index)",
-            title: title,
-            artist: item.artist,
-            album: item.album,
-            duration: item.duration,
-            artworkURL: item.artworkURL,
-            queueIndex: item.index
-        )
-    }
-}
-
-public extension Linn.Timeline {
-    init?(_ timeline: CiGateway.NowPlaying.Timeline?) {
-        guard let timeline else {
-            return nil
-        }
-        self.init(
-            position: timeline.position,
-            duration: timeline.duration,
-            progress: timeline.progress
-        )
-    }
-}
-
-public extension Linn.LibraryService {
-    init(_ service: CiGateway.MediaService) {
-        self.init(id: service.id, name: service.name, kind: service.kind)
-    }
-}
-
-public extension Linn.LibraryPage {
-    init(_ page: CiGateway.MediaPage) {
-        self.init(
-            id: page.id,
-            contentRevision: page.contentRevision,
-            index: page.index,
-            count: page.count,
-            total: page.total,
-            items: page.children.map(Linn.LibraryItem.init)
-        )
-    }
-}
-
-public extension Linn.LibraryItem {
-    init(_ item: CiGateway.MediaItem) {
-        let title = item.displayTitle?.isEmpty == false ? item.displayTitle! : item.id
-        let subtitle = item.artists.isEmpty ? item.album : item.artists.joined(separator: ", ")
-        self.init(
-            id: item.id,
-            kind: item.kind,
-            title: title,
-            subtitle: subtitle,
-            album: item.album,
-            artists: item.artists,
-            artworkURL: item.artworkURL,
-            duration: item.duration,
-            containedKinds: item.containedKinds,
-            childCount: item.childCount,
-            isFavourite: item.isFavourite,
-            canFavourite: item.canFavourite
-        )
-    }
-}
-
-public extension CiGateway.MediaSearchType {
-    init(_ type: Linn.SearchType) {
-        switch type {
-        case .albums:
-            self = .albums
-        case .artists:
-            self = .artists
-        case .tracks:
-            self = .tracks
-        case .playlists:
-            self = .playlists
-        case .composers:
-            self = .composers
-        case .stations:
-            self = .stations
-        }
-    }
-}
-
-public extension CiGateway.QueuePlacement {
-    init(_ placement: Linn.QueuePlacement) {
-        switch placement {
-        case .now:
-            self = .now
-        case .next:
-            self = .next
-        case .last:
-            self = .last
-        case .replace:
-            self = .replace
-        }
-    }
-}
-
-public extension Linn {
-    struct Configuration: Sendable {
-        public var ciGatewayWebSocketURL: URL
-
-        public init(ciGatewayWebSocketURL: URL) {
-            self.ciGatewayWebSocketURL = ciGatewayWebSocketURL
-        }
-
-        public static func local(
-            fileURL: URL? = nil,
-            environment: [String: String] = ProcessInfo.processInfo.environment,
-            currentDirectoryURL: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        ) throws -> Self {
-            let values = try DotEnv.load(fileURL: fileURL, currentDirectoryURL: currentDirectoryURL)
-            let urlString = environment["LINN_CI_GATEWAY_WS_URL"] ?? values["LINN_CI_GATEWAY_WS_URL"]
-
-            guard let urlString, !urlString.isEmpty else {
-                throw ConfigurationError.missingValue("LINN_CI_GATEWAY_WS_URL")
-            }
-            guard let url = URL(string: urlString) else {
-                throw ConfigurationError.invalidURL(urlString)
-            }
-
-            return Self(ciGatewayWebSocketURL: url)
-        }
-    }
-
-    enum ConfigurationError: Error, Sendable {
-        case missingValue(String)
-        case invalidURL(String)
-    }
-}
-
-private enum DotEnv {
-    static func load(fileURL: URL?, currentDirectoryURL: URL) throws -> [String: String] {
-        let url = try fileURL ?? discover(from: currentDirectoryURL)
-        guard let url else {
-            return [:]
-        }
-
-        let contents = try String(contentsOf: url, encoding: .utf8)
-        return parse(contents)
-    }
-
-    private static func discover(from currentDirectoryURL: URL) throws -> URL? {
-        let fileManager = FileManager.default
-        let candidates = [
-            Bundle.main.url(forResource: ".env", withExtension: nil),
-            Bundle.main.bundleURL.appendingPathComponent(".env"),
-            currentDirectoryURL.appendingPathComponent(".env"),
-            currentDirectoryURL.appendingPathComponent("Louie/.env"),
-            currentDirectoryURL.appendingPathComponent("Packages/Linn/.env"),
-        ].compactMap(\.self)
-
-        return candidates.first { fileManager.fileExists(atPath: $0.path) }
-    }
-
-    private static func parse(_ contents: String) -> [String: String] {
-        contents
-            .split(whereSeparator: \.isNewline)
-            .reduce(into: [:]) { values, line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else {
-                    return
-                }
-                let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard parts.count == 2 else {
-                    return
-                }
-
-                let key = parts[0].trimmingCharacters(in: .whitespaces)
-                let value = parts[1].trimmingCharacters(in: .whitespaces)
-                values[key] = unquote(value)
-            }
-    }
-
-    private static func unquote(_ value: String) -> String {
-        guard value.count >= 2 else {
-            return value
-        }
-
-        if value.first == "\"", value.last == "\"" {
-            return String(value.dropFirst().dropLast())
-        }
-        if value.first == "'", value.last == "'" {
-            return String(value.dropFirst().dropLast())
-        }
-        return value
-    }
 }
