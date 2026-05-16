@@ -62,7 +62,7 @@ public struct PlayerBar: View {
                             .animatedTextChange(
                                 id: song.title,
                                 direction: state.songTransitionDirection,
-                                limitFrame: isExpanded
+                                limitFrame: isExpanded,
                             )
 
                         if let artist = song.artist {
@@ -73,7 +73,7 @@ public struct PlayerBar: View {
                                 .animatedTextChange(
                                     id: artist,
                                     direction: state.songTransitionDirection,
-                                    limitFrame: isExpanded
+                                    limitFrame: isExpanded,
                                 )
                         }
                     }
@@ -86,7 +86,7 @@ public struct PlayerBar: View {
                             .animatedTextChange(
                                 id: statusTitle,
                                 direction: state.songTransitionDirection,
-                                limitFrame: isExpanded
+                                limitFrame: isExpanded,
                             )
 
                         if let statusSubtitle {
@@ -97,7 +97,7 @@ public struct PlayerBar: View {
                                 .animatedTextChange(
                                     id: statusSubtitle,
                                     direction: state.songTransitionDirection,
-                                    limitFrame: isExpanded
+                                    limitFrame: isExpanded,
                                 )
                         }
                     }
@@ -261,7 +261,7 @@ extension View {
     func animatedTextChange(
         id: some Hashable,
         direction: Linn.SongTransitionDirection,
-        limitFrame: Bool
+        limitFrame: Bool,
     ) -> some View {
         let insertionEdge: Edge = direction == .forward ? .trailing : .leading
         let removalEdge: Edge = direction == .forward ? .leading : .trailing
@@ -271,8 +271,8 @@ extension View {
             .transition(
                 .asymmetric(
                     insertion: .move(edge: insertionEdge).combined(with: .opacity),
-                    removal: .move(edge: removalEdge) // no opacity here, else it disappears right away
-                )
+                    removal: .move(edge: removalEdge), // no opacity here, else it disappears right away
+                ),
             )
             .animation(.snappy(duration: 0.35), value: id)
             .frame(maxWidth: limitFrame ? 300 : nil, alignment: .leading)
@@ -290,7 +290,7 @@ extension View {
                 background
 
                 PlayerBar(
-                    state: linn
+                    state: linn,
                 )
                 .padding(.bottom, 50)
                 .padding(.horizontal, 50)
@@ -313,7 +313,7 @@ extension View {
                     Color.white,
                 ],
                 startPoint: .topLeading,
-                endPoint: .bottomTrailing
+                endPoint: .bottomTrailing,
             )
             .ignoresSafeArea()
         }
@@ -331,17 +331,17 @@ extension View {
                     id: "chainsmoking",
                     title: "Chainsmoking",
                     artist: "Jacob Banks",
-                    artworkURL: URL(string: "https://static.qobuz.com/images/covers/mb/x1/brogg6xqdx1mb_230.jpg")
+                    artworkURL: URL(string: "https://static.qobuz.com/images/covers/mb/x1/brogg6xqdx1mb_230.jpg"),
                 ),
                 playState: .playing,
-                hasNext: true
-            )
+                hasNext: true,
+            ),
         )
     }
 
     #Preview("Interactive Demo") {
         PlayerBarHarness(
-            linn: Linn(gateway: DemoLinnGateway())
+            linn: Linn(gateway: DemoLinnGateway()),
         )
     }
 

@@ -40,9 +40,22 @@ enum AppSection: Hashable, Identifiable {
     }
 }
 
+/// Shared route type for the split-view detail stack.
+/// Keep section-specific cases nested under this enum so all section paths have
+/// the same element type.
+enum AppDetailRoute: Hashable {
+    case home(HomeRoute)
+    case library(LibraryRoute)
+    case queue(QueueRoute)
+}
+
+enum HomeRoute: Hashable {}
+
 enum LibraryRoute: Hashable {
     case item(LibraryItemRoute)
 }
+
+enum QueueRoute: Hashable {}
 
 struct LibraryItemRoute: Hashable, Identifiable {
     var id: String
@@ -65,7 +78,7 @@ struct LibraryItemRoute: Hashable, Identifiable {
             kind: kind,
             title: title,
             subtitle: subtitle,
-            artworkURL: artworkURL
+            artworkURL: artworkURL,
         )
     }
 }

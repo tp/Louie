@@ -185,9 +185,9 @@ private struct LibraryItemListRow: View {
                         kind: "md.container.qobuz.album",
                         title: "Albums",
                         subtitle: "Qobuz",
-                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
-                    )
-                )
+                        artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg"),
+                    ),
+                ),
             )
         }
     }

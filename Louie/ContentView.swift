@@ -20,24 +20,22 @@ private struct ContentViewBody: View {
     var linn: Linn
 
     @State private var selectedSection: AppSection? = .home
-    @State private var libraryPath: [LibraryRoute] = []
+    // Only store `.home(...)` routes here. The outer `AppDetailRoute` wrapper
+    // keeps the split-view detail stack's path element type stable.
+    @State private var homePath: [AppDetailRoute] = []
+    // Only store `.library(...)` routes here. Do not use raw `LibraryRoute`
+    // arrays in this split-view detail stack.
+    @State private var libraryPath: [AppDetailRoute] = []
+    // Only store `.queue(...)` routes here. The shared outer route type avoids
+    // `AnyNavigationPath.Error.comparisonTypeMismatch` when switching sections.
+    @State private var queuePath: [AppDetailRoute] = []
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selectedSection) {
-                NavigationLink(value: AppSection.home) {
-                    Label(AppSection.home.title, systemImage: AppSection.home.systemImage)
-                }
-
-                Section("Music") {
-                    NavigationLink(value: AppSection.library) {
-                        Label(AppSection.library.title, systemImage: AppSection.library.systemImage)
-                    }
-
-                    queueLink
-                }
-            }
-            .navigationTitle("Louie")
+            Sidebar(
+                remainingQueueCount: linn.remainingQueueCount,
+                selectedSection: $selectedSection,
+            )
         } detail: {
             detailContent
                 .playerBarOverlay(linn: linn)
@@ -50,36 +48,63 @@ private struct ContentViewBody: View {
         }
     }
 
+    private var activeSection: AppSection {
+        selectedSection ?? .home
+    }
+
     @ViewBuilder
     private var detailContent: some View {
-        switch selectedSection ?? .home {
+        switch activeSection {
         case .home:
-            NavigationStack {
+            NavigationStack(path: sectionPathBinding(.home, path: $homePath)) {
                 HomeView(linn: linn)
+                    .appDetailNavigationDestinations(linn: linn)
             }
         case .library:
-            NavigationStack(path: $libraryPath) {
+            NavigationStack(path: sectionPathBinding(.library, path: $libraryPath)) {
                 LibraryBrowser(linn: linn)
-                    .navigationDestination(for: LibraryRoute.self) { route in
-                        switch route {
-                        case let .item(itemRoute):
-                            LibraryItemDetailView(linn: linn, route: itemRoute)
-                        }
-                    }
+                    .appDetailNavigationDestinations(linn: linn)
             }
         case .queue:
-            NavigationStack {
+            NavigationStack(path: sectionPathBinding(.queue, path: $queuePath)) {
                 PlayQueue(linn: linn)
+                    .appDetailNavigationDestinations(linn: linn)
             }
         }
     }
 
-    @ViewBuilder
-    private var queueLink: some View {
-        NavigationLink(value: AppSection.queue) {
-            Label(AppSection.queue.title, systemImage: AppSection.queue.systemImage)
+    private func sectionPathBinding(
+        _ section: AppSection,
+        path: Binding<[AppDetailRoute]>,
+    ) -> Binding<[AppDetailRoute]> {
+        Binding {
+            path.wrappedValue
+        } set: { newPath in
+            // When a section stack is removed from the split-view detail column,
+            // SwiftUI may write `[]` back through its path binding. Ignore that
+            // inactive teardown write so each section keeps its navigation state.
+            if activeSection != section, newPath.isEmpty {
+                return
+            }
+
+            path.wrappedValue = newPath
         }
-        .badge(linn.upcomingSongs.count)
+    }
+}
+
+private extension View {
+    func appDetailNavigationDestinations(linn: Linn) -> some View {
+        navigationDestination(for: AppDetailRoute.self) { route in
+            switch route {
+            case .home, .queue:
+                EmptyView()
+            case let .library(libraryRoute):
+                switch libraryRoute {
+                case let .item(itemRoute):
+                    LibraryItemDetailView(linn: linn, route: itemRoute)
+                }
+            }
+        }
     }
 }
 
@@ -95,4 +120,5 @@ private struct ContentViewBody: View {
     #Preview {
         ContentViewPreview()
     }
+
 #endif

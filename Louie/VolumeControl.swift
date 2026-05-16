@@ -53,7 +53,7 @@ struct VolumeRadialControl: View {
                                     drag.location,
                                     center: center,
                                     radius: radius,
-                                    tolerance: startHitTolerance
+                                    tolerance: startHitTolerance,
                                 )
                             else {
                                 return
@@ -64,12 +64,12 @@ struct VolumeRadialControl: View {
 
                         updateValueFromAngle(
                             at: drag.location,
-                            center: center
+                            center: center,
                         )
                     }
                     .onEnded { _ in
                         isTrackingDrag = false
-                    }
+                    },
             )
         }
         .aspectRatio(1, contentMode: .fit)
@@ -79,7 +79,7 @@ struct VolumeRadialControl: View {
         _ location: CGPoint,
         center: CGPoint,
         radius: CGFloat,
-        tolerance: CGFloat
+        tolerance: CGFloat,
     ) -> Bool {
         let dx = location.x - center.x
         let dy = location.y - center.y
@@ -115,7 +115,7 @@ struct VolumeRadialControl: View {
 
         let rawValue =
             Double(range.lowerBound)
-            + newProgress * Double(range.upperBound - range.lowerBound)
+                + newProgress * Double(range.upperBound - range.lowerBound)
 
         value = Int(rawValue.rounded())
     }
@@ -132,12 +132,12 @@ struct VolumeRadialControl: View {
                 radius: radius,
                 startAngle: startAngle,
                 endAngle: endAngle,
-                clockwise: false
+                clockwise: false,
             )
         }
         .stroke(
             .secondary.opacity(0.22),
-            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round),
         )
     }
 
@@ -148,12 +148,12 @@ struct VolumeRadialControl: View {
                 radius: radius,
                 startAngle: startAngle,
                 endAngle: angle(for: progress),
-                clockwise: false
+                clockwise: false,
             )
         }
         .stroke(
             .primary,
-            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round),
         )
     }
 
@@ -162,7 +162,7 @@ struct VolumeRadialControl: View {
 
         let point = CGPoint(
             x: center.x + cos(angle) * radius,
-            y: center.y + sin(angle) * radius
+            y: center.y + sin(angle) * radius,
         )
 
         return Circle()
@@ -173,11 +173,12 @@ struct VolumeRadialControl: View {
             .allowsHitTesting(false)
     }
 }
+
 struct VolumeRadialDisplay: View {
     let value: Int
     let range: ClosedRange<Int>
 
-    var unit: String? = nil
+    var unit: String?
 
     var startAngle: Angle = .degrees(135)
     var endAngle: Angle = .degrees(405)
@@ -198,7 +199,7 @@ struct VolumeRadialDisplay: View {
             let size = min(proxy.size.width, proxy.size.height)
             let center = CGPoint(
                 x: proxy.size.width / 2,
-                y: proxy.size.height / 2
+                y: proxy.size.height / 2,
             )
             let radius = (size / 2) - lineWidth
 
@@ -250,12 +251,12 @@ struct VolumeRadialDisplay: View {
                 radius: radius,
                 startAngle: startAngle,
                 endAngle: endAngle,
-                clockwise: false
+                clockwise: false,
             )
         }
         .stroke(
             .secondary.opacity(0.22),
-            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round),
         )
     }
 
@@ -266,12 +267,12 @@ struct VolumeRadialDisplay: View {
                 radius: radius,
                 startAngle: startAngle,
                 endAngle: angle(for: progress),
-                clockwise: false
+                clockwise: false,
             )
         }
         .stroke(
             .primary,
-            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round),
         )
     }
 }
@@ -280,17 +281,16 @@ struct VolumeRadialDisplay: View {
     #Preview {
         @Previewable @State var value = 0
 
-        VolumeRadialControl(value: $value, range: 0...70)
+        VolumeRadialControl(value: $value, range: 0 ... 70)
             .frame(width: 220, height: 220)
-
             .padding()
     }
 
     #Preview {
         HStack(spacing: 16) {
-            VolumeRadialDisplay(value: 0, range: 0...70)
-            VolumeRadialDisplay(value: 29, range: 0...70)
-            VolumeRadialDisplay(value: 70, range: 0...70)
+            VolumeRadialDisplay(value: 0, range: 0 ... 70)
+            VolumeRadialDisplay(value: 29, range: 0 ... 70)
+            VolumeRadialDisplay(value: 70, range: 0 ... 70)
         }
         .frame(height: 80)
         .padding()

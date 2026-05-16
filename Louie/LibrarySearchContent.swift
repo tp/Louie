@@ -23,7 +23,7 @@ struct LibrarySearchView: View {
             },
             play: { item in
                 linn.play(item, placement: .replace)
-            }
+            },
         )
         .task(id: searchTaskID) {
             await search()
@@ -100,7 +100,7 @@ struct LibrarySearchContent: View {
         state: LibrarySearchState,
         searchType: Binding<Linn.SearchType>,
         enqueue: @escaping (Linn.LibraryItem) -> Void,
-        play: @escaping (Linn.LibraryItem) -> Void
+        play: @escaping (Linn.LibraryItem) -> Void,
     ) {
         self.state = state
         _searchType = searchType
@@ -158,7 +158,7 @@ struct LibrarySearchResultRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            NavigationLink(value: LibraryRoute.item(LibraryItemRoute(item))) {
+            NavigationLink(value: AppDetailRoute.library(.item(LibraryItemRoute(item)))) {
                 HStack(spacing: 12) {
                     AlbumArtwork(url: item.artworkURL)
                         .frame(width: 56, height: 56)
@@ -199,7 +199,7 @@ struct LibrarySearchResultRow: View {
         @State private var state = LibrarySearchState(
             type: .albums,
             results: results,
-            searchedQuery: "Billie"
+            searchedQuery: "Billie",
         )
 
         var body: some View {
@@ -208,14 +208,19 @@ struct LibrarySearchResultRow: View {
                     state: state,
                     searchType: $state.type,
                     enqueue: { _ in },
-                    play: { _ in }
+                    play: { _ in },
                 )
             }
             .contentMargins(.vertical, 16, for: .scrollContent)
-            .navigationDestination(for: LibraryRoute.self) { route in
+            .navigationDestination(for: AppDetailRoute.self) { route in
                 switch route {
-                case let .item(itemRoute):
-                    LibraryItemDetailView(linn: Linn(gateway: DemoLinnGateway()), route: itemRoute)
+                case .home, .queue:
+                    EmptyView()
+                case let .library(libraryRoute):
+                    switch libraryRoute {
+                    case let .item(itemRoute):
+                        LibraryItemDetailView(linn: Linn(gateway: DemoLinnGateway()), route: itemRoute)
+                    }
                 }
             }
         }
@@ -226,21 +231,21 @@ struct LibrarySearchResultRow: View {
                 kind: "md.album.qobuz",
                 title: "HIT ME HARD AND SOFT",
                 subtitle: "Billie Eilish",
-                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg"),
             ),
             Linn.LibraryItem(
                 id: "qobuz-album-when-we-all-fall-asleep",
                 kind: "md.album.qobuz",
                 title: "WHEN WE ALL FALL ASLEEP, WHERE DO WE GO?",
                 subtitle: "Billie Eilish",
-                artworkURL: URL(string: "https://static.qobuz.com/images/covers/gc/eh/wo456u01fehgc_230.jpg")
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/gc/eh/wo456u01fehgc_230.jpg"),
             ),
             Linn.LibraryItem(
                 id: "qobuz-album-no-time-to-die",
                 kind: "md.album.qobuz",
                 title: "No Time To Die",
                 subtitle: "Billie Eilish",
-                artworkURL: URL(string: "https://static.qobuz.com/images/covers/na/po/lmnt8s7cipona_230.jpg")
+                artworkURL: URL(string: "https://static.qobuz.com/images/covers/na/po/lmnt8s7cipona_230.jpg"),
             ),
         ]
     }
@@ -259,7 +264,7 @@ struct LibrarySearchResultRow: View {
                     state: LibrarySearchState(isLoading: true),
                     searchType: .constant(.albums),
                     enqueue: { _ in },
-                    play: { _ in }
+                    play: { _ in },
                 )
             }
             .contentMargins(.vertical, 16, for: .scrollContent)
@@ -274,7 +279,7 @@ struct LibrarySearchResultRow: View {
                     state: LibrarySearchState(searchedQuery: "zzzz"),
                     searchType: .constant(.albums),
                     enqueue: { _ in },
-                    play: { _ in }
+                    play: { _ in },
                 )
             }
             .contentMargins(.vertical, 16, for: .scrollContent)

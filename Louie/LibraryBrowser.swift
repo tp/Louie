@@ -73,9 +73,9 @@ struct LibraryBrowser: View {
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: 12) {
                     ForEach(section.items) { item in
-                        NavigationLink(value: LibraryRoute.item(LibraryItemRoute(item))) {
+                        NavigationLink(value: AppDetailRoute.library(.item(LibraryItemRoute(item)))) {
                             LibraryMediaTile(item: item)
-                            .containerRelativeFrame(.horizontal, count: 11, span: 2, spacing: 12)
+                                .containerRelativeFrame(.horizontal, count: 11, span: 2, spacing: 12)
                         }
                         .buttonStyle(.plain)
                     }
