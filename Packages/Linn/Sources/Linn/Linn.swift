@@ -48,6 +48,7 @@ public final class Linn {
     public private(set) var timeline: Timeline?
     public private(set) var lastErrorMessage: String?
     public private(set) var songTransitionDirection: SongTransitionDirection = .forward
+    public private(set) var pendingQueueIndex: Int?
 
     public var previousSongs: [Song] {
         guard let currentIndex = playlist.currentIndex else {
@@ -81,6 +82,20 @@ public final class Linn {
             return false
         }
         return currentIndex + 1 < total
+    }
+
+    /// Number of songs left after the observed or pending queue selection.
+    public var remainingQueueCount: Int {
+        guard let total = playlist.total else {
+            return upcomingSongs.count
+        }
+
+        let effectiveCurrentIndex = pendingQueueIndex ?? playlist.currentIndex
+        guard let effectiveCurrentIndex else {
+            return total
+        }
+
+        return max(0, total - effectiveCurrentIndex - 1)
     }
 
     private var ciGateway: (any LinnGateway)?
@@ -749,7 +764,13 @@ public final class Linn {
             return
         }
 
-        optimisticallySelectQueueIndex(targetQueueIndex, song: optimisticSong ?? playlistSongsByIndex[targetQueueIndex])
+        switch kind {
+        case .skip:
+            pendingQueueIndex = nil
+            optimisticallySelectQueueIndex(targetQueueIndex, song: optimisticSong ?? playlistSongsByIndex[targetQueueIndex])
+        case .queueItem:
+            pendingQueueIndex = targetQueueIndex
+        }
         enqueuePlaylistSelection(PlaylistSelectionJob(targetIndex: targetQueueIndex, kind: kind))
     }
 
@@ -808,6 +829,7 @@ public final class Linn {
                 if failure.failed {
                     playlistSelectionTimeoutTask?.cancel()
                     lastErrorMessage = String(describing: error)
+                    reconcilePendingQueueSelection(failedJob: job, nextJob: failure.next)
                 }
                 if let nextJob = failure.next {
                     sendPlaylistSelection(nextJob)
@@ -821,9 +843,14 @@ public final class Linn {
             return
         }
 
+        if pendingQueueIndex == incomingQueueIndex {
+            pendingQueueIndex = nil
+        }
+
         let confirmation = playlistSelectionQueue.confirm(targetIndex: incomingQueueIndex)
         if confirmation.confirmed {
             playlistSelectionTimeoutTask?.cancel()
+            reconcilePendingQueueSelection(confirmedQueueIndex: incomingQueueIndex, nextJob: confirmation.next)
         }
         if let nextJob = confirmation.next {
             sendPlaylistSelection(nextJob)
@@ -832,8 +859,33 @@ public final class Linn {
 
     private func playlistSelectionTimedOut(_ job: PlaylistSelectionJob) {
         let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
+        if failure.failed {
+            reconcilePendingQueueSelection(failedJob: job, nextJob: failure.next)
+        }
         if let nextJob = failure.next {
             sendPlaylistSelection(nextJob)
+        }
+    }
+
+    private func reconcilePendingQueueSelection(
+        confirmedQueueIndex: Int,
+        nextJob: PlaylistSelectionJob?
+    ) {
+        if let nextJob, nextJob.kind == .queueItem {
+            pendingQueueIndex = nextJob.targetIndex
+        } else if pendingQueueIndex == confirmedQueueIndex {
+            pendingQueueIndex = nil
+        }
+    }
+
+    private func reconcilePendingQueueSelection(
+        failedJob: PlaylistSelectionJob,
+        nextJob: PlaylistSelectionJob?
+    ) {
+        if let nextJob, nextJob.kind == .queueItem {
+            pendingQueueIndex = nextJob.targetIndex
+        } else if failedJob.kind == .queueItem, pendingQueueIndex == failedJob.targetIndex {
+            pendingQueueIndex = nil
         }
     }
 

@@ -155,13 +155,23 @@ func playSongSelectsPlaylistItemByQueueIndex() async throws {
 
     linn.play(song)
 
-    #expect(linn.currentSong?.title == "Three")
-    #expect(linn.timeline == nil)
-    #expect(linn.songTransitionDirection == .forward)
+    #expect(linn.currentSong?.title == "Zero")
+    #expect(linn.playlist.currentIndex == 0)
+    #expect(linn.pendingQueueIndex == 3)
+    #expect(linn.timeline?.position == 1)
 
     try await waitUntil {
         await gateway.selectedPlaylistIndexes() == [3]
     }
+
+    await gateway.send(nowPlaying(index: 3, titles: titles, position: 11))
+    try await waitUntil {
+        linn.pendingQueueIndex == nil
+    }
+
+    #expect(linn.currentSong?.title == "Three")
+    #expect(linn.playlist.currentIndex == 3)
+    #expect(linn.timeline?.position == 11)
 }
 
 @Test
@@ -181,6 +191,7 @@ func playlistTracksDeviceCurrentIndexAndKeepsPreviousItems() async throws {
     #expect(linn.playlist.songs.map(\.title) == titles)
     #expect(linn.previousSongs.map(\.title) == ["One", "Zero"])
     #expect(linn.upcomingSongs.map(\.title) == ["Three"])
+    #expect(linn.remainingQueueCount == 1)
 }
 
 @Test
@@ -211,6 +222,67 @@ func rapidPlaylistSelectionsSendOnlyFirstAndLatestPendingTarget() async throws {
     }
 
     await gateway.resumeSelections()
+}
+
+@Test
+@MainActor
+func rapidQueueItemSelectionsShowLatestPendingTarget() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One", "Two", "Three"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles))
+    try await waitUntil {
+        linn.playlist.songs.count == 4
+    }
+
+    let one = try #require(linn.playlist.songs.first { $0.title == "One" })
+    let three = try #require(linn.playlist.songs.first { $0.title == "Three" })
+
+    linn.play(one)
+    linn.play(three)
+
+    #expect(linn.currentSong?.title == "Zero")
+    #expect(linn.pendingQueueIndex == 3)
+    #expect(linn.remainingQueueCount == 0)
+
+    try await waitUntil {
+        await gateway.selectedPlaylistIndexes() == [1]
+    }
+
+    await gateway.send(nowPlaying(index: 1, titles: titles))
+    try await waitUntil {
+        await gateway.selectedPlaylistIndexes() == [1, 3]
+    }
+
+    #expect(linn.pendingQueueIndex == 3)
+
+    await gateway.send(nowPlaying(index: 3, titles: titles))
+    try await waitUntil {
+        linn.pendingQueueIndex == nil
+    }
+
+    #expect(linn.currentSong?.title == "Three")
+}
+
+@Test
+@MainActor
+func remainingQueueCountTracksOptimisticSkipPosition() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One", "Two", "Three"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles))
+    try await waitUntil {
+        linn.remainingQueueCount == 3
+    }
+
+    linn.next()
+
+    #expect(linn.playlist.currentIndex == 1)
+    #expect(linn.remainingQueueCount == 2)
 }
 
 @Test
@@ -348,6 +420,163 @@ func libraryFavouriteUpdatesSupportedItems() async throws {
         ]
     }
     #expect(linn.library.qobuz.favouriteAlbums?.items.first?.isFavourite == false)
+}
+
+@Test
+func demoGatewayReplaceEmitsImmediateCountThenDelayedObservedQueue() async throws {
+    let gateway = DemoLinnGateway(
+        songs: [Linn.Song(id: "initial", title: "Initial")],
+        mediaSelectionObservationDelay: .milliseconds(20)
+    )
+    let updates = await gateway.nowPlayingUpdates(room: "Linn", updateInterval: 1)
+    var iterator = updates.makeAsyncIterator()
+
+    let initial = try #require(try await iterator.next())
+    #expect(initial.queue?.length == 1)
+
+    let command = Task {
+        try await gateway.selectMedia(mediaID: "qobuz-album-hit-me-hard-and-soft", room: "Linn", queue: .replace)
+    }
+
+    let immediate = try #require(try await iterator.next())
+    #expect(immediate.queue?.length == 10)
+    #expect(immediate.currentItem?.track?.title == "Initial")
+
+    let observed = try #require(try await iterator.next())
+    try await command.value
+
+    #expect(observed.queue?.index == 0)
+    #expect(observed.queue?.length == 10)
+    #expect(observed.playlist?.items.count == 10)
+    #expect(observed.currentItem?.track?.title == "SKINNY")
+}
+
+@Test
+func demoGatewayLastAppendsAfterDelayWhileKeepingCurrentItem() async throws {
+    let gateway = DemoLinnGateway(
+        songs: [
+            Linn.Song(id: "zero", title: "Zero"),
+            Linn.Song(id: "one", title: "One"),
+        ],
+        currentIndex: 0,
+        mediaSelectionObservationDelay: .milliseconds(20)
+    )
+    let updates = await gateway.nowPlayingUpdates(room: "Linn", updateInterval: 1)
+    var iterator = updates.makeAsyncIterator()
+    _ = try #require(try await iterator.next())
+
+    let command = Task {
+        try await gateway.selectMedia(mediaID: "qobuz-track-lunch", room: "Linn", queue: .last)
+    }
+
+    let immediate = try #require(try await iterator.next())
+    #expect(immediate.queue?.length == 3)
+    #expect(immediate.currentItem?.track?.title == "Zero")
+
+    let observed = try #require(try await iterator.next())
+    try await command.value
+
+    #expect(observed.queue?.index == 0)
+    #expect(observed.queue?.length == 3)
+    #expect(observed.currentItem?.track?.title == "Zero")
+    #expect(observed.playlist?.items.map(\.displayName) == ["Zero", "One", "LUNCH"])
+}
+
+@Test
+func demoGatewayNextInsertsAfterCurrentWithoutChangingCurrentItem() async throws {
+    let gateway = DemoLinnGateway(
+        songs: [
+            Linn.Song(id: "zero", title: "Zero"),
+            Linn.Song(id: "one", title: "One"),
+        ],
+        currentIndex: 0,
+        mediaSelectionObservationDelay: .milliseconds(20)
+    )
+    let updates = await gateway.nowPlayingUpdates(room: "Linn", updateInterval: 1)
+    var iterator = updates.makeAsyncIterator()
+    _ = try #require(try await iterator.next())
+
+    let command = Task {
+        try await gateway.selectMedia(mediaID: "qobuz-track-lunch", room: "Linn", queue: .next)
+    }
+
+    let immediate = try #require(try await iterator.next())
+    #expect(immediate.queue?.length == 3)
+
+    let observed = try #require(try await iterator.next())
+    try await command.value
+
+    #expect(observed.queue?.index == 0)
+    #expect(observed.currentItem?.track?.title == "Zero")
+    #expect(observed.playlist?.items.map(\.displayName) == ["Zero", "LUNCH", "One"])
+}
+
+@Test
+func demoGatewayNowInsertsAfterCurrentAndSelectsInsertedItemAfterDelay() async throws {
+    let gateway = DemoLinnGateway(
+        songs: [
+            Linn.Song(id: "zero", title: "Zero"),
+            Linn.Song(id: "one", title: "One"),
+        ],
+        currentIndex: 0,
+        mediaSelectionObservationDelay: .milliseconds(20)
+    )
+    let updates = await gateway.nowPlayingUpdates(room: "Linn", updateInterval: 1)
+    var iterator = updates.makeAsyncIterator()
+    _ = try #require(try await iterator.next())
+
+    let command = Task {
+        try await gateway.selectMedia(mediaID: "qobuz-track-lunch", room: "Linn", queue: .now)
+    }
+
+    let immediate = try #require(try await iterator.next())
+    #expect(immediate.queue?.length == 3)
+    #expect(immediate.queue?.index == 0)
+    #expect(immediate.currentItem?.track?.title == "Zero")
+
+    let observed = try #require(try await iterator.next())
+    try await command.value
+
+    #expect(observed.queue?.index == 1)
+    #expect(observed.currentItem?.track?.title == "LUNCH")
+    #expect(observed.playlist?.items.map(\.displayName) == ["Zero", "LUNCH", "One"])
+}
+
+@Test
+func demoGatewayNextMarksPendingPlaylistItemBeforeObservedCurrentIndexChanges() async throws {
+    let gateway = DemoLinnGateway(
+        songs: [
+            Linn.Song(id: "zero", title: "Zero"),
+            Linn.Song(id: "one", title: "One"),
+            Linn.Song(id: "two", title: "Two"),
+        ],
+        currentIndex: 0,
+        playlistSelectionObservationDelay: .milliseconds(20)
+    )
+    let updates = await gateway.nowPlayingUpdates(room: "Linn", updateInterval: 1)
+    var iterator = updates.makeAsyncIterator()
+
+    let initial = try #require(try await iterator.next())
+    #expect(initial.queue?.index == 0)
+    #expect(initial.playlist?.items.first(where: \.isCurrent)?.index == 0)
+
+    let command = Task {
+        try await gateway.next(room: "Linn")
+    }
+
+    let pending = try #require(try await iterator.next())
+    #expect(pending.queue?.index == 0)
+    #expect(pending.currentItem?.track?.title == "Zero")
+    #expect(pending.playback?.transportState == .buffering)
+    #expect(pending.playlist?.items.first(where: \.isCurrent)?.index == 1)
+
+    let observed = try #require(try await iterator.next())
+    try await command.value
+
+    #expect(observed.queue?.index == 1)
+    #expect(observed.currentItem?.track?.title == "One")
+    #expect(observed.playback?.transportState == .play)
+    #expect(observed.playlist?.items.first(where: \.isCurrent)?.index == 1)
 }
 
 private actor TestGateway: LinnGateway {

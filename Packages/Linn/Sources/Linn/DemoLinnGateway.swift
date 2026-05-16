@@ -10,6 +10,38 @@
             var album: String
             var duration: Int
             var artworkURL: URL?
+
+            init(
+                id: String,
+                title: String,
+                artist: String,
+                album: String,
+                duration: Int,
+                artworkURL: URL?
+            ) {
+                self.id = id
+                self.title = title
+                self.artist = artist
+                self.album = album
+                self.duration = duration
+                self.artworkURL = artworkURL
+            }
+
+            init?(_ item: CiGateway.MediaItem) {
+                let title = item.displayTitle ?? item.title ?? item.name
+                guard let title, !title.isEmpty else {
+                    return nil
+                }
+
+                self.init(
+                    id: item.id,
+                    title: title,
+                    artist: item.artists.first ?? "Unknown Artist",
+                    album: item.album ?? title,
+                    duration: item.duration ?? 210,
+                    artworkURL: item.artworkURL
+                )
+            }
         }
 
         private struct Subscription {
@@ -23,16 +55,26 @@
         private var position: Int
         private var volume: Int
         private var isMuted: Bool
+        private var playlistContentRevision: Int
+        private var pendingSelectionIndex: Int?
+        private var mediaSelectionGeneration = 0
+        private let playlistSelectionObservationDelay: Duration
+        private let mediaSelectionObservationDelay: Duration
         private var subscriptions: [UUID: Subscription] = [:]
 
-        public init() {
+        public init(
+            playlistSelectionObservationDelay: Duration = .milliseconds(350),
+            mediaSelectionObservationDelay: Duration = .seconds(1)
+        ) {
             self.init(
                 songs: Self.defaultSongs,
                 currentIndex: 0,
                 transportState: .pause,
                 position: 61,
                 volume: 32,
-                isMuted: false
+                isMuted: false,
+                playlistSelectionObservationDelay: playlistSelectionObservationDelay,
+                mediaSelectionObservationDelay: mediaSelectionObservationDelay
             )
         }
 
@@ -42,7 +84,9 @@
             playState: Linn.PlayState = .paused,
             position: Int = 0,
             volume: Int = 32,
-            isMuted: Bool = false
+            isMuted: Bool = false,
+            playlistSelectionObservationDelay: Duration = .milliseconds(350),
+            mediaSelectionObservationDelay: Duration = .seconds(1)
         ) {
             let demoSongs = songs.enumerated().map { _, song in
                 DemoSong(
@@ -61,7 +105,9 @@
                 transportState: Self.transportState(for: playState),
                 position: position,
                 volume: volume,
-                isMuted: isMuted
+                isMuted: isMuted,
+                playlistSelectionObservationDelay: playlistSelectionObservationDelay,
+                mediaSelectionObservationDelay: mediaSelectionObservationDelay
             )
         }
 
@@ -71,7 +117,9 @@
             transportState: CiGateway.NowPlaying.TransportState,
             position: Int,
             volume: Int,
-            isMuted: Bool
+            isMuted: Bool,
+            playlistSelectionObservationDelay: Duration,
+            mediaSelectionObservationDelay: Duration
         ) {
             self.songs = songs
             self.currentIndex = min(max(0, currentIndex), songs.count - 1)
@@ -79,6 +127,9 @@
             self.position = position
             self.volume = volume
             self.isMuted = isMuted
+            playlistContentRevision = 1
+            self.playlistSelectionObservationDelay = playlistSelectionObservationDelay
+            self.mediaSelectionObservationDelay = mediaSelectionObservationDelay
         }
 
         public func nowPlayingUpdates(
@@ -122,13 +173,7 @@
                 return
             }
 
-            currentIndex -= 1
-            position = 0
-            transportState = .buffering
-            yieldSnapshot()
-            try await Task.sleep(for: .milliseconds(350))
-            transportState = .play
-            yieldSnapshot()
+            try await selectPlaylistItem(at: currentIndex - 1)
         }
 
         public func next(room _: String) async throws {
@@ -136,25 +181,25 @@
                 return
             }
 
-            currentIndex += 1
-            position = 0
-            transportState = .buffering
-            yieldSnapshot()
-            try await Task.sleep(for: .milliseconds(350))
-            transportState = .play
-            yieldSnapshot()
+            try await selectPlaylistItem(at: currentIndex + 1)
         }
 
         public func selectPlaylistItem(at index: Int, room _: String) async throws {
+            try await selectPlaylistItem(at: index)
+        }
+
+        private func selectPlaylistItem(at index: Int) async throws {
             guard songs.indices.contains(index) else {
                 return
             }
 
-            currentIndex = index
-            position = 0
+            pendingSelectionIndex = index
             transportState = .buffering
             yieldSnapshot()
-            try await Task.sleep(for: .milliseconds(350))
+            try await Task.sleep(for: playlistSelectionObservationDelay)
+            currentIndex = index
+            position = 0
+            pendingSelectionIndex = nil
             transportState = .play
             yieldSnapshot()
         }
@@ -181,65 +226,7 @@
             count: Int,
             browseType _: String
         ) async throws -> CiGateway.MediaPage {
-            let children: [CiGateway.MediaItem]
-            switch mediaID {
-            case "service-qobuz":
-                children = [
-                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
-                ]
-            case "qobuz-myqobuz":
-                children = [
-                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
-                ]
-            case "qobuz-favourites":
-                children = [
-                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-tracks", kind: "md.container", name: "Tracks"),
-                ]
-            case "qobuz-favourite-albums":
-                children = Self.demoLibraryAlbums
-            case "qobuz-favourite-artists":
-                children = Self.demoLibraryArtists
-            case "qobuz-favourite-playlists", "qobuz-my-playlists":
-                children = Self.demoLibraryPlaylists
-            case "qobuz-purchased":
-                children = Self.demoLibraryAlbums.reversed()
-            case "qobuz-discover":
-                children = [
-                    CiGateway.MediaItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", name: "New Releases"),
-                    CiGateway.MediaItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", name: "Qobuz Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", name: "Most Streamed"),
-                ]
-            case "qobuz-genres":
-                children = [
-                    CiGateway.MediaItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", name: "Jazz"),
-                    CiGateway.MediaItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", name: "Electronic"),
-                    CiGateway.MediaItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", name: "Classical"),
-                ]
-            case "qobuz-album-hit-me-hard-and-soft":
-                children = Self.hitMeHardAndSoftTracks
-            case "qobuz-album-happy-christmas",
-                 "qobuz-album-shostakovich-quartets",
-                 "qobuz-album-birth-of-the-blue",
-                 "qobuz-album-chopin-nocturnes",
-                 "qobuz-album-abbey-road",
-                 "qobuz-album-opus",
-                 "qobuz-album-the-old-country":
-                children = Self.demoTracks(for: mediaID)
-            case "qobuz-playlist-willkommen",
-                 "qobuz-playlist-true-sound-covers",
-                 "qobuz-playlist-grammy-winners-2021":
-                children = Self.demoPlaylistTracks
-            default:
-                children = []
-            }
-
+            let children = Self.mediaChildren(for: mediaID)
             let slice = Array(children.dropFirst(index).prefix(count))
             return CiGateway.MediaPage(
                 id: mediaID,
@@ -273,7 +260,30 @@
             )
         }
 
-        public func selectMedia(mediaID _: String, room _: String, queue _: CiGateway.QueuePlacement) async throws {}
+        public func selectMedia(mediaID: String, room _: String, queue: CiGateway.QueuePlacement) async throws {
+            let selectedSongs = Self.queueSongs(for: mediaID)
+            guard !selectedSongs.isEmpty else {
+                return
+            }
+
+            let mutation = queueMutation(placing: selectedSongs, queue: queue)
+            mediaSelectionGeneration += 1
+            let generation = mediaSelectionGeneration
+            yieldCountOnlySnapshot(queueLength: mutation.songs.count)
+
+            try await Task.sleep(for: mediaSelectionObservationDelay)
+            guard generation == mediaSelectionGeneration else {
+                return
+            }
+
+            songs = mutation.songs
+            currentIndex = mutation.currentIndex
+            pendingSelectionIndex = nil
+            position = 0
+            transportState = .play
+            playlistContentRevision += 1
+            yieldSnapshot()
+        }
 
         public func setMediaFavourite(mediaID _: String, isFavourite _: Bool) async throws {}
 
@@ -296,6 +306,12 @@
             }
         }
 
+        private func yieldCountOnlySnapshot(queueLength: Int) {
+            for subscription in subscriptions.values {
+                subscription.continuation.yield(countOnlySnapshot(room: subscription.room, queueLength: queueLength))
+            }
+        }
+
         private func snapshot(room: String) -> CiGateway.NowPlaying {
             let song = songs[currentIndex]
             var nowPlaying = CiGateway.NowPlaying(room: room, session: "preview-session")
@@ -303,6 +319,22 @@
             nowPlaying.queue = CiGateway.NowPlaying.Queue(index: currentIndex, length: songs.count)
             nowPlaying.currentItem = currentItem(song)
             nowPlaying.playlist = playlist
+            nowPlaying.timeline = CiGateway.NowPlaying.Timeline(
+                position: position,
+                duration: song.duration,
+                seekableRange: CiGateway.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
+            )
+            nowPlaying.roomState = CiGateway.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
+            return nowPlaying
+        }
+
+        private func countOnlySnapshot(room: String, queueLength: Int) -> CiGateway.NowPlaying {
+            let song = songs[currentIndex]
+            var nowPlaying = CiGateway.NowPlaying(room: room, session: "preview-session")
+            nowPlaying.playback = CiGateway.NowPlaying.Playback(transportState: transportState)
+            nowPlaying.queue = CiGateway.NowPlaying.Queue(index: currentIndex, length: queueLength)
+            nowPlaying.currentItem = currentItem(song)
+            nowPlaying.playlist = CiGateway.NowPlaying.Playlist(items: [], total: queueLength)
             nowPlaying.timeline = CiGateway.NowPlaying.Timeline(
                 position: position,
                 duration: song.duration,
@@ -327,7 +359,8 @@
         }
 
         private var playlist: CiGateway.NowPlaying.Playlist {
-            CiGateway.NowPlaying.Playlist(
+            let selectedIndex = pendingSelectionIndex ?? currentIndex
+            return CiGateway.NowPlaying.Playlist(
                 items: songs.enumerated().map { index, song in
                     CiGateway.NowPlaying.PlaylistItem(
                         index: index,
@@ -335,12 +368,35 @@
                         album: song.album,
                         artist: song.artist,
                         duration: song.duration,
-                        artworkURL: song.artworkURL
+                        artworkURL: song.artworkURL,
+                        isCurrent: index == selectedIndex
                     )
                 },
                 total: songs.count,
-                contentRevision: 1
+                contentRevision: playlistContentRevision
             )
+        }
+
+        private func queueMutation(
+            placing selectedSongs: [DemoSong],
+            queue: CiGateway.QueuePlacement
+        ) -> (songs: [DemoSong], currentIndex: Int) {
+            switch queue {
+            case .replace:
+                return (selectedSongs, 0)
+            case .last:
+                return (songs + selectedSongs, currentIndex)
+            case .next:
+                var queuedSongs = songs
+                let insertionIndex = min(currentIndex + 1, queuedSongs.count)
+                queuedSongs.insert(contentsOf: selectedSongs, at: insertionIndex)
+                return (queuedSongs, currentIndex)
+            case .now:
+                var queuedSongs = songs
+                let insertionIndex = min(currentIndex + 1, queuedSongs.count)
+                queuedSongs.insert(contentsOf: selectedSongs, at: insertionIndex)
+                return (queuedSongs, insertionIndex)
+            }
         }
 
         private static func transportState(for playState: Linn.PlayState) -> CiGateway.NowPlaying.TransportState {
@@ -353,6 +409,94 @@
                 .pause
             case .loading, .buffering:
                 .buffering
+            }
+        }
+
+        private static func queueSongs(for mediaID: String) -> [DemoSong] {
+            if let directTrack = queueableMediaItems.first(where: { $0.id == mediaID }) {
+                return DemoSong(directTrack).map { [$0] } ?? []
+            }
+
+            return mediaChildren(for: mediaID)
+                .flatMap(queueableTracks(in:))
+                .compactMap(DemoSong.init)
+        }
+
+        private static func queueableTracks(in item: CiGateway.MediaItem) -> [CiGateway.MediaItem] {
+            if isTrack(item) {
+                return [item]
+            }
+
+            return mediaChildren(for: item.id).filter(isTrack)
+        }
+
+        private static var queueableMediaItems: [CiGateway.MediaItem] {
+            hitMeHardAndSoftTracks
+                + demoPlaylistTracks
+                + demoLibraryAlbums.flatMap { demoTracks(for: $0.id) }
+        }
+
+        private static func isTrack(_ item: CiGateway.MediaItem) -> Bool {
+            item.kind.localizedCaseInsensitiveContains("track")
+        }
+
+        private static func mediaChildren(for mediaID: String) -> [CiGateway.MediaItem] {
+            switch mediaID {
+            case "service-qobuz":
+                [
+                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                ]
+            case "qobuz-myqobuz":
+                [
+                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                ]
+            case "qobuz-favourites":
+                [
+                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-favourite-tracks", kind: "md.container", name: "Tracks"),
+                ]
+            case "qobuz-favourite-albums":
+                demoLibraryAlbums
+            case "qobuz-favourite-artists":
+                demoLibraryArtists
+            case "qobuz-favourite-playlists", "qobuz-my-playlists":
+                demoLibraryPlaylists
+            case "qobuz-purchased":
+                Array(demoLibraryAlbums.reversed())
+            case "qobuz-discover":
+                [
+                    CiGateway.MediaItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", name: "New Releases"),
+                    CiGateway.MediaItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", name: "Qobuz Playlists"),
+                    CiGateway.MediaItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", name: "Most Streamed"),
+                ]
+            case "qobuz-genres":
+                [
+                    CiGateway.MediaItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", name: "Jazz"),
+                    CiGateway.MediaItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", name: "Electronic"),
+                    CiGateway.MediaItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", name: "Classical"),
+                ]
+            case "qobuz-album-hit-me-hard-and-soft":
+                hitMeHardAndSoftTracks
+            case "qobuz-album-happy-christmas",
+                 "qobuz-album-shostakovich-quartets",
+                 "qobuz-album-birth-of-the-blue",
+                 "qobuz-album-chopin-nocturnes",
+                 "qobuz-album-abbey-road",
+                 "qobuz-album-opus",
+                 "qobuz-album-the-old-country":
+                demoTracks(for: mediaID)
+            case "qobuz-playlist-willkommen",
+                 "qobuz-playlist-true-sound-covers",
+                 "qobuz-playlist-grammy-winners-2021":
+                demoPlaylistTracks
+            default:
+                []
             }
         }
 
