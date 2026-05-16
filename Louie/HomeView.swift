@@ -190,6 +190,8 @@ private enum WordmarkHeaderMetrics {
 private struct WordmarkViewport: View {
     var width: CGFloat
 
+    @Environment(\.colorScheme) private var colorScheme
+
     private let sourceAspectRatio: CGFloat = 595 / 420
     private let visibleAspectRatio: CGFloat = 2.85
     private let verticalCropOffsetRatio: CGFloat = 0.12
@@ -205,6 +207,7 @@ private struct WordmarkViewport: View {
         Image("Louie Wordmark")
             .resizable()
             .scaledToFit()
+            .colorInvert(colorScheme == .dark)
             .frame(width: width, height: sourceHeight, alignment: .topLeading)
             .offset(
                 x: -width * horizontalCropOffsetRatio,
@@ -226,6 +229,15 @@ private extension View {
         frame(maxWidth: homeContentMaxWidth, alignment: .leading)
             .padding(.horizontal, homeContentHorizontalPadding)
             .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    func colorInvert(_ enabled: Bool) -> some View {
+        if enabled {
+            colorInvert()
+        } else {
+            self
+        }
     }
 }
 
