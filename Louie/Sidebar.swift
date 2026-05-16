@@ -40,7 +40,6 @@ struct Sidebar: View {
                 .tag(AppSection.queue)
             }
         }
-        .navigationTitle("Louie")
     }
 }
 
