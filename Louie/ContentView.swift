@@ -19,6 +19,9 @@ struct ContentView: View {
 private struct ContentViewBody: View {
     var linn: Linn
 
+    @State private var leadingInset = 0.0
+    @State private var playBarHeight = 0.0
+
     @State private var selectedSection: AppSection? = .home
     // Only store `.home(...)` routes here. The outer `AppDetailRoute` wrapper
     // keeps the split-view detail stack's path element type stable.
@@ -37,14 +40,34 @@ private struct ContentViewBody: View {
                 selectedSection: $selectedSection,
             )
         } detail: {
-            detailContent
-                .playerBarOverlay(linn: linn)
+            ZStack {
+                detailContent
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.safeAreaInsets.leading
+                    } action: { leadingInset in
+                        self.leadingInset = leadingInset
+                    }
+            }
         }
+
         .task {
             linn.start()
         }
         .onDisappear {
             linn.stop()
+        }
+        .environment(\.bottomContentClearance, playBarHeight)
+        .safeAreaInset(edge: .bottom) {
+            PlayerBar(state: linn)
+                .padding(.top, 10)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    playBarHeight = height
+                }
+                .padding(.leading, leadingInset)
+                .padding(.horizontal)
+                .animation(.smooth(duration: 0.25), value: leadingInset)
         }
     }
 
@@ -93,7 +116,9 @@ private struct ContentViewBody: View {
 }
 
 private extension View {
-    func appDetailNavigationDestinations(linn: Linn) -> some View {
+    func appDetailNavigationDestinations(linn: Linn)
+        -> some View
+    {
         navigationDestination(for: AppDetailRoute.self) { route in
             switch route {
             case .home, .queue:

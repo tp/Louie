@@ -28,6 +28,7 @@ struct LibraryItemDetailView: View {
             .frame(maxWidth: 760, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.vertical, 24)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .bottomPlayerBarClearance()
         .navigationTitle(route.title)
