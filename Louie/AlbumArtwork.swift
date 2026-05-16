@@ -5,6 +5,7 @@
 //  Created by Timm Preetz on 15.05.26.
 //
 
+import NukeUI
 import SwiftUI
 
 /// Square image view for the album's artwork, with loading fallback.
@@ -25,26 +26,28 @@ struct AlbumArtwork: View {
             )
             .aspectRatio(1, contentMode: .fill)
             .overlay {
-                AsyncImage(url: url) { image in
-                    if usesBlurredFill {
-                        ZStack {
+                LazyImage(url: url) { state in
+                    if let image = state.image {
+                        if usesBlurredFill {
+                            ZStack {
+                                image.resizable()
+                                    .scaledToFill()
+                                    .blur(radius: 8)
+                                    .saturation(1.15)
+                                    .overlay(Color.black.opacity(0.18))
+
+                                image.resizable()
+                                    .scaledToFit()
+                                    .aspectRatio(1, contentMode: .fit)
+                                    .scaleEffect(0.9)
+                            }
+                        } else {
                             image.resizable()
                                 .scaledToFill()
-                                .blur(radius: 8)
-                                .saturation(1.15)
-                                .overlay(Color.black.opacity(0.18))
-
-                            image.resizable()
-                                .scaledToFit()
-                                .aspectRatio(1, contentMode: .fit)
-                                .scaleEffect(0.9)
                         }
                     } else {
-                        image.resizable()
-                            .scaledToFill()
+                        Color.clear
                     }
-                } placeholder: {
-                    Color.clear
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 6))

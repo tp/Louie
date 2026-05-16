@@ -97,16 +97,12 @@ public struct PlayQueue: View {
 public struct QueueListTile: View {
     var song: Linn.Song
     var isCurrent = false
+    var isPending = false
 
     public var body: some View {
         HStack(spacing: 12) {
-            AsyncImage(url: song.artworkURL) { image in
-                image.resizable()
-            } placeholder: {
-                Color.gray
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .frame(width: 40, height: 40)
+            AlbumArtwork(url: song.artworkURL)
+                .frame(width: 40, height: 40)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(song.title)

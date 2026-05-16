@@ -5,11 +5,21 @@
 //  Created by Timm Preetz on 12.05.26.
 //
 
+import Nuke
 import SwiftData
 import SwiftUI
 
 @main
 struct LouieApp: App {
+    init() {
+        ImagePipeline.shared = ImagePipeline(
+            configuration: .withDataCache(
+                name: "xyz.timm.preetz.Louie.ArtworkDataCache",
+                sizeLimit: 150 * 1024 * 1024,
+            ),
+        )
+    }
+
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Item.self,

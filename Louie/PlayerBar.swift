@@ -45,13 +45,8 @@ public struct PlayerBar: View {
     @ViewBuilder
     var currentSong: some View {
         HStack {
-            AsyncImage(url: state.currentSong?.artworkURL) { image in
-                image.resizable()
-            } placeholder: {
-                Color.gray
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .frame(width: 40, height: 40)
+            AlbumArtwork(url: state.currentSong?.artworkURL)
+                .frame(width: 40, height: 40)
 
             ZStack(alignment: .leading) {
                 if let song = state.currentSong {
