@@ -26,7 +26,8 @@ public struct PlayQueue: View {
                         } label: {
                             QueueListTile(
                                 song: song,
-                                isCurrent: song.queueIndex == linn.playlist.currentIndex
+                                isCurrent: song.queueIndex == linn.playlist.currentIndex,
+                                isPending: song.queueIndex == linn.pendingQueueIndex,
                             )
                         }
                         .id(queueRowID(for: song))
@@ -117,21 +118,28 @@ public struct QueueListTile: View {
 
             Spacer()
 
-            Image(systemName: "speaker.wave.2.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tint)
-                .opacity(isCurrent ? 1 : 0)
+            ZStack {
+                Image(systemName: "speaker.wave.2.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .opacity(isCurrent ? 1 : 0)
+
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(isPending && !isCurrent ? 1 : 0)
+            }
+            .frame(width: 24, height: 24)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(.regularMaterial)
+                .fill(.regularMaterial),
         )
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(.tint.opacity(isCurrent ? 0.45 : 0), lineWidth: 1)
+                .stroke(.tint.opacity(isCurrent || isPending ? 0.45 : 0), lineWidth: 1)
         }
     }
 }
