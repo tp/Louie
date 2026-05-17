@@ -32,7 +32,7 @@ struct Sidebar: View {
                     Spacer()
 
                     if remainingQueueCount > 0 {
-                        RollingBadge(count: remainingQueueCount)
+                        Odometer(value: remainingQueueCount)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -48,10 +48,9 @@ private struct RollingBadge: View {
 
     var body: some View {
         Text("\(count)")
-
             .monospacedDigit()
-            .contentTransition(.numericText())
-            .animation(.snappy, value: count)
+            .contentTransition(.numericText(value: Double(count)))
+            .animation(.snappy(), value: count)
     }
 }
 
@@ -80,7 +79,88 @@ private struct RollingBadge: View {
                 Button("100") {
                     count = 100
                 }
+
+                Button("1000") {
+                    count = 1000
+                }
+
+                Button("12345") {
+                    count = 12345
+                }
             }
         }
     }
+
+    #Preview("RollingBadge comparison") {
+        @Previewable @State var count = 11
+
+        VStack(alignment: .trailing, spacing: 20) {
+            HStack {
+                Spacer()
+                Text("\(count)")
+                    .monospacedDigit()
+                    .font(.system(size: 90, weight: .bold, design: .rounded))
+                    .contentTransition(.numericText())
+                    .animation(.snappy(), value: count)
+            }
+
+            HStack {
+                Spacer()
+                RollingBadge(count: count)
+                    .font(.system(size: 90, weight: .bold, design: .rounded))
+            }
+
+            HStack {
+                Spacer()
+                Odometer(value: count)
+                    .font(.system(size: 90, weight: .bold, design: .rounded))
+            }
+
+            Button("0") {
+                count = 0
+            }
+
+            HStack {
+                Button("-1") {
+                    count = count - 1
+                }
+
+                Button("+1") {
+                    count = count + 1
+                }
+            }
+
+            HStack {
+                Button("-5") {
+                    count = count - 5
+                }
+                Button("+5") {
+                    count = count + 5
+                }
+            }
+
+            HStack {
+                Button("-25") {
+                    count = count - 25
+                }
+                Button("+25") {
+                    count = count + 25
+                }
+            }
+
+            Button("100") {
+                count = 100
+            }
+
+            Button("1000") {
+                count = 1000
+            }
+
+            Button("12345") {
+                count = 12345
+            }
+        }
+        .frame(width: 350)
+    }
+
 #endif
