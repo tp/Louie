@@ -47,6 +47,7 @@ jobs:
 
       - name: Build Louie (generic iOS)
         run: |
+          set -o pipefail
           xcodebuild \
             -project Louie.xcodeproj \
             -scheme Louie \
@@ -55,4 +56,17 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY= \
-            build
+            build \
+            | xcbeautify --renderer github-actions
+
+      - name: Test Louie unit tests
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Louie.xcodeproj \
+            -scheme Louie \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -only-testing:LouieTests \
+            -skipPackagePluginValidation \
+            test \
+            | xcbeautify --renderer github-actions
