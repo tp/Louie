@@ -21,6 +21,10 @@ private struct ContentViewBody: View {
 
     @State private var leadingInset = 0.0
     @State private var playBarHeight = 0.0
+    @State private var voiceAgent = VoiceAgentController(
+        agent: EchoVoiceAgent(),
+        capture: LiveVoiceCapture(),
+    )
 
     @State private var selectedSection: AppSection? = .home
     // Only store `.home(...)` routes here. The outer `AppDetailRoute` wrapper
@@ -58,16 +62,20 @@ private struct ContentViewBody: View {
         }
         .environment(\.bottomContentClearance, playBarHeight)
         .safeAreaInset(edge: .bottom) {
-            PlayerBar(state: linn)
-                .padding(.top, 10)
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.height
-                } action: { height in
-                    playBarHeight = height
-                }
-                .padding(.leading, leadingInset)
-                .padding(.horizontal)
-                .animation(.smooth(duration: 0.25), value: leadingInset)
+            HStack {
+                PlayerBar(state: linn)
+                    .padding(.top, 10)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        playBarHeight = height
+                    }
+                    .animation(.smooth(duration: 0.25), value: leadingInset)
+
+                VoiceAgentOverlay(state: voiceAgent.state, onEvent: voiceAgent.handle)
+            }
+            .padding(.leading, leadingInset)
+            .padding(.horizontal)
         }
     }
 
