@@ -124,6 +124,7 @@ final class LiveVoiceCapture: VoiceCapture {
         let engine = AVAudioEngine()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        request.contextualStrings = Self.contextualVocabulary
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
@@ -194,14 +195,32 @@ final class LiveVoiceCapture: VoiceCapture {
 
     // MARK: TTS
 
+    // Domain words/phrases the recognizer should bias toward when it would
+    // otherwise produce a more common homophone (e.g. "Louie" vs "Louis").
+    private static let contextualVocabulary: [String] = [
+        "Louie",
+    ]
+
     func speak(_ text: String) {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? session.setActive(true, options: .notifyOthersOnDeactivation)
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: Locale.current.identifier(.bcp47))
+        utterance.voice = Self.bestVoice(for: Locale.current.identifier(.bcp47))
         synthesizer.speak(utterance)
+    }
+
+    // Picks the highest-quality installed voice for the locale. Premium and
+    // enhanced variants only show up here once the user has downloaded them
+    // under Settings → Accessibility → Spoken Content (or via Siri Voice),
+    // so on a fresh device this falls back to the compact default.
+    private static func bestVoice(for languageCode: String) -> AVSpeechSynthesisVoice? {
+        let candidates = AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language == languageCode }
+        return candidates.first(where: { $0.quality == .premium })
+            ?? candidates.first(where: { $0.quality == .enhanced })
+            ?? AVSpeechSynthesisVoice(language: languageCode)
     }
 
     // MARK: Internals
