@@ -11,6 +11,7 @@
 //
 
 import Foundation
+import Linn
 import OSLog
 import Sentry
 
@@ -26,11 +27,31 @@ enum HeyLouieAgentError: LocalizedError {
     }
 }
 
+/// In-code feature flags for the voice agent's local tool implementations.
+/// Compile-time toggles, not user-facing settings — flip a value, rebuild.
+enum HeyLouieFeatureFlags {
+    /// When true, `search_music` queries the real Qobuz library via Linn
+    /// and `play_music` starts playback on the configured Linn room.
+    /// When false, both fall back to the in-memory `HeyLouieCatalog` and
+    /// the iPad-local `HeyLouieFakeState`. Useful for testing the agent
+    /// loop without a network or speaker.
+    static let useLinnForMusic = true
+}
+
 @MainActor
 final class HeyLouieWebSocketAgent: VoiceAgent {
     /// Fake state the dispatcher mutates. Exposed read-only-ish to the
     /// debug view; survives across turns for the lifetime of this agent.
     let fake = HeyLouieFakeState()
+
+    private let linn: Linn?
+    private let mediaIDs: HeyLouieMediaIdMap?
+
+    init(linn: Linn? = nil) {
+        let resolved = HeyLouieFeatureFlags.useLinnForMusic ? linn : nil
+        self.linn = resolved
+        mediaIDs = resolved == nil ? nil : HeyLouieMediaIdMap()
+    }
 
     private static let logger = Logger(subsystem: "Louie", category: "HeyLouieWebSocketAgent")
 
@@ -72,7 +93,7 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
         )
         try await client.sendUtterance(utterance)
 
-        let dispatcher = HeyLouieToolDispatcher(state: fake)
+        let dispatcher = HeyLouieToolDispatcher(state: fake, linn: linn, mediaIDs: mediaIDs)
 
         for try await message in client.messages() {
             try Task.checkCancellation()
@@ -86,7 +107,7 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
                     name: name,
                     summary: Self.summary(for: name, inputJSON: inputJSON),
                 )))
-                let (content, isError) = dispatchSafely(name: name, inputJSON: inputJSON, with: dispatcher)
+                let (content, isError) = await dispatchSafely(name: name, inputJSON: inputJSON, with: dispatcher)
                 try await client.sendToolResult(id: id, content: content, isError: isError)
                 env.publishState(.thinking)
             case let .finalText(text):
@@ -105,9 +126,9 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
         name: String,
         inputJSON: Data,
         with dispatcher: HeyLouieToolDispatcher,
-    ) -> (content: String, isError: Bool) {
+    ) async -> (content: String, isError: Bool) {
         do {
-            let content = try dispatcher.call(name: name, inputJSON: inputJSON)
+            let content = try await dispatcher.call(name: name, inputJSON: inputJSON)
             return (content, false)
         } catch {
             Self.logger.warning("Tool \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")

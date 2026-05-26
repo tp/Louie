@@ -13,6 +13,7 @@
 //
 
 import Foundation
+import Linn
 
 enum HeyLouieToolError: LocalizedError {
     case unknownTool(String)
@@ -26,15 +27,45 @@ enum HeyLouieToolError: LocalizedError {
     }
 }
 
+/// Translates between the long opaque media ids Linn/Qobuz use (gzipped,
+/// base64-encoded — often 500+ chars) and short tokens the LLM can
+/// reproduce verbatim in a tool call. Without this, the model garbles a
+/// character in the long id and the gateway rejects with "Failed to
+/// decompress media_id". Agent-scoped so a search in one turn can be
+/// played in a later turn.
+@MainActor
+final class HeyLouieMediaIdMap {
+    private var realByShort: [String: String] = [:]
+    private var shortByReal: [String: String] = [:]
+    private var nextSequence = 1
+
+    func register(_ realID: String) -> String {
+        if let existing = shortByReal[realID] {
+            return existing
+        }
+        let short = "m\(nextSequence)"
+        nextSequence += 1
+        realByShort[short] = realID
+        shortByReal[realID] = short
+        return short
+    }
+
+    func realID(for short: String) -> String? {
+        realByShort[short]
+    }
+}
+
 @MainActor
 struct HeyLouieToolDispatcher {
     let state: HeyLouieFakeState
+    let linn: Linn?
+    let mediaIDs: HeyLouieMediaIdMap?
 
     /// JSON content string for `tool_result`, or throws.
-    func call(name: String, inputJSON: Data) throws -> String {
+    func call(name: String, inputJSON: Data) async throws -> String {
         switch name {
-        case "search_music": try searchMusic(inputJSON)
-        case "play_music": try playMusic(inputJSON)
+        case "search_music": try await searchMusic(inputJSON)
+        case "play_music": try await playMusic(inputJSON)
         case "control_lights": try controlLights(inputJSON)
         case "set_climate": try setClimate(inputJSON)
         case "query_state": try queryState(inputJSON)
@@ -55,7 +86,7 @@ struct HeyLouieToolDispatcher {
         let title: String
     }
 
-    private func searchMusic(_ data: Data) throws -> String {
+    private func searchMusic(_ data: Data) async throws -> String {
         let input = try decode(SearchMusicInput.self, from: data)
         let trimmed = input.query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
@@ -65,9 +96,77 @@ struct HeyLouieToolDispatcher {
         if let type = input.type, !allowedTypes.contains(type) {
             throw HeyLouieToolError.badArgument("unknown type: \(type)")
         }
+        if let linn {
+            return try await searchMusicViaLinn(query: trimmed, agentType: input.type, linn: linn)
+        }
         let hits = HeyLouieCatalog.search(query: input.query, type: input.type)
             .map { SearchHit(id: $0.id, type: $0.type, title: $0.title) }
         return try encode(hits)
+    }
+
+    /// Maps the agent's type vocabulary (artist/album/genre/playlist/track)
+    /// to Linn's SearchType. Linn has no "genre" type — Qobuz returns the
+    /// most useful results when "jazz" is searched as albums, so genre and
+    /// missing-type both fall through to albums.
+    private static func linnSearchType(from agentType: String?) -> Linn.SearchType {
+        switch agentType {
+        case "artist": .artists
+        case "playlist": .playlists
+        case "track": .tracks
+        default: .albums
+        }
+    }
+
+    /// Best-effort classification of a Linn library item back into the
+    /// agent's type vocabulary. Falls back to whatever type the agent asked
+    /// for so the model's filter assumptions hold.
+    private static func resultType(for item: Linn.LibraryItem, fallback: String) -> String {
+        let lower = item.kind.lowercased()
+        if lower.contains("album") { return "album" }
+        if lower.contains("artist") { return "artist" }
+        if lower.contains("playlist") { return "playlist" }
+        if lower.contains("track") || lower.contains("song") { return "track" }
+        return fallback
+    }
+
+    private func searchMusicViaLinn(
+        query: String,
+        agentType: String?,
+        linn: Linn,
+    ) async throws -> String {
+        // No type → fan out across the three common kinds and merge so the
+        // model can pick the best match (e.g. "Thriller" → song vs. album).
+        // Run sequentially: the Linn CI gateway drops concurrent
+        // /V2/services/search requests on the same connection (observed:
+        // only one of three parallel searches returns, the others time out).
+        // "genre" stays on the albums-only path: Qobuz returns useful album
+        // matches for genre words like "jazz".
+        if agentType == nil {
+            var hits: [SearchHit] = []
+            for type in [Linn.SearchType.albums, .artists, .tracks] {
+                let page = try await linn.searchLibrary(query: query, type: type, count: 4)
+                hits.append(contentsOf: page.items.map { searchHit(for: $0, fallback: "album") })
+            }
+            return try encode(hits)
+        }
+
+        let searchType = Self.linnSearchType(from: agentType)
+        let page = try await linn.searchLibrary(query: query, type: searchType, count: 10)
+        let fallback = agentType ?? "album"
+        let hits = page.items.map { searchHit(for: $0, fallback: fallback) }
+        return try encode(hits)
+    }
+
+    /// Substitute Linn's long opaque id for a short token the LLM can
+    /// reproduce verbatim. The map round-trip happens in `play_music`.
+    private func searchHit(for item: Linn.LibraryItem, fallback: String) -> SearchHit {
+        let title = item.subtitle.map { "\(item.title) — \($0)" } ?? item.title
+        let id = mediaIDs?.register(item.id) ?? item.id
+        return SearchHit(
+            id: id,
+            type: Self.resultType(for: item, fallback: fallback),
+            title: title,
+        )
     }
 
     // MARK: - play_music
@@ -79,11 +178,28 @@ struct HeyLouieToolDispatcher {
     private struct PlayMusicResult: Encodable {
         let ok: Bool
         let id: String
-        let nowPlaying: String
+        let nowPlaying: String?
     }
 
-    private func playMusic(_ data: Data) throws -> String {
+    private func playMusic(_ data: Data) async throws -> String {
         let input = try decode(PlayMusicInput.self, from: data)
+        if let linn {
+            // Resolve the short LLM-friendly token back to the long Qobuz
+            // media id that Linn's gateway requires.
+            guard let realID = mediaIDs?.realID(for: input.id) else {
+                throw HeyLouieToolError.badArgument(
+                    "`id` must be a token returned by search_music in this session, got \(input.id)",
+                )
+            }
+            // Linn.play(_:placement:) only reads `item.id`; the other
+            // LibraryItem fields are unused on the wire to the gateway.
+            let stub = Linn.LibraryItem(id: realID, kind: "", title: "")
+            linn.play(stub, placement: .replace)
+            state.nowPlayingId = input.id
+            state.nowPlayingTitle = nil
+            state.isPlaying = true
+            return try encode(PlayMusicResult(ok: true, id: input.id, nowPlaying: nil))
+        }
         guard let entry = HeyLouieCatalog.byId[input.id] else {
             throw HeyLouieToolError.badArgument(
                 "`id` must be a token returned by search_music (e.g. '$id:genre:jazz'), got \(input.id)",

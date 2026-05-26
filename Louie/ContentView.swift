@@ -29,7 +29,7 @@ private struct ContentViewBody: View {
 
     init(linn: Linn) {
         self.linn = linn
-        let agent = HeyLouieWebSocketAgent()
+        let agent = HeyLouieWebSocketAgent(linn: linn)
         _heyLouie = State(initialValue: agent)
         _voiceAgent = State(initialValue: VoiceAgentController(
             agent: agent,
