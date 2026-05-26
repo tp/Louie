@@ -24,7 +24,7 @@ struct LibraryBrowser: View {
             if isShowingSearch {
                 searchContent
             } else {
-                libraryContent
+                libraryStateContent
             }
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
@@ -32,11 +32,47 @@ struct LibraryBrowser: View {
         .bottomPlayerBarClearance()
         .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
         .searchFocused($searchFocused)
-        .task {
-            linn.loadLibrary()
+        .refreshable {
+            linn.refreshLibrary()
         }
         .navigationTitle("Library")
         .navigationBarTitleDisplayMode(.large)
+    }
+
+    @ViewBuilder
+    private var libraryStateContent: some View {
+        switch linn.library.availability {
+        case .unavailable:
+            unavailableLibraryContent(
+                title: "Library Unavailable",
+                description: "Connect to the Linn gateway to load your media library."
+            )
+        case .loading:
+            ProgressView("Loading Library")
+                .frame(maxWidth: .infinity, minHeight: 320)
+        case .available:
+            if hasLibraryContent {
+                libraryContent
+            } else {
+                unavailableLibraryContent(
+                    title: "Library Empty",
+                    description: "The gateway did not return any library sections."
+                )
+            }
+        case let .failed(message):
+            unavailableLibraryContent(
+                title: "Library Unavailable",
+                description: message
+            )
+        }
+    }
+
+    private var hasLibraryContent: Bool {
+        linn.library.qobuz.favouriteAlbums != nil
+            || linn.library.qobuz.favouriteArtists != nil
+            || linn.library.qobuz.favouritePlaylists != nil
+            || linn.library.qobuz.myPlaylists != nil
+            || !linn.library.qobuz.browseSections.isEmpty
     }
 
     private var libraryContent: some View {
@@ -66,6 +102,20 @@ struct LibraryBrowser: View {
 
     private var searchContent: some View {
         LibrarySearchView(linn: linn, query: searchText)
+    }
+
+    private func unavailableLibraryContent(title: String, description: String) -> some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "books.vertical")
+        } description: {
+            Text(description)
+        } actions: {
+            Button("Retry", systemImage: "arrow.clockwise") {
+                linn.refreshLibrary()
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 320)
+        .padding(.horizontal, 24)
     }
 
     private func mediaSection(_ section: Linn.LibrarySection) -> some View {

@@ -328,8 +328,17 @@ public final class Linn {
     }
 
     public func loadLibrary() {
-        if library.availability == .loading {
+        loadLibrary(force: false)
+    }
+
+    private func loadLibrary(force: Bool) {
+        switch library.availability {
+        case .loading:
             return
+        case .available where !force:
+            return
+        case .available, .unavailable, .failed:
+            break
         }
 
         libraryTask?.cancel()
@@ -350,7 +359,10 @@ public final class Linn {
             do {
                 let services = try await ciGateway.mediaServices(room: room)
                 guard let qobuzService = services.first(where: { $0.name.localizedCaseInsensitiveCompare("Qobuz") == .orderedSame }) else {
-                    applyUnavailableLibrary()
+                    let availableServices = Self.availableMediaServicesDescription(services)
+                    let message = "Qobuz media service is unavailable. Available media services: \(availableServices)."
+                    Self.logger.error("\(message, privacy: .public)")
+                    library = Library(availability: .failed(message))
                     return
                 }
 
@@ -386,7 +398,7 @@ public final class Linn {
     public func refreshLibrary() {
         libraryContentRevision = nil
         libraryPageCache = [:]
-        loadLibrary()
+        loadLibrary(force: true)
     }
 
     public func browse(_ item: LibraryItem, index: Int = 0, count: Int = 50, browseType: String = "") async throws -> LibraryPage {
@@ -478,6 +490,21 @@ public final class Linn {
         library = Library(availability: .unavailable)
         libraryContentRevision = nil
         libraryPageCache = [:]
+    }
+
+    private static func availableMediaServicesDescription(_ services: [CiGateway.MediaService]) -> String {
+        guard !services.isEmpty else {
+            return "none"
+        }
+
+        return services
+            .map { service in
+                if let kind = service.kind, !kind.isEmpty {
+                    return "\(service.name) (\(kind))"
+                }
+                return service.name
+            }
+            .joined(separator: ", ")
     }
 
     private func buildLibrarySections(
