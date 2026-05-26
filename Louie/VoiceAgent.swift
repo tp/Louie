@@ -328,19 +328,23 @@ struct VoiceAgentOverlay: View {
     var onEvent: (VoiceAgentEvent) -> Void
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 10) {
+        // Button is the only layout-contributing element so the parent
+        // (player-bar HStack in ContentView's safeAreaInset) doesn't grow
+        // when the status banner appears. Banner floats above as an overlay.
+        VoiceAgentButton(
+            state: state,
+            onPressChange: { isPressed in
+                onEvent(isPressed ? .startRecording : .stopRecording)
+            },
+            onCancel: { onEvent(.cancel) },
+        )
+        .popover(isPresented: askUserBinding, arrowEdge: .bottom) {
+            askUserPopover
+        }
+        .overlay(alignment: .bottomTrailing) {
             VoiceAgentStatusBanner(state: state)
-
-            VoiceAgentButton(
-                state: state,
-                onPressChange: { isPressed in
-                    onEvent(isPressed ? .startRecording : .stopRecording)
-                },
-                onCancel: { onEvent(.cancel) },
-            )
-            .popover(isPresented: askUserBinding, arrowEdge: .bottom) {
-                askUserPopover
-            }
+                .fixedSize() // opt out of the 56pt button width proposal
+                .padding(.bottom, 66) // button (56) + spacing (10)
         }
         .animation(.snappy(duration: 0.25), value: state)
     }
