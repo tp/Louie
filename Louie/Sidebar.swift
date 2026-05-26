@@ -39,6 +39,13 @@ struct Sidebar: View {
 
                 .tag(AppSection.queue)
             }
+
+            #if DEBUG
+                Section("Debug") {
+                    Label(AppSection.debug.title, systemImage: AppSection.debug.systemImage)
+                        .tag(AppSection.debug)
+                }
+            #endif
         }
     }
 }

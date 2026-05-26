@@ -1,0 +1,131 @@
+//
+//  HeyLouieWebSocketAgent.swift
+//  Louie
+//
+//  `VoiceAgent` that drives one push-to-talk turn over a WebSocket to the
+//  Hey-Louie backend. Opens a fresh socket per turn, sends `hello` with
+//  this iPad's tool catalog, dispatches `tool_call` frames against
+//  `HeyLouieToolDispatcher`, and returns `final_text` for the controller
+//  to speak. The owning controller handles capture, TTS, state publishing
+//  on `.showingResponse`, and Task-cancellation propagation.
+//
+
+import Foundation
+import OSLog
+
+enum HeyLouieAgentError: LocalizedError {
+    case backend(String)
+    case unexpectedClose
+
+    var errorDescription: String? {
+        switch self {
+        case let .backend(message): message
+        case .unexpectedClose: "Agent connection closed without a response."
+        }
+    }
+}
+
+@MainActor
+final class HeyLouieWebSocketAgent: VoiceAgent {
+    /// Fake state the dispatcher mutates. Exposed read-only-ish to the
+    /// debug view; survives across turns for the lifetime of this agent.
+    let fake = HeyLouieFakeState()
+
+    private static let logger = Logger(subsystem: "Louie", category: "HeyLouieWebSocketAgent")
+
+    func handle(utterance: String, in env: VoiceAgentEnvironment) async throws -> String {
+        let client = HeyLouieClient()
+        client.open()
+
+        do {
+            let response = try await runTurn(utterance: utterance, client: client, env: env)
+            client.close()
+            return response
+        } catch is CancellationError {
+            try? await client.sendCancel()
+            client.close()
+            throw CancellationError()
+        } catch {
+            client.close()
+            throw error
+        }
+    }
+
+    private func runTurn(
+        utterance: String,
+        client: HeyLouieClient,
+        env: VoiceAgentEnvironment,
+    ) async throws -> String {
+        try await client.sendHello(
+            sessionId: UUID().uuidString,
+            tools: HeyLouieSchemas.all,
+        )
+        try await client.sendUtterance(utterance)
+
+        let dispatcher = HeyLouieToolDispatcher(state: fake)
+
+        for try await message in client.messages() {
+            try Task.checkCancellation()
+            switch message {
+            case let .toolCall(id, name, inputJSON):
+                env.publishState(.runningLocalTool(LocalToolActivity(
+                    name: name,
+                    summary: Self.summary(for: name, inputJSON: inputJSON),
+                )))
+                let (content, isError) = dispatchSafely(name: name, inputJSON: inputJSON, with: dispatcher)
+                try await client.sendToolResult(id: id, content: content, isError: isError)
+                env.publishState(.thinking)
+            case let .finalText(text):
+                return text
+            case .cancelled:
+                throw CancellationError()
+            case let .error(message):
+                throw HeyLouieAgentError.backend(message)
+            }
+        }
+
+        throw HeyLouieAgentError.unexpectedClose
+    }
+
+    private func dispatchSafely(
+        name: String,
+        inputJSON: Data,
+        with dispatcher: HeyLouieToolDispatcher,
+    ) -> (content: String, isError: Bool) {
+        do {
+            let content = try dispatcher.call(name: name, inputJSON: inputJSON)
+            return (content, false)
+        } catch {
+            Self.logger.warning("Tool \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return (error.localizedDescription, true)
+        }
+    }
+
+    /// Human-readable one-liner for the `runningLocalTool` status banner.
+    /// Decodes only the fields needed to render; failures fall back to a
+    /// generic label rather than throwing.
+    private static func summary(for tool: String, inputJSON: Data) -> String {
+        guard let obj = try? JSONSerialization.jsonObject(with: inputJSON) as? [String: Any] else {
+            return tool
+        }
+        switch tool {
+        case "search_music":
+            let query = obj["query"] as? String ?? ""
+            return "Searching for '\(query)'"
+        case "play_music":
+            let id = obj["id"] as? String ?? ""
+            return "Playing \(id)"
+        case "control_lights":
+            let room = obj["room"] as? String ?? "?"
+            return "Lights in \(room)"
+        case "set_climate":
+            let room = obj["room"] as? String ?? "?"
+            let target = obj["target_c"] ?? "?"
+            return "Climate in \(room) → \(target)°C"
+        case "query_state":
+            return "Reading state"
+        default:
+            return tool
+        }
+    }
+}

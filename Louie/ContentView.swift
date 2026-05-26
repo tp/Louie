@@ -21,10 +21,21 @@ private struct ContentViewBody: View {
 
     @State private var leadingInset = 0.0
     @State private var playBarHeight = 0.0
-    @State private var voiceAgent = VoiceAgentController(
-        agent: EchoVoiceAgent(),
-        capture: LiveVoiceCapture(),
-    )
+    // The concrete agent is held alongside the controller so the debug
+    // view can read its `fake` state — `VoiceAgentController.agent` is
+    // typed as `any VoiceAgent` and doesn't expose the fake state.
+    @State private var heyLouie: HeyLouieWebSocketAgent
+    @State private var voiceAgent: VoiceAgentController
+
+    init(linn: Linn) {
+        self.linn = linn
+        let agent = HeyLouieWebSocketAgent()
+        _heyLouie = State(initialValue: agent)
+        _voiceAgent = State(initialValue: VoiceAgentController(
+            agent: agent,
+            capture: LiveVoiceCapture(),
+        ))
+    }
 
     @State private var selectedSection: AppSection? = .home
     // Only store `.home(...)` routes here. The outer `AppDetailRoute` wrapper
@@ -101,6 +112,12 @@ private struct ContentViewBody: View {
                 PlayQueue(linn: linn)
                     .appDetailNavigationDestinations(linn: linn)
             }
+        #if DEBUG
+            case .debug:
+                NavigationStack {
+                    HeyLouieDebugView(state: heyLouie.fake)
+                }
+        #endif
         }
     }
 
