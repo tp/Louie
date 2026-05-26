@@ -48,8 +48,10 @@ protocol VoiceCapture: AnyObject {
     func startRecording() async throws
     /// Stop capture and return the final transcript.
     func stopRecording() async throws -> String
-    /// Speak `text` through the device speaker.
-    func speak(_ text: String)
+    /// Speak `text` through the device speaker. Returns when synthesis
+    /// finishes naturally or is cancelled via `cancel()`. Awaitable so the
+    /// per-turn Sentry transaction can include TTS latency.
+    func speak(_ text: String) async
     /// Abort any in-flight recording or playback. Idempotent.
     func cancel()
 }
@@ -57,7 +59,7 @@ protocol VoiceCapture: AnyObject {
 // MARK: - Live implementation
 
 @MainActor
-final class LiveVoiceCapture: VoiceCapture {
+final class LiveVoiceCapture: NSObject, VoiceCapture, AVSpeechSynthesizerDelegate {
     private let recognizer: SFSpeechRecognizer?
     private let synthesizer = AVSpeechSynthesizer()
 
@@ -67,9 +69,16 @@ final class LiveVoiceCapture: VoiceCapture {
 
     private var currentTranscript: String = ""
     private var finishContinuation: CheckedContinuation<String, Error>?
+    /// Resumed when AVSpeechSynthesizer fires didFinish or didCancel — both
+    /// terminal for our purposes. Speech is non-throwing so we don't need to
+    /// distinguish here; the controller checks `Task.isCancelled` after the
+    /// await to decide on the transaction status.
+    private var speechContinuation: CheckedContinuation<Void, Never>?
 
-    init() {
+    override init() {
         recognizer = SFSpeechRecognizer()
+        super.init()
+        synthesizer.delegate = self
     }
 
     // MARK: Permissions
@@ -190,6 +199,10 @@ final class LiveVoiceCapture: VoiceCapture {
             continuation.resume(throwing: VoiceCaptureError.noSpeechDetected)
         }
         synthesizer.stopSpeaking(at: .immediate)
+        // didCancel normally resumes the speech continuation, but if nothing
+        // is currently speaking (or queued), it won't fire. Resume directly
+        // to avoid leaking a pending `await speak`.
+        resumeSpeechContinuation()
         teardownEngine()
     }
 
@@ -201,14 +214,45 @@ final class LiveVoiceCapture: VoiceCapture {
         "Louie",
     ]
 
-    func speak(_ text: String) {
+    func speak(_ text: String) async {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? session.setActive(true, options: .notifyOthersOnDeactivation)
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = Self.bestVoice(forBaseLanguage: "en")
-        synthesizer.speak(utterance)
+
+        // If a prior speech is somehow still pending its continuation, resume
+        // it before starting the new one — guards against state corruption
+        // if speak is called twice without an intervening cancel.
+        resumeSpeechContinuation()
+
+        await withCheckedContinuation { continuation in
+            speechContinuation = continuation
+            synthesizer.speak(utterance)
+        }
+    }
+
+    private func resumeSpeechContinuation() {
+        guard let continuation = speechContinuation else { return }
+        speechContinuation = nil
+        continuation.resume()
+    }
+
+    // MARK: AVSpeechSynthesizerDelegate
+
+    // The delegate fires on the main thread by default, but with strict
+    // concurrency we declare these nonisolated and hop explicitly.
+    nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.resumeSpeechContinuation()
+        }
+    }
+
+    nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.resumeSpeechContinuation()
+        }
     }
 
     // Picks the highest-quality installed voice for the locale. Premium and
@@ -291,7 +335,7 @@ final class LiveVoiceCapture: VoiceCapture {
             return transcript
         }
 
-        func speak(_: String) {
+        func speak(_: String) async {
             // No-op in previews.
         }
 

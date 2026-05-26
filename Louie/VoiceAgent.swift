@@ -8,6 +8,7 @@
 //  same views without UI changes.
 //
 
+import Sentry
 import SwiftUI
 
 // MARK: - State model
@@ -182,6 +183,16 @@ final class VoiceAgentController {
     /// popover. Turn-level cancellation tears down the harvest task instead.
     private var askUserContinuation: CheckedContinuation<AskUserChoice?, Never>?
 
+    /// Sentry transaction for one push-to-talk turn. Spans button-release
+    /// through TTS-finish so the trace captures the full user-perceived
+    /// latency. Bound to the SDK scope so child spans (and the `sentry-trace`
+    /// header in HeyLouieWebSocketAgent) attach to it.
+    private var turnTransaction: (any Span)?
+    /// Child span around the SFSpeechRecognizer wait — kept as a property so
+    /// the finish/error path in `runHarvest` can close it without threading
+    /// it through every continuation.
+    private var sttSpan: (any Span)?
+
     init(agent: any VoiceAgent, capture: any VoiceCapture) {
         self.agent = agent
         self.capture = capture
@@ -232,41 +243,86 @@ final class VoiceAgentController {
         // transcript or surfaces an error.
         state = .thinking
 
+        // Open the Sentry transaction here — button-release marks the start
+        // of user-perceived latency. `bindToScope: true` makes this the
+        // active span so HeyLouieWebSocketAgent can pick it up to build the
+        // `sentry-trace` header for the WS upgrade.
+        let tx = SentrySDK.startTransaction(
+            name: "voice turn",
+            operation: "app.voice_turn",
+            bindToScope: true,
+        )
+        tx.setData(value: "louie", key: "gen_ai.agent.name")
+        turnTransaction = tx
+        sttSpan = tx.startChild(operation: "stt", description: "SFSpeechRecognizer")
+
         harvestTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
             do {
                 try await setup?.value
             } catch is CancellationError {
+                finishTurn(status: .cancelled)
                 return
             } catch {
                 if !Task.isCancelled {
                     state = .failed(error.localizedDescription)
                 }
+                finishTurn(status: .internalError, error: error)
                 return
             }
 
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                finishTurn(status: .cancelled)
+                return
+            }
 
             let transcript: String
             do {
                 transcript = try await capture.stopRecording()
             } catch is CancellationError {
+                finishTurn(status: .cancelled)
                 return
             } catch {
                 if !Task.isCancelled {
                     state = .failed(error.localizedDescription)
                 }
+                finishTurn(status: .internalError, error: error)
                 return
             }
 
-            if Task.isCancelled { return }
+            sttSpan?.setData(value: transcript, key: "stt.transcript")
+            sttSpan?.finish()
+            sttSpan = nil
+
+            if Task.isCancelled {
+                finishTurn(status: .cancelled)
+                return
+            }
 
             await runAgent(transcript: transcript)
         }
     }
 
+    /// Closes the active turn transaction with `status` and clears it. STT
+    /// span (if still open) is finished first so it doesn't outlive its
+    /// parent. Safe to call repeatedly; subsequent calls are no-ops.
+    private func finishTurn(status: SentrySpanStatus, error: Error? = nil) {
+        if let stt = sttSpan {
+            stt.finish(status: status)
+            sttSpan = nil
+        }
+        guard let tx = turnTransaction else { return }
+        turnTransaction = nil
+        if let error {
+            tx.setData(value: String(describing: error), key: "error")
+        }
+        tx.finish(status: status)
+    }
+
     private func runAgent(transcript: String) async {
+        turnTransaction?.setData(value: transcript, key: "gen_ai.prompt")
+
         let env = VoiceAgentEnvironment(
             publishState: { [weak self] state in
                 self?.state = state
@@ -288,15 +344,29 @@ final class VoiceAgentController {
 
         do {
             let response = try await agent.handle(utterance: transcript, in: env)
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                finishTurn(status: .cancelled)
+                return
+            }
+            turnTransaction?.setData(value: response, key: "gen_ai.response.text")
             state = .showingResponse(response)
-            capture.speak(response)
+
+            let ttsSpan = turnTransaction?.startChild(
+                operation: "tts",
+                description: "AVSpeechSynthesizer",
+            )
+            ttsSpan?.setData(value: response, key: "tts.text")
+            await capture.speak(response)
+            ttsSpan?.finish()
+
+            finishTurn(status: Task.isCancelled ? .cancelled : .ok)
         } catch is CancellationError {
-            return
+            finishTurn(status: .cancelled)
         } catch {
             if !Task.isCancelled {
                 state = .failed(error.localizedDescription)
             }
+            finishTurn(status: .internalError, error: error)
         }
     }
 
@@ -316,6 +386,11 @@ final class VoiceAgentController {
             continuation.resume(returning: nil)
         }
         capture.cancel()
+        // Finish the active turn transaction here rather than letting the
+        // cancelled harvest task do it: the task's cleanup runs after a yield
+        // point, by which time a new turn may have replaced `turnTransaction`,
+        // and the old task would finish the wrong span.
+        finishTurn(status: .cancelled)
     }
 }
 

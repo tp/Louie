@@ -12,6 +12,7 @@
 
 import Foundation
 import OSLog
+import Sentry
 
 enum HeyLouieAgentError: LocalizedError {
     case backend(String)
@@ -34,7 +35,16 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
     private static let logger = Logger(subsystem: "Louie", category: "HeyLouieWebSocketAgent")
 
     func handle(utterance: String, in env: VoiceAgentEnvironment) async throws -> String {
-        let client = HeyLouieClient()
+        // Manually propagate the active Sentry trace onto the WS upgrade
+        // request. URLSession auto-instrumentation isn't reliable for
+        // WebSocket upgrades across SDK versions, so we set the header
+        // ourselves. `baggage` is omitted (we sample at 1.0 on both sides,
+        // so cross-service sampling continuity isn't needed yet).
+        var headers: [String: String] = [:]
+        if let span = SentrySDK.span {
+            headers["sentry-trace"] = span.toTraceHeader().value()
+        }
+        let client = HeyLouieClient(headers: headers)
         client.open()
 
         do {

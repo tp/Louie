@@ -32,9 +32,9 @@ nonisolated enum HeyLouieInbound: Sendable {
 
 /// Single-key reader for the bundled `.env` file. Mirrors the discover
 /// path in `Linn.Configuration` (which uses an equivalent private parser).
-/// If a third reader appears, promote `Linn`'s `DotEnv` to a shared public
-/// type rather than copying again.
-nonisolated private enum HeyLouieDotEnv {
+/// Reused by `LouieApp` for `SENTRY_DSN`; if a fourth reader appears,
+/// promote `Linn`'s `DotEnv` to a shared public type rather than copying.
+nonisolated enum HeyLouieDotEnv {
     static func value(forKey key: String) -> String? {
         let candidates = [
             Bundle.main.url(forResource: ".env", withExtension: nil),
@@ -112,10 +112,18 @@ final class HeyLouieClient {
     private let session: URLSession
     private let task: URLSessionWebSocketTask
 
-    init(url: URL = HeyLouieClient.defaultURL) {
+    /// `headers` are applied to the WebSocket upgrade request — used by
+    /// the agent layer to inject `sentry-trace` so the backend can continue
+    /// the trace started on the iPad. Keep this client Sentry-agnostic:
+    /// the caller is responsible for computing the header value.
+    init(url: URL = HeyLouieClient.defaultURL, headers: [String: String] = [:]) {
         let session = URLSession(configuration: .default)
         self.session = session
-        task = session.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        task = session.webSocketTask(with: request)
         Self.logger.info("Opening agent socket to \(url.absoluteString, privacy: .public)")
     }
 
