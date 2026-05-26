@@ -207,7 +207,7 @@ final class LiveVoiceCapture: VoiceCapture {
         try? session.setActive(true, options: .notifyOthersOnDeactivation)
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = Self.bestVoice(for: Locale.current.identifier(.bcp47))
+        utterance.voice = Self.bestVoice(forBaseLanguage: "en")
         synthesizer.speak(utterance)
     }
 
@@ -215,12 +215,12 @@ final class LiveVoiceCapture: VoiceCapture {
     // enhanced variants only show up here once the user has downloaded them
     // under Settings → Accessibility → Spoken Content (or via Siri Voice),
     // so on a fresh device this falls back to the compact default.
-    private static func bestVoice(for languageCode: String) -> AVSpeechSynthesisVoice? {
+    private static func bestVoice(forBaseLanguage languageCode: String) -> AVSpeechSynthesisVoice? {
         let candidates = AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language == languageCode }
+            .filter { $0.language == languageCode || $0.language.hasPrefix("\(languageCode)-") }
         return candidates.first(where: { $0.quality == .premium })
             ?? candidates.first(where: { $0.quality == .enhanced })
-            ?? AVSpeechSynthesisVoice(language: languageCode)
+            ?? AVSpeechSynthesisVoice(language: "en-US")
     }
 
     // MARK: Internals
