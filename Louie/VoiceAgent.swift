@@ -55,29 +55,36 @@ struct LocalToolActivity: Equatable {
     var summary: String
 }
 
+struct AskUserChoice: Equatable, Hashable, Identifiable, Sendable {
+    var id: String
+    var label: String
+}
+
 struct AskUserPrompt: Equatable, Identifiable {
     var id = UUID()
     var question: String
-    var primaryChoice: String
-    var secondaryChoice: String
+    var choices: [AskUserChoice]
 }
 
 /// User-originated events the overlay forwards to its controller.
 enum VoiceAgentEvent: Sendable {
     case startRecording
     case stopRecording
-    case answerPrimary
-    case answerSecondary
-    /// Universal cancel — fired by the FAB while waiting on the agent or by
-    /// the ask-user popover's Cancel button. Returns the agent to `.idle`.
+    /// User tapped one of the ask-user choices.
+    case answerChoice(AskUserChoice)
+    /// Popover dismissed without a pick (Cancel button or outside-tap). The
+    /// agent resumes with `AskUserDismissed` so the turn can continue with a
+    /// `tool_result(is_error=true)` rather than aborting.
+    case dismissAskUser
+    /// Hard cancel — fired by the FAB while waiting on the agent. Returns
+    /// the agent to `.idle` and tears the whole turn down.
     case cancel
 }
 
-/// User's answer to an `ask_user` prompt.
-enum VoiceAgentAnswer: Sendable {
-    case primary
-    case secondary
-}
+/// Thrown from `VoiceAgentEnvironment.askUser` when the user dismissed the
+/// popover without picking. Distinct from `CancellationError` so the agent
+/// can recover (send `tool_result(is_error: true)`) instead of aborting.
+struct AskUserDismissed: Error {}
 
 // MARK: - Agent protocol
 
@@ -89,7 +96,10 @@ enum VoiceAgentAnswer: Sendable {
 @MainActor
 struct VoiceAgentEnvironment {
     let publishState: @MainActor (VoiceAgentState) -> Void
-    let askUser: @MainActor (AskUserPrompt) async throws -> VoiceAgentAnswer
+    /// Suspends until the user picks one of the choices. Throws
+    /// `AskUserDismissed` if the user dismissed the popover, or
+    /// `CancellationError` if the whole turn was cancelled.
+    let askUser: @MainActor (AskUserPrompt) async throws -> AskUserChoice
 }
 
 /// Anything that can act on a transcript. The controller is generic over
@@ -128,13 +138,15 @@ final class ScriptedVoiceAgent: VoiceAgent {
         )))
         try await Task.sleep(for: .seconds(1.5))
 
-        let answer = try await env.askUser(AskUserPrompt(
+        let picked = try await env.askUser(AskUserPrompt(
             question: "Two matches for “\(utterance)”. Which one?",
-            primaryChoice: "First match",
-            secondaryChoice: "Second match",
+            choices: [
+                AskUserChoice(id: "first", label: "First match"),
+                AskUserChoice(id: "second", label: "Second match"),
+            ],
         ))
 
-        let choice = answer == .primary ? "first match" : "second match"
+        let choice = picked.label.lowercased()
 
         env.publishState(.thinking)
         try await Task.sleep(for: .seconds(1))
@@ -166,7 +178,9 @@ final class VoiceAgentController {
     private let capture: any VoiceCapture
     private var setupTask: Task<Void, Error>?
     private var harvestTask: Task<Void, Never>?
-    private var askUserContinuation: CheckedContinuation<VoiceAgentAnswer?, Never>?
+    /// Resumes with the picked choice, or `nil` if the user dismissed the
+    /// popover. Turn-level cancellation tears down the harvest task instead.
+    private var askUserContinuation: CheckedContinuation<AskUserChoice?, Never>?
 
     init(agent: any VoiceAgent, capture: any VoiceCapture) {
         self.agent = agent
@@ -187,10 +201,13 @@ final class VoiceAgentController {
             if case .recording = state {
                 finishRecording()
             }
-        case .answerPrimary:
-            resumeAskUser(.primary)
-        case .answerSecondary:
-            resumeAskUser(.secondary)
+        case let .answerChoice(choice):
+            resumeAskUser(choice)
+        case .dismissAskUser:
+            // Soft dismiss: resume the continuation with nil so the agent
+            // throws AskUserDismissed and recovers the turn. The state will
+            // be republished by the agent's next env.publishState call.
+            resumeAskUser(nil)
         case .cancel:
             cancelEverything()
             state = .idle
@@ -257,11 +274,15 @@ final class VoiceAgentController {
             askUser: { [weak self] prompt in
                 guard let self else { throw CancellationError() }
                 state = .askingUser(prompt)
-                let answer: VoiceAgentAnswer? = await withCheckedContinuation { c in
+                let picked: AskUserChoice? = await withCheckedContinuation { c in
                     self.askUserContinuation = c
                 }
-                guard let answer else { throw CancellationError() }
-                return answer
+                // Both soft-dismiss and hard-cancel resume the continuation
+                // with nil. Check Task.isCancelled to tell them apart: hard
+                // cancel cancels the harvest task; soft dismiss does not.
+                if Task.isCancelled { throw CancellationError() }
+                guard let picked else { throw AskUserDismissed() }
+                return picked
             },
         )
 
@@ -279,10 +300,10 @@ final class VoiceAgentController {
         }
     }
 
-    private func resumeAskUser(_ answer: VoiceAgentAnswer) {
+    private func resumeAskUser(_ choice: AskUserChoice?) {
         guard let continuation = askUserContinuation else { return }
         askUserContinuation = nil
-        continuation.resume(returning: answer)
+        continuation.resume(returning: choice)
     }
 
     private func cancelEverything() {
@@ -332,7 +353,10 @@ struct VoiceAgentOverlay: View {
             },
             set: { isPresented in
                 if !isPresented {
-                    onEvent(.cancel)
+                    // Outside-tap is a soft dismiss; the agent recovers with
+                    // a tool_result(is_error=true). Use .cancel only on the
+                    // FAB to tear down the whole turn.
+                    onEvent(.dismissAskUser)
                 }
             },
         )
@@ -538,24 +562,17 @@ private struct AskUserPopover: View {
                 .multilineTextAlignment(.center)
 
             VStack(spacing: 10) {
-                Button {
-                    onEvent(.answerPrimary)
-                } label: {
-                    Text(prompt.primaryChoice)
-                        .frame(maxWidth: .infinity)
+                ForEach(Array(prompt.choices.enumerated()), id: \.element.id) { index, choice in
+                    AskUserChoiceButton(
+                        label: choice.label,
+                        prominent: index == 0,
+                    ) {
+                        onEvent(.answerChoice(choice))
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    onEvent(.answerSecondary)
-                } label: {
-                    Text(prompt.secondaryChoice)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
 
                 Button("Cancel", role: .cancel) {
-                    onEvent(.cancel)
+                    onEvent(.dismissAskUser)
                 }
                 .buttonStyle(.borderless)
                 .frame(maxWidth: .infinity)
@@ -565,6 +582,26 @@ private struct AskUserPopover: View {
         .padding(20)
         .frame(width: 260)
         .presentationCompactAdaptation(.popover)
+    }
+}
+
+private struct AskUserChoiceButton: View {
+    var label: String
+    var prominent: Bool
+    var action: () -> Void
+
+    var body: some View {
+        if prominent {
+            Button(action: action) {
+                Text(label).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        } else {
+            Button(action: action) {
+                Text(label).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
     }
 }
 
@@ -621,8 +658,10 @@ private struct AskUserPopover: View {
         VoiceAgentPreviewHarness(
             state: .askingUser(AskUserPrompt(
                 question: "Two songs match 'Chainsmoking'. Which one?",
-                primaryChoice: "Jacob Banks",
-                secondaryChoice: "Sirius",
+                choices: [
+                    AskUserChoice(id: "jacob-banks", label: "Jacob Banks"),
+                    AskUserChoice(id: "sirius", label: "Sirius"),
+                ],
             )),
         )
     }

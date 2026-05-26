@@ -67,6 +67,10 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
         for try await message in client.messages() {
             try Task.checkCancellation()
             switch message {
+            case let .toolCall(id, name, inputJSON) where name == "ask_user":
+                let (content, isError) = try await runAskUser(inputJSON: inputJSON, env: env)
+                try await client.sendToolResult(id: id, content: content, isError: isError)
+                env.publishState(.thinking)
             case let .toolCall(id, name, inputJSON):
                 env.publishState(.runningLocalTool(LocalToolActivity(
                     name: name,
@@ -97,6 +101,52 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
             return (content, false)
         } catch {
             Self.logger.warning("Tool \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return (error.localizedDescription, true)
+        }
+    }
+
+    // MARK: - ask_user
+
+    private struct AskUserInputChoice: Decodable {
+        let id: String
+        let label: String
+    }
+
+    private struct AskUserInput: Decodable {
+        let question: String
+        let choices: [AskUserInputChoice]
+    }
+
+    private struct AskUserResult: Encodable {
+        let id: String
+        let label: String
+    }
+
+    /// Suspends until the user picks a choice. On pick returns JSON
+    /// `{id, label}`. On soft dismiss returns `is_error=true` so the model
+    /// can recover with a graceful narration. CancellationError rethrows so
+    /// the outer `handle()` can send `cancel` on the socket and tear down.
+    private func runAskUser(
+        inputJSON: Data,
+        env: VoiceAgentEnvironment,
+    ) async throws -> (content: String, isError: Bool) {
+        do {
+            let input = try JSONDecoder().decode(AskUserInput.self, from: inputJSON)
+            guard !input.choices.isEmpty else {
+                return ("ask_user requires at least one choice", true)
+            }
+            let prompt = AskUserPrompt(
+                question: input.question,
+                choices: input.choices.map { AskUserChoice(id: $0.id, label: $0.label) },
+            )
+            let picked = try await env.askUser(prompt)
+            let payload = try JSONEncoder().encode(AskUserResult(id: picked.id, label: picked.label))
+            let content = String(data: payload, encoding: .utf8) ?? "{}"
+            return (content, false)
+        } catch is AskUserDismissed {
+            return ("user dismissed the popover", true)
+        } catch {
+            Self.logger.warning("ask_user failed: \(error.localizedDescription, privacy: .public)")
             return (error.localizedDescription, true)
         }
     }

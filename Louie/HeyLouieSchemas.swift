@@ -136,5 +136,51 @@ enum HeyLouieSchemas {
                 ],
             ],
         ],
+        [
+            "name": "ask_user",
+            "description": """
+                Ask the user to disambiguate between concrete options when their request is \
+                genuinely ambiguous AND picking the wrong default would noticeably annoy them. \
+                The user sees a tap popover (not a re-record) with the choices you provide; the \
+                tool_result is the picked {id, label}. USE SPARINGLY — prefer confident action \
+                with a one-sentence narration over asking. Never ask about which room or what \
+                temperature; pick a sensible default and say what you did. Only call this when \
+                (a) two or more plausible interpretations exist (e.g. 'play Thriller' → song or \
+                album?) AND (b) no prior tool result already resolves the ambiguity. The `id` \
+                strings you supply MUST be tokens that make sense for your follow-up action — \
+                typically values returned from a previous tool call (e.g. search_music hit ids), \
+                not free-form strings.
+                """,
+            "input_schema": [
+                "type": "object",
+                "properties": [
+                    "question": [
+                        "type": "string",
+                        "description": "Short, spoken-aloud-friendly question. No markdown, no preamble like 'sure!'. Examples: 'The song or the album?', 'Which Coldplay album?'.",
+                    ],
+                    "choices": [
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 5,
+                        "description": "2-5 distinct options the user can tap.",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "id": [
+                                    "type": "string",
+                                    "description": "Opaque token to act on after the tap (e.g. a search_music id).",
+                                ],
+                                "label": [
+                                    "type": "string",
+                                    "description": "Short human-facing label, 1-4 words.",
+                                ],
+                            ],
+                            "required": ["id", "label"],
+                        ],
+                    ],
+                ],
+                "required": ["question", "choices"],
+            ],
+        ],
     ]
 }
