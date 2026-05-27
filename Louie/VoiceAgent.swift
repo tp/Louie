@@ -247,49 +247,49 @@ final class VoiceAgentController {
 
             let transcript: String
             do {
-                transcript = try await self.capture.startRecording { [weak self] event in
+                transcript = try await capture.startRecording { [weak self] event in
                     guard let self else { return }
                     switch event {
                     case .micHot:
-                        self.voiceLog.event("mic_hot")
+                        voiceLog.event("mic_hot")
                     case .speechStarted:
-                        self.voiceLog.event("speech_started")
+                        voiceLog.event("speech_started")
                     case .speechEnded:
-                        self.voiceLog.event("speech_ended")
+                        voiceLog.event("speech_ended")
                         // Flip UI as soon as VAD says we're done — final
                         // drain of the transcriber still takes a moment.
-                        if case .recording = self.state {
-                            self.state = .thinking
+                        if case .recording = state {
+                            state = .thinking
                         }
                     }
                 }
             } catch is CancellationError {
-                self.finishTurn(status: .cancelled)
+                finishTurn(status: .cancelled)
                 return
             } catch {
                 if !Task.isCancelled {
-                    self.state = .failed(error.localizedDescription)
+                    state = .failed(error.localizedDescription)
                 }
-                self.finishTurn(status: .internalError, error: error)
+                finishTurn(status: .internalError, error: error)
                 return
             }
 
             if Task.isCancelled {
-                self.finishTurn(status: .cancelled)
+                finishTurn(status: .cancelled)
                 return
             }
 
-            self.voiceLog.event("transcript", detail: transcript)
+            voiceLog.event("transcript", detail: transcript)
             // Guarantee `.thinking` even if speechEnded never fired (e.g.
             // empty transcript that returned via timeout).
-            if case .recording = self.state {
-                self.state = .thinking
+            if case .recording = state {
+                state = .thinking
             }
-            self.sttSpan?.setData(value: transcript, key: "stt.transcript")
-            self.sttSpan?.finish()
-            self.sttSpan = nil
+            sttSpan?.setData(value: transcript, key: "stt.transcript")
+            sttSpan?.finish()
+            sttSpan = nil
 
-            await self.runAgent(transcript: transcript)
+            await runAgent(transcript: transcript)
         }
     }
 
@@ -391,9 +391,6 @@ struct VoiceAgentOverlay: View {
     var onEvent: (VoiceAgentEvent) -> Void
 
     var body: some View {
-        // Button is the only layout-contributing element so the parent
-        // (player-bar HStack in ContentView's safeAreaInset) doesn't grow
-        // when the status banner appears. Banner floats above as an overlay.
         VoiceAgentButton(
             state: state,
             onTap: { onEvent(.tap) },
@@ -401,10 +398,15 @@ struct VoiceAgentOverlay: View {
         .popover(isPresented: askUserBinding, arrowEdge: .bottom) {
             askUserPopover
         }
-        .overlay(alignment: .bottomTrailing) {
-            VoiceAgentStatusBanner(state: state)
-                .fixedSize() // opt out of the 56pt button width proposal
-                .padding(.bottom, 66) // button (56) + spacing (10)
+        .overlay(alignment: .topTrailing) {
+            Color.clear
+                .frame(width: 320)
+                .overlay(alignment: .trailing) {
+                    VoiceAgentStatusBanner(state: state)
+                }
+                .alignmentGuide(.top) { dimensions in
+                    dimensions[.bottom] + 10
+                }
         }
         .animation(.snappy(duration: 0.25), value: state)
     }
@@ -446,6 +448,7 @@ private struct VoiceAgentStatusBanner: View {
                     .font(.caption)
                     .foregroundStyle(line.tint)
                     .multilineTextAlignment(.trailing)
+                    .lineLimit(4)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .frame(maxWidth: 320, alignment: .trailing)
@@ -720,9 +723,25 @@ private struct AskUserChoiceButton: View {
         )
     }
 
+    #Preview("Showing response (multi-line)") {
+        VoiceAgentPreviewHarness(
+            state: .showingResponse(
+                "I found three albums called \"Chainsmoking\" — one by Jacob Banks, one by Sirius, and one by an artist I don't recognize. Which would you like me to play?",
+            ),
+        )
+    }
+
     #Preview("Failed") {
         VoiceAgentPreviewHarness(
             state: .failed("Microphone access was denied. Enable it in Settings to use voice."),
+        )
+    }
+
+    #Preview("Failed (multi-line)") {
+        VoiceAgentPreviewHarness(
+            state: .failed(
+                "Microphone access was denied. Open Settings → Privacy → Microphone and enable Louie so we can hear your push-to-talk requests.",
+            ),
         )
     }
 
@@ -735,6 +754,7 @@ private struct AskUserChoiceButton: View {
                 synth: voice,
             )
         }()
+
         @State private var useScripted = false
 
         var body: some View {
