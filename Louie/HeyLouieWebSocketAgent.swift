@@ -175,7 +175,12 @@ final class HeyLouieWebSocketAgent: VoiceAgent {
             let content = String(data: payload, encoding: .utf8) ?? "{}"
             return (content, false)
         } catch is AskUserDismissed {
-            return ("user dismissed the popover", true)
+            return (
+                "User dismissed the disambiguation without choosing. Do NOT retry "
+                    + "the action or fall back to a default — end the turn with a brief "
+                    + "acknowledgement like 'OK, never mind.'",
+                true,
+            )
         } catch {
             Self.logger.warning("ask_user failed: \(error.localizedDescription, privacy: .public)")
             return (error.localizedDescription, true)
