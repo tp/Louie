@@ -152,11 +152,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     private var hasFiredMicHot = false
     private var hasFiredSpeechStarted = false
     private var hasFiredSpeechEnded = false
-    /// True once any audio-tap buffer crossed `audibleThreshold` and
-    /// drove `markAudible(rms:non-nil)`. Once set, the transcriber
-    /// backstop stops rearming the silence timer — otherwise the
-    /// analyzer's final-drain emissions (~1+ s after the user stops
-    /// speaking) keep the timer alive past real end-of-utterance.
+    /// Gate for the transcriber backstop in `markAudible`. True once
+    /// any audio-tap buffer crossed `audibleThreshold` for this turn.
+    /// See `markAudible` for the full rationale.
     private var hasAudibleAudioFired = false
 
     /// AVSpeechSynthesizer's `didFinish`/`didCancel` delegate resumes this.
@@ -294,17 +292,18 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         inputContinuation = continuation
 
         // Subscribe to transcriber results before the analyzer starts
-        // producing them, so we don't lose the first events. The same
-        // loop drives endpointing: every result restarts the silence
-        // timer (see `armSilenceTimer`).
+        // producing them, so we don't lose the first events. This loop
+        // accumulates final text into `currentTranscript`; endpointing
+        // is driven by the audio tap, with this loop as a backstop —
+        // see `markAudible`.
         let weakSelf = self
         transcriberTask = Task { @MainActor in
             do {
                 for try await result in transcriber.results {
-                    // Backstop for the RMS-based detector: if a buffer
-                    // sits below `audibleThreshold` but the transcriber
-                    // still produces text (quiet speech), keep the
-                    // silence timer alive on the transcriber events.
+                    // Endpointing backstop — only matters if the audio
+                    // tap never crosses `audibleThreshold` (quiet
+                    // speaker / far mic). `markAudible` ignores us
+                    // once the audio path has fired at least once.
                     weakSelf.markAudible(rms: nil, onEvent: onEvent)
 
                     // result.text is AttributedString; flatten to plain.
@@ -561,16 +560,27 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     }
 
     /// Note an audible moment. Fires `speechStarted` the first time
-    /// and (re)arms the trailing-silence timer. Called from the audio
-    /// tap on every buffer with RMS above `audibleThreshold`, and from
-    /// the transcriber loop as a backstop for quiet speech the RMS
-    /// detector might miss.
+    /// and (re)arms the trailing-silence timer.
     ///
-    /// Once the audio path has fired at least once
-    /// (`hasAudibleAudioFired`), the transcriber backstop is ignored —
-    /// otherwise the analyzer's post-utterance drain (volatile results
-    /// trickling out for ~1 s after the user stops talking) would keep
-    /// the silence timer alive well past real end-of-utterance.
+    /// Two callers:
+    /// - **Audio tap (`rms` non-nil)** — primary. Fires for every
+    ///   buffer with RMS above `audibleThreshold`. This is what
+    ///   drives endpointing in the normal case.
+    /// - **Transcriber loop (`rms` nil)** — backstop. Only does any
+    ///   work if `audibleThreshold` was set too high for this
+    ///   speaker / mic distance, so the audio path is silent even
+    ///   though the user is talking. In that case, transcriber
+    ///   emissions are the only signal we have that speech is
+    ///   happening, and without them the turn would only end via
+    ///   the 15 s max-duration safety timeout.
+    ///
+    /// Once the audio path has fired at least once for this turn
+    /// (`hasAudibleAudioFired = true`), the transcriber backstop is
+    /// disabled. Reason: the analyzer keeps emitting volatile
+    /// results for ~1 s after the user actually stops talking (its
+    /// internal drain). Without this gate, those drain events would
+    /// keep rearming the silence timer and push end-of-utterance
+    /// detection well past the real end.
     private func markAudible(rms: Float?, onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void)
     {
         if rms != nil {
