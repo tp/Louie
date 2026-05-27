@@ -83,7 +83,11 @@ private struct ContentViewBody: View {
                     }
                     .animation(.smooth(duration: 0.25), value: leadingInset)
 
-                VoiceAgentOverlay(state: voiceAgent.state, onEvent: voiceAgent.handle)
+                VoiceAgentOverlay(
+                    state: voiceAgent.state,
+                    onEvent: voiceAgent.handle,
+                    onTouchDown: voiceAgent.noteTouchDown,
+                )
             }
             .padding(.leading, leadingInset)
             .padding(.horizontal)

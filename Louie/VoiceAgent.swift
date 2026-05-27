@@ -193,9 +193,32 @@ final class VoiceAgentController {
     /// it through every continuation.
     private var sttSpan: (any Span)?
 
+    /// Per-turn latency trace: touch-down → mic-hot → touch-up → transcript.
+    /// Reset on each accepted press-down.
+    private let pttLog = TimedLogger(label: "PTT", category: "VoiceAgentController")
+
     init(agent: any VoiceAgent, capture: any VoiceCapture) {
         self.agent = agent
         self.capture = capture
+    }
+
+    /// Instrumentation-only hook called by the UI at raw touch-down on the
+    /// PTT button — *before* SwiftUI's gesture arbitration has decided to
+    /// fire the `.startRecording` event. Lets the latency log capture the
+    /// gap the user actually perceives (finger lands → mic hot), not just
+    /// the gap from gesture-recognized → mic hot. No state change here;
+    /// the `.startRecording` event still drives the real work.
+    func noteTouchDown() {
+        // Mirror the gating in `handle(.startRecording)`: only reset/log
+        // when the press would actually start a new turn, so a stray tap
+        // while the agent is busy doesn't wipe an in-flight session.
+        switch state {
+        case .idle, .showingResponse, .failed:
+            pttLog.reset()
+            pttLog.event("touch_down")
+        case .recording, .thinking, .runningLocalTool, .askingUser:
+            break
+        }
     }
 
     func handle(_ event: VoiceAgentEvent) {
@@ -229,14 +252,22 @@ final class VoiceAgentController {
         cancelEverything()
         state = .recording
 
-        setupTask = Task { @MainActor [capture] in
+        // `touch_down` is logged by the UI via `noteTouchDown()` before this
+        // runs; here we capture the gesture-arbitration delay (touch_down →
+        // press_recognized) and the audio-stack startup (→ mic_hot).
+        pttLog.event("press_recognized")
+
+        setupTask = Task { @MainActor [capture, pttLog] in
             try await capture.startRecording()
+            pttLog.event("mic_hot")
         }
     }
 
     private func finishRecording() {
         let setup = setupTask
         setupTask = nil
+
+        pttLog.event("touch_up")
 
         // Flip the UI immediately so the user sees the agent take over the
         // moment they release. The async work below either completes with a
@@ -290,6 +321,8 @@ final class VoiceAgentController {
                 finishTurn(status: .internalError, error: error)
                 return
             }
+
+            pttLog.event("transcript", detail: transcript)
 
             sttSpan?.setData(value: transcript, key: "stt.transcript")
             sttSpan?.finish()
@@ -401,6 +434,9 @@ final class VoiceAgentController {
 struct VoiceAgentOverlay: View {
     var state: VoiceAgentState
     var onEvent: (VoiceAgentEvent) -> Void
+    /// Optional raw touch-down hook for latency instrumentation. Defaults
+    /// to a no-op so previews and tests don't have to thread it through.
+    var onTouchDown: () -> Void = {}
 
     var body: some View {
         // Button is the only layout-contributing element so the parent
@@ -408,6 +444,7 @@ struct VoiceAgentOverlay: View {
         // when the status banner appears. Banner floats above as an overlay.
         VoiceAgentButton(
             state: state,
+            onTouchDown: onTouchDown,
             onPressChange: { isPressed in
                 onEvent(isPressed ? .startRecording : .stopRecording)
             },
@@ -502,6 +539,12 @@ private struct VoiceAgentStatusBanner: View {
 
 private struct VoiceAgentButton: View {
     var state: VoiceAgentState
+    /// Fires synchronously from the gesture's first `.onChanged` callback —
+    /// earlier than `onPressChange(true)`, which has to wait for
+    /// `@GestureState` to propagate through a render pass before
+    /// `.onChange(of:)` runs. Used for latency instrumentation only; does
+    /// not start recording.
+    var onTouchDown: () -> Void
     /// Fires `true` on touch-down and `false` on release while the button is
     /// acting as push-to-talk. The controller decides whether the event is
     /// actionable in the current state.
@@ -511,6 +554,9 @@ private struct VoiceAgentButton: View {
     var onCancel: () -> Void
 
     @GestureState private var isPressed = false
+    /// Debounce flag: `.onChanged` fires on every gesture update, but we
+    /// only want `onTouchDown` to fire once per touch sequence.
+    @State private var firedTouchDown = false
 
     var body: some View {
         ZStack {
@@ -527,6 +573,15 @@ private struct VoiceAgentButton: View {
             DragGesture(minimumDistance: 0)
                 .updating($isPressed) { _, isPressedState, _ in
                     isPressedState = true
+                }
+                .onChanged { _ in
+                    if !firedTouchDown {
+                        firedTouchDown = true
+                        onTouchDown()
+                    }
+                }
+                .onEnded { _ in
+                    firedTouchDown = false
                 },
         )
         .onChange(of: isPressed) { _, newValue in
