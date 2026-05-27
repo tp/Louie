@@ -328,6 +328,24 @@ func libraryDiscoversQobuzAndUsesCachedBrowsedSections() async throws {
 
 @Test
 @MainActor
+func libraryLoadUsesAvailableLibraryCache() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+
+    let serviceBrowseCount = await gateway.browseCallCount(mediaID: "service-qobuz")
+    linn.loadLibrary()
+
+    #expect(await gateway.browseCallCount(mediaID: "service-qobuz") == serviceBrowseCount)
+}
+
+@Test
+@MainActor
 func qobuzRootFoldersExposeSectionsWithoutBrowsingMediaItems() async throws {
     let gateway = TestGateway()
     await gateway.seedNestedQobuzLibrary(contentRevision: 1)
@@ -346,6 +364,30 @@ func qobuzRootFoldersExposeSectionsWithoutBrowsingMediaItems() async throws {
     #expect(await gateway.browseCallCount(mediaID: "qobuz-genres") == 0)
     #expect(await gateway.browseCallCount(mediaID: "qobuz-album-chopin-nocturnes") == 0)
     #expect(linn.library.qobuz.favouriteAlbums?.items.map(\.title) == ["Chopin: The Complete Nocturnes"])
+}
+
+@Test
+@MainActor
+func libraryReportsAvailableServicesWhenQobuzIsMissing() async throws {
+    let gateway = TestGateway()
+    await gateway.seedMediaServices([
+        CiGateway.MediaService(id: "service-airable", name: "Airable", kind: "md.airable"),
+    ])
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        if case .failed = linn.library.availability {
+            return true
+        }
+        return false
+    }
+
+    if case let .failed(message) = linn.library.availability {
+        #expect(message == "Qobuz media service is unavailable. Available media services: Airable (md.airable).")
+    } else {
+        #expect(Bool(false), "Expected library load to fail when Qobuz is missing")
+    }
 }
 
 @Test
@@ -699,6 +741,10 @@ private actor TestGateway: LinnGateway {
 
     func browseCallCount(mediaID: String) -> Int {
         browseCounts[mediaID] ?? 0
+    }
+
+    func seedMediaServices(_ services: [CiGateway.MediaService]) {
+        self.services = services
     }
 
     func previousCallCount() -> Int {

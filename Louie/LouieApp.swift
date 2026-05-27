@@ -6,12 +6,33 @@
 //
 
 import Nuke
+import Sentry
 import SwiftData
 import SwiftUI
 
 @main
 struct LouieApp: App {
     init() {
+        SentrySDK.start { options in
+            options.dsn = ProcessInfo.processInfo.environment["SENTRY_DSN"]
+                ?? HeyLouieDotEnv.value(forKey: "SENTRY_DSN")
+                ?? ""
+            options.environment = "development"
+            options.tracesSampleRate = 1.0
+            options.sendDefaultPii = true
+            options.enableNetworkTracking = true
+            // Match localhost (LAN dev) + Modal (deployed backend). Without
+            // this, the URLSession integration won't propagate trace headers.
+            // The actual sentry-trace header on the WS upgrade is injected
+            // manually in HeyLouieWebSocketAgent — WS upgrades are not
+            // reliably covered by URLSession auto-instrumentation.
+            options.tracePropagationTargets = [
+                "localhost",
+                "127.0.0.1",
+                "modal.run",
+            ]
+        }
+
         ImagePipeline.shared = ImagePipeline(
             configuration: .withDataCache(
                 name: "xyz.timm.preetz.Louie.ArtworkDataCache",

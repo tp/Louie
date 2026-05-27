@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		241AC65F2FB3960800C7A37D /* Linn in Frameworks */ = {isa = PBXBuildFile; productRef = 241AC65E2FB3960800C7A37D /* Linn */; };
+		248FC7FC2FC5C2C900066145 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 248FC7FB2FC5C2C900066145 /* Sentry */; };
 		24CAE00E2FB884D30085ADFF /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = 24CAE00D2FB884D30085ADFF /* NukeUI */; };
 /* End PBXBuildFile section */
 
@@ -71,6 +72,7 @@
 			files = (
 				241AC65F2FB3960800C7A37D /* Linn in Frameworks */,
 				24CAE00E2FB884D30085ADFF /* NukeUI in Frameworks */,
+				248FC7FC2FC5C2C900066145 /* Sentry in Frameworks */,
 			);
 		};
 		241AC6222FB3177B00C7A37D /* Frameworks */ = {
@@ -126,6 +128,7 @@
 			packageProductDependencies = (
 				241AC65E2FB3960800C7A37D /* Linn */,
 				24CAE00D2FB884D30085ADFF /* NukeUI */,
+				248FC7FB2FC5C2C900066145 /* Sentry */,
 			);
 			productName = Louie;
 			productReference = 241AC6162FB3177900C7A37D /* Louie.app */;
@@ -209,6 +212,7 @@
 				241AC65A2FB395E800C7A37D /* XCLocalSwiftPackageReference "Packages/LinnCiGateway" */,
 				241AC65D2FB3960800C7A37D /* XCLocalSwiftPackageReference "Packages/Linn" */,
 				24CAE00C2FB884D30085ADFF /* XCRemoteSwiftPackageReference "Nuke" */,
+				248FC7FA2FC5C2C900066145 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
 			);
 			preferredProjectObjectVersion = 100;
 			productRefGroup = 241AC6172FB3177900C7A37D /* Products */;
@@ -584,6 +588,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		248FC7FA2FC5C2C900066145 /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/getsentry/sentry-cocoa";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.14.0;
+			};
+		};
 		24CAE00C2FB884D30085ADFF /* XCRemoteSwiftPackageReference "Nuke" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/kean/Nuke";
@@ -598,6 +610,11 @@
 		241AC65E2FB3960800C7A37D /* Linn */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = Linn;
+		};
+		248FC7FB2FC5C2C900066145 /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 248FC7FA2FC5C2C900066145 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
 		};
 		24CAE00D2FB884D30085ADFF /* NukeUI */ = {
 			isa = XCSwiftPackageProductDependency;

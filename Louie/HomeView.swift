@@ -192,7 +192,7 @@ private struct WordmarkViewport: View {
 
     private let sourceAspectRatio: CGFloat = 595 / 420
     private let visibleAspectRatio: CGFloat = 2.85
-    private let verticalCropOffsetRatio: CGFloat = 0.12
+    private let verticalCropOffsetRatio: CGFloat = 0.09
     // Shifts the source image left so the wordmark's leading edge lines up with
     // the surrounding content column instead of sitting in the asset's left
     // whitespace.

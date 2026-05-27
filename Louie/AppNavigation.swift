@@ -12,6 +12,9 @@ enum AppSection: Hashable, Identifiable {
     case home
     case library
     case queue
+    #if DEBUG
+        case debug
+    #endif
 
     var id: Self {
         self
@@ -25,6 +28,10 @@ enum AppSection: Hashable, Identifiable {
             "Library"
         case .queue:
             "Queue"
+        #if DEBUG
+            case .debug:
+                "Hey-Louie state"
+        #endif
         }
     }
 
@@ -36,6 +43,10 @@ enum AppSection: Hashable, Identifiable {
             "music.note.list"
         case .queue:
             "text.line.first.and.arrowtriangle.forward"
+        #if DEBUG
+            case .debug:
+                "ladybug"
+        #endif
         }
     }
 }

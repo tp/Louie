@@ -21,6 +21,21 @@ private struct ContentViewBody: View {
 
     @State private var leadingInset = 0.0
     @State private var playBarHeight = 0.0
+    // The concrete agent is held alongside the controller so the debug
+    // view can read its `fake` state — `VoiceAgentController.agent` is
+    // typed as `any VoiceAgent` and doesn't expose the fake state.
+    @State private var heyLouie: HeyLouieWebSocketAgent
+    @State private var voiceAgent: VoiceAgentController
+
+    init(linn: Linn) {
+        self.linn = linn
+        let agent = HeyLouieWebSocketAgent(linn: linn)
+        _heyLouie = State(initialValue: agent)
+        _voiceAgent = State(initialValue: VoiceAgentController(
+            agent: agent,
+            capture: LiveVoiceCapture(),
+        ))
+    }
 
     @State private var selectedSection: AppSection? = .home
     // Only store `.home(...)` routes here. The outer `AppDetailRoute` wrapper
@@ -58,16 +73,20 @@ private struct ContentViewBody: View {
         }
         .environment(\.bottomContentClearance, playBarHeight)
         .safeAreaInset(edge: .bottom) {
-            PlayerBar(state: linn)
-                .padding(.top, 10)
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.height
-                } action: { height in
-                    playBarHeight = height
-                }
-                .padding(.leading, leadingInset)
-                .padding(.horizontal)
-                .animation(.smooth(duration: 0.25), value: leadingInset)
+          HStack(alignment: .bottom) {
+                PlayerBar(state: linn)
+                    .padding(.top, 10)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        playBarHeight = height
+                    }
+                    .animation(.smooth(duration: 0.25), value: leadingInset)
+
+                VoiceAgentOverlay(state: voiceAgent.state, onEvent: voiceAgent.handle)
+            }
+            .padding(.leading, leadingInset)
+            .padding(.horizontal)
         }
     }
 
@@ -93,6 +112,12 @@ private struct ContentViewBody: View {
                 PlayQueue(linn: linn)
                     .appDetailNavigationDestinations(linn: linn)
             }
+        #if DEBUG
+            case .debug:
+                NavigationStack {
+                    HeyLouieDebugView(state: heyLouie.fake)
+                }
+        #endif
         }
     }
 
