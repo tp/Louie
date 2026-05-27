@@ -45,7 +45,7 @@ struct LibraryBrowser: View {
         case .unavailable:
             unavailableLibraryContent(
                 title: "Library Unavailable",
-                description: "Connect to the Linn gateway to load your media library."
+                description: "Connect to the Linn gateway to load your media library.",
             )
         case .loading:
             ProgressView("Loading Library")
@@ -56,13 +56,13 @@ struct LibraryBrowser: View {
             } else {
                 unavailableLibraryContent(
                     title: "Library Empty",
-                    description: "The gateway did not return any library sections."
+                    description: "The gateway did not return any library sections.",
                 )
             }
         case let .failed(message):
             unavailableLibraryContent(
                 title: "Library Unavailable",
-                description: message
+                description: message,
             )
         }
     }

@@ -372,7 +372,7 @@ struct HeyLouieToolDispatcher {
         }
     }
 
-    private func encode<T: Encodable>(_ value: T) throws -> String {
+    private func encode(_ value: some Encodable) throws -> String {
         let data = try Self.encoder.encode(value)
         return String(data: data, encoding: .utf8) ?? "{}"
     }

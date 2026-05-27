@@ -247,49 +247,49 @@ final class VoiceAgentController {
 
             let transcript: String
             do {
-                transcript = try await self.capture.startRecording { [weak self] event in
+                transcript = try await capture.startRecording { [weak self] event in
                     guard let self else { return }
                     switch event {
                     case .micHot:
-                        self.voiceLog.event("mic_hot")
+                        voiceLog.event("mic_hot")
                     case .speechStarted:
-                        self.voiceLog.event("speech_started")
+                        voiceLog.event("speech_started")
                     case .speechEnded:
-                        self.voiceLog.event("speech_ended")
+                        voiceLog.event("speech_ended")
                         // Flip UI as soon as VAD says we're done — final
                         // drain of the transcriber still takes a moment.
-                        if case .recording = self.state {
-                            self.state = .thinking
+                        if case .recording = state {
+                            state = .thinking
                         }
                     }
                 }
             } catch is CancellationError {
-                self.finishTurn(status: .cancelled)
+                finishTurn(status: .cancelled)
                 return
             } catch {
                 if !Task.isCancelled {
-                    self.state = .failed(error.localizedDescription)
+                    state = .failed(error.localizedDescription)
                 }
-                self.finishTurn(status: .internalError, error: error)
+                finishTurn(status: .internalError, error: error)
                 return
             }
 
             if Task.isCancelled {
-                self.finishTurn(status: .cancelled)
+                finishTurn(status: .cancelled)
                 return
             }
 
-            self.voiceLog.event("transcript", detail: transcript)
+            voiceLog.event("transcript", detail: transcript)
             // Guarantee `.thinking` even if speechEnded never fired (e.g.
             // empty transcript that returned via timeout).
-            if case .recording = self.state {
-                self.state = .thinking
+            if case .recording = state {
+                state = .thinking
             }
-            self.sttSpan?.setData(value: transcript, key: "stt.transcript")
-            self.sttSpan?.finish()
-            self.sttSpan = nil
+            sttSpan?.setData(value: transcript, key: "stt.transcript")
+            sttSpan?.finish()
+            sttSpan = nil
 
-            await self.runAgent(transcript: transcript)
+            await runAgent(transcript: transcript)
         }
     }
 
@@ -735,6 +735,7 @@ private struct AskUserChoiceButton: View {
                 synth: voice,
             )
         }()
+
         @State private var useScripted = false
 
         var body: some View {
