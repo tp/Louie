@@ -2,16 +2,27 @@
 //  VoiceCapture.swift
 //  Louie
 //
-//  Push-to-talk capture surface: requests permissions, streams mic audio
-//  into the on-device `SFSpeechRecognizer`, and plays text back via
-//  `AVSpeechSynthesizer`. Lives behind a protocol so previews can swap in a
-//  fake that returns a canned transcript without touching the audio stack
-//  (the real permission prompt can't be resolved in Xcode's preview sandbox
-//  and would hang).
+//  Tap-to-talk voice surface backed by iOS 26's SpeechAnalyzer +
+//  SpeechTranscriber. End-of-utterance is detected by debouncing the
+//  transcriber's result stream — no new partial/final result for
+//  `silenceTimeout` means the user has stopped. (Tried Apple's
+//  `SpeechDetector` first; its `results` stream stays empty in this
+//  build even with `reportResults: true`.) STT and TTS live behind
+//  separate protocols (`VoiceCapture`, `VoiceSynthesizer`) but share one
+//  concrete `LiveVoice` so the AVAudioSession transitions between record
+//  and playback stay in one place.
+//
+//  Flow per tap (see VoiceAgentController for the calling side):
+//    tap → startRecording(onEvent:) returns the final transcript when the
+//    silence timer fires, the user taps to stop early, the 15s safety
+//    timeout fires, or cancel() is called (which throws). Pre-warming
+//    (built once via `prewarm()`) takes the SpeechAnalyzer cold-start cost
+//    off the critical PTT path entirely.
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
+import OSLog
 import Speech
 
 enum VoiceCaptureError: LocalizedError {
@@ -40,50 +51,582 @@ enum VoiceCaptureError: LocalizedError {
     }
 }
 
-/// Audio capture + TTS surface used by `VoiceAgentController`.
+/// State hints delivered to the caller during a live recording so the UI
+/// can reflect what the audio layer is doing.
+enum VoiceCaptureEvent: Sendable {
+    case micHot         // first audio buffer accepted by the engine
+    case speechStarted  // first transcriber result arrived
+    case speechEnded    // silence timer fired (or manual stopRecording)
+}
+
+/// Audio capture / STT surface. Owned by `VoiceAgentController`.
 @MainActor
 protocol VoiceCapture: AnyObject {
-    /// Begin capturing mic audio. Must be paired with a `stopRecording` or
-    /// `cancel` call.
-    func startRecording() async throws
-    /// Stop capture and return the final transcript.
-    func stopRecording() async throws -> String
-    /// Speak `text` through the device speaker. Returns when synthesis
-    /// finishes naturally or is cancelled via `cancel()`. Awaitable so the
-    /// per-turn Sentry transaction can include TTS latency.
+    /// Pre-build transcriber + analyzer + cache audio format using only
+    /// read-only checks. Never prompts, never downloads, never touches the
+    /// audio session. No-op if model or permissions aren't already in place.
+    func prewarm() async
+
+    /// Begin listening. Async-returns the final transcript once recording
+    /// ends — either via the silence timer firing, an explicit
+    /// `stopRecording()` call, the safety timeout, or `cancel()` (which
+    /// throws `CancellationError`). UI state hints are delivered via
+    /// `onEvent`.
+    func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws -> String
+
+    /// Force end-of-speech early. The in-flight `startRecording` returns
+    /// shortly with the accumulated transcript. No-op if not recording.
+    func stopRecording()
+
+    /// Abort the in-flight recording. `startRecording` throws
+    /// `CancellationError`. Does not affect TTS. Idempotent.
+    func cancel()
+}
+
+/// TTS surface. Split out from `VoiceCapture` so the controller's STT and
+/// playback dependencies are explicit.
+@MainActor
+protocol VoiceSynthesizer: AnyObject {
+    /// Speak `text`. Returns when synthesis finishes naturally or is
+    /// cancelled. Awaitable so per-turn telemetry can include TTS latency.
     func speak(_ text: String) async
-    /// Abort any in-flight recording or playback. Idempotent.
+
+    /// Stop any in-flight speech. Resumes a pending `speak`. Does not
+    /// affect recording. Idempotent.
     func cancel()
 }
 
 // MARK: - Live implementation
 
 @MainActor
-final class LiveVoiceCapture: NSObject, VoiceCapture, AVSpeechSynthesizerDelegate {
-    private let recognizer: SFSpeechRecognizer?
+final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
+    private let log = TimedLogger(label: "STT", category: "LiveVoice")
+    private let sttLogger = Logger(subsystem: "Louie", category: "LiveVoice")
 
+    // Reusable preparation state cached across turns. Not part of the
+    // pipeline itself — these are inputs to building one. The model stays
+    // in process memory via `Options.modelRetention = .processLifetime`,
+    // so subsequent analyzers skip the cold load.
+    private var cachedFormat: AVAudioFormat?
+    private var analysisContext: AnalysisContext?
+    private var pipelineLocale: Locale?
+
+    /// The active recognition session, if any. `SpeechAnalyzer` instances
+    /// can't be resumed after `finalize*` / `cancelAndFinishNow`, so the
+    /// pipeline is built fresh per turn and dropped on completion.
+    private var activePipeline: RecognitionPipeline?
+
+    // Per-turn state.
     private var audioEngine: AVAudioEngine?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
+    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var transcriberTask: Task<Void, Never>?
+    private var analyzerTask: Task<Void, Error>?
+    private var maxDurationTask: Task<Void, Never>?
 
-    private var currentTranscript: String = ""
-    private var finishContinuation: CheckedContinuation<String, Error>?
-    /// Resumed when AVSpeechSynthesizer fires didFinish or didCancel — both
-    /// terminal for our purposes. Speech is non-throwing so we don't need to
-    /// distinguish here; the controller checks `Task.isCancelled` after the
-    /// await to decide on the transaction status.
+    /// Single-shot debounce: rescheduled on every transcriber result;
+    /// fires `speechEnded` + `signalEnd(.silence)` if it ever reaches the
+    /// timeout without being rescheduled.
+    private var silenceTask: Task<Void, Never>?
+
+    /// Accumulated final-result text for the current turn. Updated as the
+    /// transcriber yields isFinal results.
+    private var currentTranscript = ""
+
+    /// Resolves the awaiting `startRecording` continuation. Replaced
+    /// per-turn; any of {silence, manual stop, timeout, cancel} can fire it.
+    private enum EndReason { case silence, manual, timeout }
+    private var endContinuation: CheckedContinuation<EndReason, Error>?
+    private var hasFiredMicHot = false
+    private var hasFiredSpeechStarted = false
+    private var hasFiredSpeechEnded = false
+
+    /// AVSpeechSynthesizer's `didFinish`/`didCancel` delegate resumes this.
     private var speechContinuation: CheckedContinuation<Void, Never>?
 
+    // Domain words/phrases to bias toward when the model would otherwise
+    // produce a more common homophone (e.g. "Louie" vs "Louis").
+    private static let contextualVocabulary: [String] = ["Louie"]
+
+    /// Trailing silence after the last transcriber result before we
+    /// declare the user is done. Long enough to ride out think-pauses
+    /// ("play, uh, Thriller"), short enough to feel snappy. Note: this
+    /// is silence *from the transcriber's perspective* — it keeps
+    /// emitting partials for a beat after the user stops talking, so the
+    /// real perceived end-to-end latency is roughly this + that drain
+    /// (typically a few hundred ms).
+    private static let silenceTimeout: Duration = .milliseconds(700)
+
+    /// Hard cap on a single recording, in case the silence timer never
+    /// fires (e.g., transcriber stuck or no speech at all).
+    private static let maxRecordingDuration: Duration = .seconds(15)
+
     override init() {
-        recognizer = SFSpeechRecognizer()
         super.init()
         synthesizer.delegate = self
     }
 
-    // MARK: Permissions
+    // MARK: VoiceCapture
 
-    func requestAuthorization() async throws {
+    func prewarm() async {
+        log.reset()
+        log.event("prewarm_start")
+
+        // Only act if both prerequisites are already in place: Speech
+        // permission previously authorized AND the locale's model
+        // installed. Either missing → defer to first tap.
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
+            log.event("prewarm_skipped", detail: "speech auth not granted")
+            return
+        }
+
+        let locale = await preferredLocale()
+        let installed = await SpeechTranscriber.installedLocales
+        guard installed.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
+            log.event("model_missing", detail: locale.identifier)
+            return
+        }
+        log.event("model_present", detail: locale.identifier)
+
+        // Build a throwaway analyzer just to call `prepareToAnalyze`,
+        // which loads the model. `modelRetention: .processLifetime` on
+        // the Options keeps the model in process memory after this
+        // analyzer is dropped, so the first real turn skips the load.
+        // Also caches the audio format + analysis context for reuse.
+        do {
+            let pipeline = try await buildPipeline(locale: locale)
+            try await pipeline.analyzer.prepareToAnalyze(in: pipeline.format)
+            cachedFormat = pipeline.format
+            pipelineLocale = locale
+            log.event("analyzer_ready")
+        } catch {
+            sttLogger.warning("prewarm pipeline build failed: \(error.localizedDescription, privacy: .public)")
+            log.event("prewarm_failed", detail: error.localizedDescription)
+        }
+    }
+
+    func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws -> String {
+        log.reset()
+        log.event("start_called")
+
+        try await requestAuthorization()
+        log.event("auth_ready")
+
+        // Always build fresh — `SpeechAnalyzer` can't be resumed after
+        // `finalize*` / `cancelAndFinishNow`. Cheap on subsequent turns
+        // because the model stays loaded (modelRetention: .processLifetime).
+        let locale = await preferredLocale()
+        try await ensureModelInstalled(for: locale)
+        let pipeline = try await buildPipeline(locale: locale)
+        activePipeline = pipeline
+        cachedFormat = pipeline.format
+        pipelineLocale = locale
+        log.event("pipeline_ready")
+
+        // Local aliases keep the rest of this function readable; we still
+        // own the lifetime via `activePipeline`.
+        let analyzer = pipeline.analyzer
+        let transcriber = pipeline.transcriber
+        let analyzerFormat = pipeline.format
+
+        // Reset per-turn state.
+        currentTranscript = ""
+        hasFiredMicHot = false
+        hasFiredSpeechStarted = false
+        hasFiredSpeechEnded = false
+        teardownEngine()
+
+        // Activate audio session.
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.duckOthers, .defaultToSpeaker],
+            )
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            throw VoiceCaptureError.audioEngine(error.localizedDescription)
+        }
+        log.event("session_active")
+
+        // Wire the input stream into the analyzer.
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        inputContinuation = continuation
+
+        // Subscribe to transcriber results before the analyzer starts
+        // producing them, so we don't lose the first events. The same
+        // loop drives endpointing: every result restarts the silence
+        // timer (see `armSilenceTimer`).
+        let weakSelf = self
+        transcriberTask = Task { @MainActor in
+            do {
+                for try await result in transcriber.results {
+                    // First result = speech is happening. Use this as
+                    // our `speechStarted` signal in lieu of SpeechDetector.
+                    if !weakSelf.hasFiredSpeechStarted {
+                        weakSelf.hasFiredSpeechStarted = true
+                        weakSelf.log.event("speech_started")
+                        onEvent(.speechStarted)
+                    }
+                    weakSelf.armSilenceTimer(onEvent: onEvent)
+
+                    // result.text is AttributedString; flatten to plain.
+                    let plain = String(result.text.characters)
+                    if result.isFinal {
+                        if weakSelf.currentTranscript.isEmpty {
+                            weakSelf.currentTranscript = plain
+                        } else {
+                            weakSelf.currentTranscript += " \(plain)"
+                        }
+                    }
+                }
+            } catch is CancellationError {
+                // Expected on cancel.
+            } catch {
+                weakSelf.sttLogger.warning("transcriber stream error: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        // Start the analyzer (consumes the input stream until it finishes).
+        analyzerTask = Task {
+            try await analyzer.start(inputSequence: stream)
+        }
+
+        // Start engine + install tap.
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let nativeFormat = inputNode.outputFormat(forBus: 0)
+        let converter = nativeFormat == analyzerFormat
+            ? nil
+            : AVAudioConverter(from: nativeFormat, to: analyzerFormat)
+
+        let pumpContinuation = continuation
+        let target = analyzerFormat
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { buffer, _ in
+            if let converter {
+                if let converted = Self.convert(buffer, with: converter, to: target) {
+                    pumpContinuation.yield(AnalyzerInput(buffer: converted))
+                }
+            } else {
+                pumpContinuation.yield(AnalyzerInput(buffer: buffer))
+            }
+            // Fire mic_hot on first buffer (back on main actor).
+            Task { @MainActor [weak self] in
+                guard let self, !self.hasFiredMicHot else { return }
+                self.hasFiredMicHot = true
+                self.log.event("first_buffer")
+                onEvent(.micHot)
+            }
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            teardownEngine()
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw VoiceCaptureError.audioEngine(error.localizedDescription)
+        }
+        audioEngine = engine
+        log.event("engine_started")
+
+        // Safety timeout — covers the case where the silence timer
+        // never gets armed (no speech) or never gets to fire (transcriber
+        // stuck emitting forever). `try await` (not `try?`) so a cancel
+        // propagates out cleanly instead of falsely logging a timeout.
+        maxDurationTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: Self.maxRecordingDuration) }
+            catch { return }
+            guard let self else { return }
+            self.log.event("max_duration_reached")
+            self.signalEnd(.timeout)
+        }
+
+        // Await any termination signal.
+        let reason: EndReason
+        do {
+            reason = try await withCheckedThrowingContinuation { continuation in
+                self.endContinuation = continuation
+            }
+        } catch {
+            // Cancel path — clean up and rethrow.
+            teardownEngine()
+            activePipeline = nil
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw error
+        }
+        log.event("end_signal", detail: "\(reason)")
+
+        // Cancel safety/auxiliary tasks and stop the engine immediately.
+        maxDurationTask?.cancel()
+        maxDurationTask = nil
+        silenceTask?.cancel()
+        silenceTask = nil
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+
+        // Finish the input stream and drain the analyzer.
+        inputContinuation?.finish()
+        inputContinuation = nil
+        log.event("finalize_requested")
+        do {
+            try await pipeline.finalize()
+        } catch {
+            sttLogger.warning("finalize failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        // The transcriber task ends when the analyzer ends; await it so
+        // currentTranscript reflects all isFinal results.
+        await transcriberTask?.value
+        analyzerTask?.cancel()
+
+        // Fire speechEnded once if we never did (e.g., manual stop or
+        // timeout before any transcriber result arrived).
+        if !hasFiredSpeechEnded {
+            hasFiredSpeechEnded = true
+            onEvent(.speechEnded)
+        }
+
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        audioEngine = nil
+        // The analyzer is dead after finalize; ensure the next turn rebuilds.
+        activePipeline = nil
+        log.event("final_result", detail: currentTranscript)
+
+        if currentTranscript.isEmpty {
+            throw VoiceCaptureError.noSpeechDetected
+        }
+        return currentTranscript
+    }
+
+    func stopRecording() {
+        log.event("manual_stop")
+        signalEnd(.manual)
+    }
+
+    /// The single concrete `cancel()` satisfies both `VoiceCapture.cancel`
+    /// and `VoiceSynthesizer.cancel` — Swift can't dispatch two same-name
+    /// protocol methods to different impls on one class. We tear down both
+    /// sides: idempotent, and matches how `VoiceAgentController` actually
+    /// uses cancel (always called for the whole turn).
+    func cancel() {
+        // STT side.
+        if let continuation = endContinuation {
+            endContinuation = nil
+            continuation.resume(throwing: CancellationError())
+        }
+        maxDurationTask?.cancel()
+        maxDurationTask = nil
+        silenceTask?.cancel()
+        silenceTask = nil
+        transcriberTask?.cancel()
+        analyzerTask?.cancel()
+        if let pipeline = activePipeline {
+            Task { await pipeline.cancel() }
+        }
+        // Drop the dead instance so the next turn builds fresh.
+        activePipeline = nil
+        teardownEngine()
+
+        // TTS side.
+        synthesizer.stopSpeaking(at: .immediate)
+        // didCancel normally resumes the speech continuation, but if
+        // nothing is currently speaking it won't fire. Resume directly so
+        // a pending `await speak` doesn't leak.
+        resumeSpeechContinuation()
+
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    // MARK: VoiceSynthesizer
+
+    func speak(_ text: String) async {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? session.setActive(true, options: .notifyOthersOnDeactivation)
+
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = Self.bestVoice(forBaseLanguage: "en")
+
+        resumeSpeechContinuation()
+        await withCheckedContinuation { continuation in
+            speechContinuation = continuation
+            synthesizer.speak(utterance)
+        }
+    }
+
+    // VoiceSynthesizer.cancel — distinct from VoiceCapture.cancel above.
+    // Both protocols declare `func cancel()`; the single concrete class
+    // satisfies both with one implementation that the controller calls
+    // through the appropriate protocol reference.
+    nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.resumeSpeechContinuation()
+        }
+    }
+
+    nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.resumeSpeechContinuation()
+        }
+    }
+
+    // MARK: Internals
+
+    private func signalEnd(_ reason: EndReason) {
+        guard let continuation = endContinuation else { return }
+        endContinuation = nil
+        continuation.resume(returning: reason)
+    }
+
+    /// (Re)arm the trailing-silence timer. Called from the transcriber
+    /// loop on every result — each call cancels the previous task, so
+    /// the timer only fires when no new result has arrived for
+    /// `silenceTimeout`. Also fires `speechEnded` so the UI can flip to
+    /// "thinking" while the analyzer's final drain completes.
+    ///
+    /// No-op once we've already signalled end: `pipeline.finalize()`
+    /// flushes one last final result through the transcriber loop,
+    /// which would otherwise re-arm the timer and leak a stray fire
+    /// after the turn is done.
+    private func armSilenceTimer(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) {
+        guard endContinuation != nil else { return }
+        silenceTask?.cancel()
+        silenceTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: Self.silenceTimeout) }
+            catch { return }
+            guard let self else { return }
+            self.log.event("silence_timeout")
+            if !self.hasFiredSpeechEnded {
+                self.hasFiredSpeechEnded = true
+                onEvent(.speechEnded)
+            }
+            self.signalEnd(.silence)
+        }
+    }
+
+    private func teardownEngine() {
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine = nil
+        inputContinuation?.finish()
+        inputContinuation = nil
+    }
+
+    private func resumeSpeechContinuation() {
+        guard let continuation = speechContinuation else { return }
+        speechContinuation = nil
+        continuation.resume()
+    }
+
+    /// Pick a locale SpeechTranscriber actually supports. Tries (1) the
+    /// system locale, (2) en-US explicitly, (3) any "en-*" variant the
+    /// device exposes. The final hard-coded fallback exists only so the
+    /// function returns *something* — if it's reached, downstream
+    /// pipeline build will likely fail with `recognizerUnavailable`.
+    private func preferredLocale() async -> Locale {
+        let candidate = Locale.current
+        if let match = await SpeechTranscriber.supportedLocale(equivalentTo: candidate) {
+            return match
+        }
+        if let enUS = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) {
+            return enUS
+        }
+        let supported = await SpeechTranscriber.supportedLocales
+        if let anyEn = supported.first(where: { $0.language.languageCode?.identifier == "en" }) {
+            return anyEn
+        }
+        return Locale(identifier: "en-US")
+    }
+
+    private func ensureModelInstalled(for locale: Locale) async throws {
+        let installed = await SpeechTranscriber.installedLocales
+        if installed.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) {
+            return
+        }
+        // Need to construct a transcriber to ask AssetInventory for the
+        // installation request. This doesn't start any audio work.
+        let probe = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+        do {
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
+                log.event("model_download_start")
+                try await request.downloadAndInstall()
+                log.event("model_downloaded")
+            }
+        } catch {
+            throw VoiceCaptureError.recognition("model download failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// One active recognition session: the modules feeding it, the
+    /// analyzer running it, and the audio format they negotiated. Built
+    /// per turn; can't be reused after `finalize()` or `cancel()`.
+    private struct RecognitionPipeline: Sendable {
+        let transcriber: SpeechTranscriber
+        let analyzer: SpeechAnalyzer
+        let format: AVAudioFormat
+
+        func finalize() async throws {
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+        }
+
+        func cancel() async {
+            await analyzer.cancelAndFinishNow()
+        }
+    }
+
+    /// Build a fresh SpeechAnalyzer pipeline. Always returns a new
+    /// instance because analyzers can't be resumed after `finalize*` or
+    /// `cancelAndFinishNow`. Per-turn cost is small: the underlying model
+    /// stays loaded via `Options.modelRetention = .processLifetime`, and
+    /// `cachedFormat` + `analysisContext` are reused across turns.
+    private func buildPipeline(locale: Locale) async throws -> RecognitionPipeline {
+        let transcriber = SpeechTranscriber(
+            locale: locale,
+            preset: .progressiveTranscription,
+        )
+
+        let context: AnalysisContext
+        if let existing = analysisContext {
+            context = existing
+        } else {
+            let fresh = AnalysisContext()
+            fresh.contextualStrings[.general] = Self.contextualVocabulary
+            analysisContext = fresh
+            context = fresh
+        }
+
+        let analyzer = SpeechAnalyzer(
+            modules: [transcriber],
+            options: SpeechAnalyzer.Options(
+                priority: .userInitiated,
+                modelRetention: .processLifetime,
+            ),
+        )
+        try await analyzer.setContext(context)
+
+        let format: AVAudioFormat
+        if let cached = cachedFormat, pipelineLocale == locale {
+            format = cached
+        } else {
+            guard let resolved = await SpeechAnalyzer.bestAvailableAudioFormat(
+                compatibleWith: [transcriber],
+            ) else {
+                throw VoiceCaptureError.recognizerUnavailable
+            }
+            format = resolved
+        }
+
+        return RecognitionPipeline(
+            transcriber: transcriber,
+            analyzer: analyzer,
+            format: format,
+        )
+    }
+
+    private func requestAuthorization() async throws {
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
             break
@@ -106,153 +649,32 @@ final class LiveVoiceCapture: NSObject, VoiceCapture, AVSpeechSynthesizerDelegat
         }
     }
 
-    // MARK: Recording
-
-    func startRecording() async throws {
-        try await requestAuthorization()
-
-        guard let recognizer, recognizer.isAvailable else {
-            throw VoiceCaptureError.recognizerUnavailable
+    /// Convert a buffer between formats using a long-lived AVAudioConverter.
+    /// Nil-returns on conversion failure; the buffer is dropped silently.
+    private static func convert(
+        _ buffer: AVAudioPCMBuffer,
+        with converter: AVAudioConverter,
+        to target: AVAudioFormat,
+    ) -> AVAudioPCMBuffer? {
+        let capacity = AVAudioFrameCount(
+            Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate + 0.5,
+        )
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
+            return nil
         }
-
-        // Tear down any prior session before starting a new one.
-        teardownEngine()
-
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .measurement,
-                options: [.duckOthers, .defaultToSpeaker],
-            )
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            throw VoiceCaptureError.audioEngine(error.localizedDescription)
-        }
-
-        let engine = AVAudioEngine()
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.contextualStrings = Self.contextualVocabulary
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
-
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        // The tap callback runs on an audio thread. `SFSpeechAudioBufferRecognitionRequest.append`
-        // is documented as thread-safe, so we capture `request` for the buffer pump.
-        nonisolated(unsafe) let pumpRequest = request
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            pumpRequest.append(buffer)
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            throw VoiceCaptureError.audioEngine(error.localizedDescription)
-        }
-
-        currentTranscript = ""
-
-        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            // The callback fires on a private Speech queue. Marshal Sendable
-            // snapshots back to the main actor and let the class state machine
-            // own the recognition lifecycle.
-            let transcript = result?.bestTranscription.formattedString
-            let isFinal = result?.isFinal ?? false
-            let errorMessage = (error as NSError?)?.localizedDescription
-
-            Task { @MainActor [weak self] in
-                self?.handleRecognition(
-                    transcript: transcript,
-                    isFinal: isFinal,
-                    errorMessage: errorMessage,
-                )
+        var consumed = false
+        var error: NSError?
+        converter.convert(to: output, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
             }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
         }
-
-        audioEngine = engine
-        self.request = request
-    }
-
-    func stopRecording() async throws -> String {
-        guard request != nil else {
-            throw VoiceCaptureError.recognition("No active recording")
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            finishContinuation = continuation
-            request?.endAudio()
-            audioEngine?.stop()
-            audioEngine?.inputNode.removeTap(onBus: 0)
-            // Wait for the recognizer to deliver its final result via the task
-            // callback; the continuation is resumed in `handleRecognition`.
-        }
-    }
-
-    func cancel() {
-        if let continuation = finishContinuation {
-            finishContinuation = nil
-            continuation.resume(throwing: VoiceCaptureError.noSpeechDetected)
-        }
-        synthesizer.stopSpeaking(at: .immediate)
-        // didCancel normally resumes the speech continuation, but if nothing
-        // is currently speaking (or queued), it won't fire. Resume directly
-        // to avoid leaking a pending `await speak`.
-        resumeSpeechContinuation()
-        teardownEngine()
-    }
-
-    // MARK: TTS
-
-    // Domain words/phrases the recognizer should bias toward when it would
-    // otherwise produce a more common homophone (e.g. "Louie" vs "Louis").
-    private static let contextualVocabulary: [String] = [
-        "Louie",
-    ]
-
-    func speak(_ text: String) async {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-        try? session.setActive(true, options: .notifyOthersOnDeactivation)
-
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = Self.bestVoice(forBaseLanguage: "en")
-
-        // If a prior speech is somehow still pending its continuation, resume
-        // it before starting the new one — guards against state corruption
-        // if speak is called twice without an intervening cancel.
-        resumeSpeechContinuation()
-
-        await withCheckedContinuation { continuation in
-            speechContinuation = continuation
-            synthesizer.speak(utterance)
-        }
-    }
-
-    private func resumeSpeechContinuation() {
-        guard let continuation = speechContinuation else { return }
-        speechContinuation = nil
-        continuation.resume()
-    }
-
-    // MARK: AVSpeechSynthesizerDelegate
-
-    // The delegate fires on the main thread by default, but with strict
-    // concurrency we declare these nonisolated and hop explicitly.
-    nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didFinish _: AVSpeechUtterance) {
-        Task { @MainActor [weak self] in
-            self?.resumeSpeechContinuation()
-        }
-    }
-
-    nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didCancel _: AVSpeechUtterance) {
-        Task { @MainActor [weak self] in
-            self?.resumeSpeechContinuation()
-        }
+        if error != nil { return nil }
+        return output
     }
 
     // Picks the highest-quality installed voice for the locale. Premium and
@@ -266,80 +688,38 @@ final class LiveVoiceCapture: NSObject, VoiceCapture, AVSpeechSynthesizerDelegat
             ?? candidates.first(where: { $0.quality == .enhanced })
             ?? AVSpeechSynthesisVoice(language: "en-US")
     }
-
-    // MARK: Internals
-
-    private func handleRecognition(
-        transcript: String?,
-        isFinal: Bool,
-        errorMessage: String?,
-    ) {
-        if let transcript {
-            currentTranscript = transcript
-        }
-
-        guard isFinal || errorMessage != nil else {
-            return
-        }
-
-        teardownEngine()
-
-        guard let continuation = finishContinuation else {
-            return
-        }
-        finishContinuation = nil
-
-        if let errorMessage, currentTranscript.isEmpty {
-            continuation.resume(throwing: VoiceCaptureError.recognition(errorMessage))
-        } else if currentTranscript.isEmpty {
-            continuation.resume(throwing: VoiceCaptureError.noSpeechDetected)
-        } else {
-            continuation.resume(returning: currentTranscript)
-        }
-    }
-
-    private func teardownEngine() {
-        task?.cancel()
-        task = nil
-        audioEngine?.stop()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine = nil
-        request = nil
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation,
-        )
-    }
 }
 
 // MARK: - Preview implementation
 
 #if DEBUG
-    /// Fake capture for SwiftUI previews: returns a canned transcript after a
-    /// short delay so the scripted agent flow can be exercised without
-    /// touching `SFSpeechRecognizer` (which hangs on permission in previews).
+    /// Fake capture+synth for SwiftUI previews. Returns a canned transcript
+    /// after a short delay; both cancels are no-ops.
     @MainActor
-    final class PreviewVoiceCapture: VoiceCapture {
+    final class PreviewVoice: VoiceCapture, VoiceSynthesizer {
         var transcript: String
 
         init(transcript: String = "play chainsmoking") {
             self.transcript = transcript
         }
 
-        func startRecording() async throws {
-            // No-op; pretend mic is hot.
-        }
+        func prewarm() async {}
 
-        func stopRecording() async throws -> String {
+        func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws -> String {
+            onEvent(.micHot)
+            try? await Task.sleep(for: .milliseconds(150))
+            onEvent(.speechStarted)
             try? await Task.sleep(for: .milliseconds(300))
+            onEvent(.speechEnded)
             return transcript
         }
 
-        func speak(_: String) async {
-            // No-op in previews.
-        }
+        func stopRecording() {}
 
-        func cancel() {
+        // Satisfies both VoiceCapture.cancel and VoiceSynthesizer.cancel.
+        func cancel() {}
+
+        func speak(_: String) async {
             // No-op in previews.
         }
     }

@@ -36,19 +36,6 @@ enum VoiceAgentState: Equatable {
     case failed(String)
 }
 
-extension VoiceAgentState {
-    /// True while the agent is busy on the server's behalf — the button acts
-    /// as a "tap to cancel" affordance in these states.
-    var isWaitingOnAgent: Bool {
-        switch self {
-        case .thinking, .runningLocalTool, .askingUser:
-            true
-        case .idle, .recording, .showingResponse, .failed:
-            false
-        }
-    }
-}
-
 struct LocalToolActivity: Equatable {
     /// Tool identifier, e.g. `play_music`.
     var name: String
@@ -67,17 +54,19 @@ struct AskUserPrompt: Equatable, Identifiable {
     var choices: [AskUserChoice]
 }
 
-/// User-originated events the overlay forwards to its controller.
+/// User-originated events the overlay forwards to its controller. One
+/// `.tap` event covers the whole button gesture surface; the controller's
+/// state machine decides whether the tap starts listening, ends listening
+/// early, or cancels the in-flight turn.
 enum VoiceAgentEvent: Sendable {
-    case startRecording
-    case stopRecording
+    case tap
     /// User tapped one of the ask-user choices.
     case answerChoice(AskUserChoice)
     /// Popover dismissed without a pick (Cancel button or outside-tap). The
     /// agent resumes with `AskUserDismissed` so the turn can continue with a
     /// `tool_result(is_error=true)` rather than aborting.
     case dismissAskUser
-    /// Hard cancel — fired by the FAB while waiting on the agent. Returns
+    /// Hard cancel — fired by the ask-user popover's Cancel button. Returns
     /// the agent to `.idle` and tears the whole turn down.
     case cancel
 }
@@ -161,11 +150,11 @@ final class ScriptedVoiceAgent: VoiceAgent {
 /// Owns the audio capture + state machine. Delegates the "what to do with
 /// the transcript" decision to an injected `VoiceAgent`.
 ///
-/// State transitions for `recording → thinking` happen synchronously inside
-/// `handle(_:)` so the UI always reflects the user's last action even if
-/// capture setup hasn't finished yet (e.g., the permission prompt is
-/// pending). The async harvest runs separately and produces either a
-/// transcript (handed to the agent) or a `.failed` state.
+/// Tap-driven flow: a single `.tap` event starts listening from idle,
+/// force-ends an in-progress recording, or cancels a busy turn. The
+/// capture's `startRecording(onEvent:)` returns the final transcript when
+/// VAD or the user signals end-of-speech; the controller hands that off
+/// to the agent and surfaces the response via TTS.
 @MainActor
 @Observable
 final class VoiceAgentController {
@@ -176,64 +165,48 @@ final class VoiceAgentController {
     /// once at init.
     var agent: any VoiceAgent
 
-    private let capture: any VoiceCapture
-    private var setupTask: Task<Void, Error>?
-    private var harvestTask: Task<Void, Never>?
+    let capture: any VoiceCapture
+    let synth: any VoiceSynthesizer
+    private var listenTask: Task<Void, Never>?
     /// Resumes with the picked choice, or `nil` if the user dismissed the
-    /// popover. Turn-level cancellation tears down the harvest task instead.
+    /// popover. Turn-level cancellation tears down the listen task instead.
     private var askUserContinuation: CheckedContinuation<AskUserChoice?, Never>?
 
-    /// Sentry transaction for one push-to-talk turn. Spans button-release
-    /// through TTS-finish so the trace captures the full user-perceived
-    /// latency. Bound to the SDK scope so child spans (and the `sentry-trace`
+    /// Sentry transaction for one voice turn. Spans tap-to-listen through
+    /// TTS-finish so the trace captures the full user-perceived latency.
+    /// Bound to the SDK scope so child spans (and the `sentry-trace`
     /// header in HeyLouieWebSocketAgent) attach to it.
     private var turnTransaction: (any Span)?
-    /// Child span around the SFSpeechRecognizer wait — kept as a property so
-    /// the finish/error path in `runHarvest` can close it without threading
-    /// it through every continuation.
+    /// Child span around the SpeechAnalyzer wait — kept as a property so
+    /// the finish/error path can close it without threading it through
+    /// every continuation.
     private var sttSpan: (any Span)?
 
-    /// Per-turn latency trace: touch-down → mic-hot → touch-up → transcript.
-    /// Reset on each accepted press-down.
-    private let pttLog = TimedLogger(label: "PTT", category: "VoiceAgentController")
+    /// Per-turn latency trace: tap → recording → mic_hot → speech_started
+    /// → speech_ended → transcript. Reset on each accepted tap.
+    private let voiceLog = TimedLogger(label: "VOICE", category: "VoiceAgentController")
 
-    init(agent: any VoiceAgent, capture: any VoiceCapture) {
+    init(agent: any VoiceAgent, capture: any VoiceCapture, synth: any VoiceSynthesizer) {
         self.agent = agent
         self.capture = capture
-    }
-
-    /// Instrumentation-only hook called by the UI at raw touch-down on the
-    /// PTT button — *before* SwiftUI's gesture arbitration has decided to
-    /// fire the `.startRecording` event. Lets the latency log capture the
-    /// gap the user actually perceives (finger lands → mic hot), not just
-    /// the gap from gesture-recognized → mic hot. No state change here;
-    /// the `.startRecording` event still drives the real work.
-    func noteTouchDown() {
-        // Mirror the gating in `handle(.startRecording)`: only reset/log
-        // when the press would actually start a new turn, so a stray tap
-        // while the agent is busy doesn't wipe an in-flight session.
-        switch state {
-        case .idle, .showingResponse, .failed:
-            pttLog.reset()
-            pttLog.event("touch_down")
-        case .recording, .thinking, .runningLocalTool, .askingUser:
-            break
-        }
+        self.synth = synth
     }
 
     func handle(_ event: VoiceAgentEvent) {
         switch event {
-        case .startRecording:
+        case .tap:
             switch state {
             case .idle, .showingResponse, .failed:
-                beginRecording()
-            case .recording, .thinking, .runningLocalTool, .askingUser:
-                // Already busy — ignore stray press-downs.
-                break
-            }
-        case .stopRecording:
-            if case .recording = state {
-                finishRecording()
+                startListening()
+            case .recording:
+                // Manual VAD override — capture finalizes and the awaiting
+                // startRecording returns shortly with the partial transcript.
+                voiceLog.event("manual_stop")
+                capture.stopRecording()
+            case .thinking, .runningLocalTool, .askingUser:
+                // Tap-to-cancel while the agent is busy.
+                cancelEverything()
+                state = .idle
             }
         case let .answerChoice(choice):
             resumeAskUser(choice)
@@ -248,35 +221,17 @@ final class VoiceAgentController {
         }
     }
 
-    private func beginRecording() {
+    private func startListening() {
         cancelEverything()
         state = .recording
 
-        // `touch_down` is logged by the UI via `noteTouchDown()` before this
-        // runs; here we capture the gesture-arbitration delay (touch_down →
-        // press_recognized) and the audio-stack startup (→ mic_hot).
-        pttLog.event("press_recognized")
+        voiceLog.reset()
+        voiceLog.event("tap")
+        voiceLog.event("recording_state")
 
-        setupTask = Task { @MainActor [capture, pttLog] in
-            try await capture.startRecording()
-            pttLog.event("mic_hot")
-        }
-    }
-
-    private func finishRecording() {
-        let setup = setupTask
-        setupTask = nil
-
-        pttLog.event("touch_up")
-
-        // Flip the UI immediately so the user sees the agent take over the
-        // moment they release. The async work below either completes with a
-        // transcript or surfaces an error.
-        state = .thinking
-
-        // Open the Sentry transaction here — button-release marks the start
-        // of user-perceived latency. `bindToScope: true` makes this the
-        // active span so HeyLouieWebSocketAgent can pick it up to build the
+        // Open the Sentry transaction here — tap marks the start of
+        // user-perceived latency. `bindToScope: true` makes this the active
+        // span so HeyLouieWebSocketAgent can pick it up to build the
         // `sentry-trace` header for the WS upgrade.
         let tx = SentrySDK.startTransaction(
             name: "voice turn",
@@ -285,55 +240,56 @@ final class VoiceAgentController {
         )
         tx.setData(value: "louie", key: "gen_ai.agent.name")
         turnTransaction = tx
-        sttSpan = tx.startChild(operation: "stt", description: "SFSpeechRecognizer")
+        sttSpan = tx.startChild(operation: "stt", description: "SpeechAnalyzer")
 
-        harvestTask = Task { @MainActor [weak self] in
+        listenTask = Task { @MainActor [weak self] in
             guard let self else { return }
-
-            do {
-                try await setup?.value
-            } catch is CancellationError {
-                finishTurn(status: .cancelled)
-                return
-            } catch {
-                if !Task.isCancelled {
-                    state = .failed(error.localizedDescription)
-                }
-                finishTurn(status: .internalError, error: error)
-                return
-            }
-
-            if Task.isCancelled {
-                finishTurn(status: .cancelled)
-                return
-            }
 
             let transcript: String
             do {
-                transcript = try await capture.stopRecording()
+                transcript = try await self.capture.startRecording { [weak self] event in
+                    guard let self else { return }
+                    switch event {
+                    case .micHot:
+                        self.voiceLog.event("mic_hot")
+                    case .speechStarted:
+                        self.voiceLog.event("speech_started")
+                    case .speechEnded:
+                        self.voiceLog.event("speech_ended")
+                        // Flip UI as soon as VAD says we're done — final
+                        // drain of the transcriber still takes a moment.
+                        if case .recording = self.state {
+                            self.state = .thinking
+                        }
+                    }
+                }
             } catch is CancellationError {
-                finishTurn(status: .cancelled)
+                self.finishTurn(status: .cancelled)
                 return
             } catch {
                 if !Task.isCancelled {
-                    state = .failed(error.localizedDescription)
+                    self.state = .failed(error.localizedDescription)
                 }
-                finishTurn(status: .internalError, error: error)
+                self.finishTurn(status: .internalError, error: error)
                 return
             }
-
-            pttLog.event("transcript", detail: transcript)
-
-            sttSpan?.setData(value: transcript, key: "stt.transcript")
-            sttSpan?.finish()
-            sttSpan = nil
 
             if Task.isCancelled {
-                finishTurn(status: .cancelled)
+                self.finishTurn(status: .cancelled)
                 return
             }
 
-            await runAgent(transcript: transcript)
+            self.voiceLog.event("transcript", detail: transcript)
+            // Guarantee `.thinking` even if speechEnded never fired (e.g.
+            // empty transcript that returned via timeout).
+            if case .recording = self.state {
+                self.state = .thinking
+            }
+            self.sttSpan?.setData(value: transcript, key: "stt.transcript")
+            self.sttSpan?.finish()
+            self.sttSpan = nil
+
+            await self.runAgent(transcript: transcript)
         }
     }
 
@@ -389,7 +345,7 @@ final class VoiceAgentController {
                 description: "AVSpeechSynthesizer",
             )
             ttsSpan?.setData(value: response, key: "tts.text")
-            await capture.speak(response)
+            await synth.speak(response)
             ttsSpan?.finish()
 
             finishTurn(status: Task.isCancelled ? .cancelled : .ok)
@@ -410,17 +366,16 @@ final class VoiceAgentController {
     }
 
     private func cancelEverything() {
-        setupTask?.cancel()
-        setupTask = nil
-        harvestTask?.cancel()
-        harvestTask = nil
+        listenTask?.cancel()
+        listenTask = nil
         if let continuation = askUserContinuation {
             askUserContinuation = nil
             continuation.resume(returning: nil)
         }
         capture.cancel()
+        synth.cancel()
         // Finish the active turn transaction here rather than letting the
-        // cancelled harvest task do it: the task's cleanup runs after a yield
+        // cancelled listen task do it: the task's cleanup runs after a yield
         // point, by which time a new turn may have replaced `turnTransaction`,
         // and the old task would finish the wrong span.
         finishTurn(status: .cancelled)
@@ -434,9 +389,6 @@ final class VoiceAgentController {
 struct VoiceAgentOverlay: View {
     var state: VoiceAgentState
     var onEvent: (VoiceAgentEvent) -> Void
-    /// Optional raw touch-down hook for latency instrumentation. Defaults
-    /// to a no-op so previews and tests don't have to thread it through.
-    var onTouchDown: () -> Void = {}
 
     var body: some View {
         // Button is the only layout-contributing element so the parent
@@ -444,11 +396,7 @@ struct VoiceAgentOverlay: View {
         // when the status banner appears. Banner floats above as an overlay.
         VoiceAgentButton(
             state: state,
-            onTouchDown: onTouchDown,
-            onPressChange: { isPressed in
-                onEvent(isPressed ? .startRecording : .stopRecording)
-            },
-            onCancel: { onEvent(.cancel) },
+            onTap: { onEvent(.tap) },
         )
         .popover(isPresented: askUserBinding, arrowEdge: .bottom) {
             askUserPopover
@@ -539,55 +487,23 @@ private struct VoiceAgentStatusBanner: View {
 
 private struct VoiceAgentButton: View {
     var state: VoiceAgentState
-    /// Fires synchronously from the gesture's first `.onChanged` callback —
-    /// earlier than `onPressChange(true)`, which has to wait for
-    /// `@GestureState` to propagate through a render pass before
-    /// `.onChange(of:)` runs. Used for latency instrumentation only; does
-    /// not start recording.
-    var onTouchDown: () -> Void
-    /// Fires `true` on touch-down and `false` on release while the button is
-    /// acting as push-to-talk. The controller decides whether the event is
-    /// actionable in the current state.
-    var onPressChange: (Bool) -> Void
-    /// Fires on tap while the agent is busy (thinking / running tool /
-    /// asking user). Same handler used by the ask-user popover's Cancel.
-    var onCancel: () -> Void
-
-    @GestureState private var isPressed = false
-    /// Debounce flag: `.onChanged` fires on every gesture update, but we
-    /// only want `onTouchDown` to fire once per touch sequence.
-    @State private var firedTouchDown = false
+    /// Fires on every tap. The controller's state machine decides whether
+    /// the tap starts listening, ends recording early, or cancels.
+    var onTap: () -> Void
 
     var body: some View {
-        ZStack {
-            buttonContent
+        Button(action: onTap) {
+            ZStack {
+                buttonContent
+            }
+            .frame(width: 56, height: 56)
+            .glassEffect(.regular.interactive(), in: Circle())
+            .overlay {
+                ringOverlay
+            }
+            .contentShape(Circle())
         }
-        .frame(width: 56, height: 56)
-        .glassEffect(.regular.interactive(), in: Circle())
-        .overlay {
-            ringOverlay
-        }
-        .scaleEffect(isPressed ? 0.92 : 1.0)
-        .contentShape(Circle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .updating($isPressed) { _, isPressedState, _ in
-                    isPressedState = true
-                }
-                .onChanged { _ in
-                    if !firedTouchDown {
-                        firedTouchDown = true
-                        onTouchDown()
-                    }
-                }
-                .onEnded { _ in
-                    firedTouchDown = false
-                },
-        )
-        .onChange(of: isPressed) { _, newValue in
-            handlePressChange(isDown: newValue)
-        }
-        .animation(.snappy(duration: 0.15), value: isPressed)
+        .buttonStyle(.plain)
         .animation(.snappy(duration: 0.25), value: state)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint(accessibilityHint)
@@ -631,23 +547,12 @@ private struct VoiceAgentButton: View {
         }
     }
 
-    private func handlePressChange(isDown: Bool) {
-        if state.isWaitingOnAgent {
-            // Tap (touch-up) cancels the running agent.
-            if !isDown {
-                onCancel()
-            }
-        } else {
-            onPressChange(isDown)
-        }
-    }
-
     private var accessibilityLabel: String {
         switch state {
         case .idle, .showingResponse, .failed:
-            "Push to talk"
+            "Tap to talk"
         case .recording:
-            "Listening, release to send"
+            "Listening, tap to send now"
         case .thinking:
             "Thinking, tap to cancel"
         case let .runningLocalTool(activity):
@@ -658,7 +563,14 @@ private struct VoiceAgentButton: View {
     }
 
     private var accessibilityHint: String {
-        state.isWaitingOnAgent ? "Tap to cancel." : "Press and hold to talk."
+        switch state {
+        case .idle, .showingResponse, .failed:
+            "Tap to start. The system listens until you stop speaking."
+        case .recording:
+            "Tap to stop listening immediately."
+        case .thinking, .runningLocalTool, .askingUser:
+            "Tap to cancel."
+        }
     }
 }
 
@@ -815,10 +727,14 @@ private struct AskUserChoiceButton: View {
     }
 
     private struct VoiceAgentInteractivePreview: View {
-        @State private var controller = VoiceAgentController(
-            agent: EchoVoiceAgent(),
-            capture: PreviewVoiceCapture(),
-        )
+        @State private var controller: VoiceAgentController = {
+            let voice = PreviewVoice()
+            return VoiceAgentController(
+                agent: EchoVoiceAgent(),
+                capture: voice,
+                synth: voice,
+            )
+        }()
         @State private var useScripted = false
 
         var body: some View {
@@ -836,7 +752,7 @@ private struct AskUserChoiceButton: View {
                 .ignoresSafeArea()
 
                 VStack(spacing: 16) {
-                    Text("Push and hold the mic to talk. Tap once while the agent is working to cancel.")
+                    Text("Tap the mic to start. The system listens until you stop speaking. Tap again to send now or cancel.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)

@@ -31,9 +31,13 @@ private struct ContentViewBody: View {
         self.linn = linn
         let agent = HeyLouieWebSocketAgent(linn: linn)
         _heyLouie = State(initialValue: agent)
+        // One concrete LiveVoice owns the AVAudioSession transitions and
+        // satisfies both protocols the controller depends on.
+        let voice = LiveVoice()
         _voiceAgent = State(initialValue: VoiceAgentController(
             agent: agent,
-            capture: LiveVoiceCapture(),
+            capture: voice,
+            synth: voice,
         ))
     }
 
@@ -68,6 +72,9 @@ private struct ContentViewBody: View {
         .task {
             linn.start()
         }
+        .task {
+            await voiceAgent.capture.prewarm()
+        }
         .onDisappear {
             linn.stop()
         }
@@ -86,7 +93,6 @@ private struct ContentViewBody: View {
                 VoiceAgentOverlay(
                     state: voiceAgent.state,
                     onEvent: voiceAgent.handle,
-                    onTouchDown: voiceAgent.noteTouchDown,
                 )
             }
             .padding(.leading, leadingInset)
