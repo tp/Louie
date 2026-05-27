@@ -58,7 +58,7 @@ enum VoiceCaptureError: LocalizedError {
 /// can reflect what the audio layer is doing.
 enum VoiceCaptureEvent: Sendable {
     case micHot  // first audio buffer accepted by the engine
-    case speechStarted  // first transcriber result arrived
+    case speechStarted  // first audio buffer above audibleThreshold (or first transcriber result, if quieter)
     case speechEnded  // silence timer fired (or manual stopRecording)
 }
 
@@ -152,6 +152,12 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     private var hasFiredMicHot = false
     private var hasFiredSpeechStarted = false
     private var hasFiredSpeechEnded = false
+    /// True once any audio-tap buffer crossed `audibleThreshold` and
+    /// drove `markAudible(rms:non-nil)`. Once set, the transcriber
+    /// backstop stops rearming the silence timer — otherwise the
+    /// analyzer's final-drain emissions (~1+ s after the user stops
+    /// speaking) keep the timer alive past real end-of-utterance.
+    private var hasAudibleAudioFired = false
 
     /// AVSpeechSynthesizer's `didFinish`/`didCancel` delegate resumes this.
     private var speechContinuation: CheckedContinuation<Void, Never>?
@@ -175,13 +181,15 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     private static let audioWindowPeriod: Duration = .milliseconds(250)
 
     /// RMS threshold above which an input buffer counts as voice rather
-    /// than room noise / silence. Float32 input; 0.005 ≈ −46 dBFS,
-    /// which under `.measurement` mode (no AGC, no noise suppression)
-    /// clears typical indoor ambient noise but catches normal speaking
-    /// volume even at a typical iPad arm's-length distance. Tune via
-    /// the periodic `audio_window` log line (max RMS per 250 ms) and
-    /// the `speech_started` line (RMS that triggered the first fire).
-    private static let audibleThreshold: Float = 0.005
+    /// than room noise / silence. Float32 input; 0.0015 ≈ −56 dBFS.
+    /// `.measurement` mode (no AGC, no noise suppression) gives quite
+    /// low headroom — observed speech at iPad arm's-length peaks around
+    /// 0.005 but most syllables sit at 0.002–0.003, while ambient sits
+    /// at 0.0003–0.0006. 0.0015 catches the bulk of speech buffers
+    /// without tripping on room noise. Tune via the periodic
+    /// `audio_window` log line (max RMS per 250 ms) and the
+    /// `speech_started` line (RMS that triggered the first fire).
+    private static let audibleThreshold: Float = 0.0015
 
     /// Hard cap on a single recording, in case the silence timer never
     /// fires (e.g., transcriber stuck or no speech at all).
@@ -264,6 +272,7 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         hasFiredMicHot = false
         hasFiredSpeechStarted = false
         hasFiredSpeechEnded = false
+        hasAudibleAudioFired = false
         teardownEngine()
 
         // Activate audio session.
@@ -307,6 +316,14 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
                             weakSelf.currentTranscript += " \(plain)"
                         }
                     }
+                    // Apple's terms: a `volatile` result is a tentative
+                    // hypothesis that may change; an `isFinal` result is
+                    // a committed segment that joins the solid transcript.
+                    weakSelf.log.event(
+                        result.isFinal ? "result_final" : "result_volatile",
+                        detail: "solid=\(weakSelf.currentTranscript.debugDescription) "
+                            + "this=\(plain.debugDescription)",
+                    )
                 }
             } catch is CancellationError {
                 // Expected on cancel.
@@ -548,8 +565,19 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     /// tap on every buffer with RMS above `audibleThreshold`, and from
     /// the transcriber loop as a backstop for quiet speech the RMS
     /// detector might miss.
+    ///
+    /// Once the audio path has fired at least once
+    /// (`hasAudibleAudioFired`), the transcriber backstop is ignored —
+    /// otherwise the analyzer's post-utterance drain (volatile results
+    /// trickling out for ~1 s after the user stops talking) would keep
+    /// the silence timer alive well past real end-of-utterance.
     private func markAudible(rms: Float?, onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void)
     {
+        if rms != nil {
+            hasAudibleAudioFired = true
+        } else if hasAudibleAudioFired {
+            return
+        }
         if !hasFiredSpeechStarted {
             hasFiredSpeechStarted = true
             let detail = rms.map { "rms=\(String(format: "%.4f", $0))" } ?? "transcriber"
