@@ -3,11 +3,14 @@
 //  Louie
 //
 //  Tap-to-talk voice surface backed by iOS 26's SpeechAnalyzer +
-//  SpeechTranscriber. End-of-utterance is detected by debouncing the
-//  transcriber's result stream — no new partial/final result for
-//  `silenceTimeout` means the user has stopped. (Tried Apple's
-//  `SpeechDetector` first; its `results` stream stays empty in this
-//  build even with `reportResults: true`.) STT and TTS live behind
+//  SpeechTranscriber. End-of-utterance is detected by computing RMS
+//  on every input buffer — `silenceTimeout` of buffers below
+//  `audibleThreshold` means the user has stopped. (Earlier versions
+//  debounced the transcriber's result stream; the progressive
+//  transcriber emits results too sparsely for that — a single early
+//  partial would trip the silence timer mid-utterance. Apple's
+//  `SpeechDetector` also tried; its `results` stream stays empty in
+//  this build even with `reportResults: true`.) STT and TTS live behind
 //  separate protocols (`VoiceCapture`, `VoiceSynthesizer`) but share one
 //  concrete `LiveVoice` so the AVAudioSession transitions between record
 //  and playback stay in one place.
@@ -43,9 +46,9 @@ enum VoiceCaptureError: LocalizedError {
             "Speech recognition is unavailable on this device or locale."
         case .noSpeechDetected:
             "I didn't catch that — no speech detected."
-        case let .audioEngine(detail):
+        case .audioEngine(let detail):
             "Couldn't start audio capture: \(detail)"
-        case let .recognition(detail):
+        case .recognition(let detail):
             "Recognition failed: \(detail)"
         }
     }
@@ -54,9 +57,9 @@ enum VoiceCaptureError: LocalizedError {
 /// State hints delivered to the caller during a live recording so the UI
 /// can reflect what the audio layer is doing.
 enum VoiceCaptureEvent: Sendable {
-    case micHot         // first audio buffer accepted by the engine
+    case micHot  // first audio buffer accepted by the engine
     case speechStarted  // first transcriber result arrived
-    case speechEnded    // silence timer fired (or manual stopRecording)
+    case speechEnded  // silence timer fired (or manual stopRecording)
 }
 
 /// Audio capture / STT surface. Owned by `VoiceAgentController`.
@@ -72,7 +75,8 @@ protocol VoiceCapture: AnyObject {
     /// `stopRecording()` call, the safety timeout, or `cancel()` (which
     /// throws `CancellationError`). UI state hints are delivered via
     /// `onEvent`.
-    func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws -> String
+    func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws
+        -> String
 
     /// Force end-of-speech early. The in-flight `startRecording` returns
     /// shortly with the accumulated transcript. No-op if not recording.
@@ -129,6 +133,14 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     /// timeout without being rescheduled.
     private var silenceTask: Task<Void, Never>?
 
+    /// Periodic logger that emits the max RMS observed in each
+    /// `audioWindowPeriod` window. Pure diagnostic — drives no logic.
+    private var audioWindowLogTask: Task<Void, Never>?
+    /// Updated from the audio tap on every buffer; consumed and reset
+    /// by `audioWindowLogTask`. Main-actor isolated so we don't need a
+    /// lock; the tap hops through `Task { @MainActor in ... }`.
+    private var audioWindowMaxRMS: Float = 0
+
     /// Accumulated final-result text for the current turn. Updated as the
     /// transcriber yields isFinal results.
     private var currentTranscript = ""
@@ -148,14 +160,28 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     // produce a more common homophone (e.g. "Louie" vs "Louis").
     private static let contextualVocabulary: [String] = ["Louie"]
 
-    /// Trailing silence after the last transcriber result before we
+    /// Trailing silence (audio RMS below `audibleThreshold`) before we
     /// declare the user is done. Long enough to ride out think-pauses
-    /// ("play, uh, Thriller"), short enough to feel snappy. Note: this
-    /// is silence *from the transcriber's perspective* — it keeps
-    /// emitting partials for a beat after the user stops talking, so the
-    /// real perceived end-to-end latency is roughly this + that drain
+    /// ("play, uh, Thriller"), short enough to feel snappy. Endpointing
+    /// draws on every audio buffer, so the wall-clock end-to-end
+    /// latency is roughly this plus the analyzer's final drain
     /// (typically a few hundred ms).
-    private static let silenceTimeout: Duration = .milliseconds(700)
+    private static let silenceTimeout: Duration = .milliseconds(1000)
+
+    /// Period of the `audio_window` diagnostic log line. Every window,
+    /// the max observed RMS is logged and then reset, so the recording
+    /// produces a coarse audio-level trace useful for tuning
+    /// `audibleThreshold`.
+    private static let audioWindowPeriod: Duration = .milliseconds(250)
+
+    /// RMS threshold above which an input buffer counts as voice rather
+    /// than room noise / silence. Float32 input; 0.005 ≈ −46 dBFS,
+    /// which under `.measurement` mode (no AGC, no noise suppression)
+    /// clears typical indoor ambient noise but catches normal speaking
+    /// volume even at a typical iPad arm's-length distance. Tune via
+    /// the periodic `audio_window` log line (max RMS per 250 ms) and
+    /// the `speech_started` line (RMS that triggered the first fire).
+    private static let audibleThreshold: Float = 0.005
 
     /// Hard cap on a single recording, in case the silence timer never
     /// fires (e.g., transcriber stuck or no speech at all).
@@ -182,7 +208,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
 
         let locale = await preferredLocale()
         let installed = await SpeechTranscriber.installedLocales
-        guard installed.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
+        guard installed.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) })
+        else {
             log.event("model_missing", detail: locale.identifier)
             return
         }
@@ -200,12 +227,15 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             pipelineLocale = locale
             log.event("analyzer_ready")
         } catch {
-            sttLogger.warning("prewarm pipeline build failed: \(error.localizedDescription, privacy: .public)")
+            sttLogger.warning(
+                "prewarm pipeline build failed: \(error.localizedDescription, privacy: .public)")
             log.event("prewarm_failed", detail: error.localizedDescription)
         }
     }
 
-    func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws -> String {
+    func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws
+        -> String
+    {
         log.reset()
         log.event("start_called")
 
@@ -262,14 +292,11 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         transcriberTask = Task { @MainActor in
             do {
                 for try await result in transcriber.results {
-                    // First result = speech is happening. Use this as
-                    // our `speechStarted` signal in lieu of SpeechDetector.
-                    if !weakSelf.hasFiredSpeechStarted {
-                        weakSelf.hasFiredSpeechStarted = true
-                        weakSelf.log.event("speech_started")
-                        onEvent(.speechStarted)
-                    }
-                    weakSelf.armSilenceTimer(onEvent: onEvent)
+                    // Backstop for the RMS-based detector: if a buffer
+                    // sits below `audibleThreshold` but the transcriber
+                    // still produces text (quiet speech), keep the
+                    // silence timer alive on the transcriber events.
+                    weakSelf.markAudible(rms: nil, onEvent: onEvent)
 
                     // result.text is AttributedString; flatten to plain.
                     let plain = String(result.text.characters)
@@ -284,7 +311,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             } catch is CancellationError {
                 // Expected on cancel.
             } catch {
-                weakSelf.sttLogger.warning("transcriber stream error: \(error.localizedDescription, privacy: .public)")
+                weakSelf.sttLogger.warning(
+                    "transcriber stream error: \(error.localizedDescription, privacy: .public)")
             }
         }
 
@@ -297,7 +325,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let nativeFormat = inputNode.outputFormat(forBus: 0)
-        let converter = nativeFormat == analyzerFormat
+        let converter =
+            nativeFormat == analyzerFormat
             ? nil
             : AVAudioConverter(from: nativeFormat, to: analyzerFormat)
 
@@ -318,6 +347,19 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
                 self.log.event("first_buffer")
                 onEvent(.micHot)
             }
+            // RMS-based VAD: every audible buffer drives `speechStarted`
+            // + (re)arms the silence timer. Independent of how sparsely
+            // the transcriber emits results, so the timer only fires
+            // after true trailing silence.
+            let rms = Self.computeRMS(buffer)
+            let isAudible = rms > Self.audibleThreshold
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if rms > self.audioWindowMaxRMS { self.audioWindowMaxRMS = rms }
+                if isAudible {
+                    self.markAudible(rms: rms, onEvent: onEvent)
+                }
+            }
         }
 
         engine.prepare()
@@ -337,11 +379,27 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         // stuck emitting forever). `try await` (not `try?`) so a cancel
         // propagates out cleanly instead of falsely logging a timeout.
         maxDurationTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: Self.maxRecordingDuration) }
-            catch { return }
+            do { try await Task.sleep(for: Self.maxRecordingDuration) } catch { return }
             guard let self else { return }
             self.log.event("max_duration_reached")
             self.signalEnd(.timeout)
+        }
+
+        // Diagnostic: log the max RMS observed per `audioWindowPeriod`.
+        // Lets us correlate "cut off mid-sentence" reports against the
+        // actual audio level relative to `audibleThreshold`.
+        audioWindowMaxRMS = 0
+        audioWindowLogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: Self.audioWindowPeriod) } catch { return }
+                guard let self else { return }
+                let maxRMS = self.audioWindowMaxRMS
+                self.audioWindowMaxRMS = 0
+                self.log.event(
+                    "audio_window",
+                    detail: "max_rms=\(String(format: "%.4f", maxRMS))",
+                )
+            }
         }
 
         // Await any termination signal.
@@ -364,6 +422,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         maxDurationTask = nil
         silenceTask?.cancel()
         silenceTask = nil
+        audioWindowLogTask?.cancel()
+        audioWindowLogTask = nil
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
 
@@ -421,6 +481,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         maxDurationTask = nil
         silenceTask?.cancel()
         silenceTask = nil
+        audioWindowLogTask?.cancel()
+        audioWindowLogTask = nil
         transcriberTask?.cancel()
         analyzerTask?.cancel()
         if let pipeline = activePipeline {
@@ -481,22 +543,37 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         continuation.resume(returning: reason)
     }
 
-    /// (Re)arm the trailing-silence timer. Called from the transcriber
-    /// loop on every result — each call cancels the previous task, so
-    /// the timer only fires when no new result has arrived for
-    /// `silenceTimeout`. Also fires `speechEnded` so the UI can flip to
-    /// "thinking" while the analyzer's final drain completes.
+    /// Note an audible moment. Fires `speechStarted` the first time
+    /// and (re)arms the trailing-silence timer. Called from the audio
+    /// tap on every buffer with RMS above `audibleThreshold`, and from
+    /// the transcriber loop as a backstop for quiet speech the RMS
+    /// detector might miss.
+    private func markAudible(rms: Float?, onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void)
+    {
+        if !hasFiredSpeechStarted {
+            hasFiredSpeechStarted = true
+            let detail = rms.map { "rms=\(String(format: "%.4f", $0))" } ?? "transcriber"
+            log.event("speech_started", detail: detail)
+            onEvent(.speechStarted)
+        }
+        armSilenceTimer(onEvent: onEvent)
+    }
+
+    /// (Re)arm the trailing-silence timer. Called from `markAudible`
+    /// on every audible buffer — each call cancels the previous task,
+    /// so the timer only fires when no audible buffer has arrived for
+    /// `silenceTimeout`. Also fires `speechEnded` so the UI can flip
+    /// to "thinking" while the analyzer's final drain completes.
     ///
     /// No-op once we've already signalled end: `pipeline.finalize()`
-    /// flushes one last final result through the transcriber loop,
+    /// can flush one last final result through the transcriber loop,
     /// which would otherwise re-arm the timer and leak a stray fire
     /// after the turn is done.
     private func armSilenceTimer(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) {
         guard endContinuation != nil else { return }
         silenceTask?.cancel()
         silenceTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: Self.silenceTimeout) }
-            catch { return }
+            do { try await Task.sleep(for: Self.silenceTimeout) } catch { return }
             guard let self else { return }
             self.log.event("silence_timeout")
             if !self.hasFiredSpeechEnded {
@@ -531,7 +608,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         if let match = await SpeechTranscriber.supportedLocale(equivalentTo: candidate) {
             return match
         }
-        if let enUS = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) {
+        if let enUS = await SpeechTranscriber.supportedLocale(
+            equivalentTo: Locale(identifier: "en-US"))
+        {
             return enUS
         }
         let supported = await SpeechTranscriber.supportedLocales
@@ -550,13 +629,15 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         // installation request. This doesn't start any audio work.
         let probe = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
         do {
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe])
+            {
                 log.event("model_download_start")
                 try await request.downloadAndInstall()
                 log.event("model_downloaded")
             }
         } catch {
-            throw VoiceCaptureError.recognition("model download failed: \(error.localizedDescription)")
+            throw VoiceCaptureError.recognition(
+                "model download failed: \(error.localizedDescription)")
         }
     }
 
@@ -611,9 +692,11 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         if let cached = cachedFormat, pipelineLocale == locale {
             format = cached
         } else {
-            guard let resolved = await SpeechAnalyzer.bestAvailableAudioFormat(
-                compatibleWith: [transcriber],
-            ) else {
+            guard
+                let resolved = await SpeechAnalyzer.bestAvailableAudioFormat(
+                    compatibleWith: [transcriber],
+                )
+            else {
                 throw VoiceCaptureError.recognizerUnavailable
             }
             format = resolved
@@ -639,7 +722,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             throw VoiceCaptureError.microphoneDenied
         }
 
-        let speechStatus: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { continuation in
+        let speechStatus: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation {
+            continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
             }
@@ -647,6 +731,24 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         guard speechStatus == .authorized else {
             throw VoiceCaptureError.speechRecognitionDenied
         }
+    }
+
+    /// RMS amplitude of a float32 audio buffer in [0, 1]. ~0 for
+    /// silence, ~0.05+ for normal speech at typical mic distance.
+    /// Returns 0 for non-float buffers — shouldn't occur for
+    /// AVAudioEngine input nodes on iOS, which deliver float32.
+    private static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0, let channelData = buffer.floatChannelData else {
+            return 0
+        }
+        let samples = channelData[0]
+        var sumSquares: Float = 0
+        for i in 0..<frameLength {
+            let sample = samples[i]
+            sumSquares += sample * sample
+        }
+        return (sumSquares / Float(frameLength)).squareRoot()
     }
 
     /// Convert a buffer between formats using a long-lived AVAudioConverter.
@@ -705,7 +807,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
 
         func prewarm() async {}
 
-        func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws -> String {
+        func startRecording(onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) async throws
+            -> String
+        {
             onEvent(.micHot)
             try? await Task.sleep(for: .milliseconds(150))
             onEvent(.speechStarted)
