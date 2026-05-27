@@ -46,9 +46,9 @@ enum VoiceCaptureError: LocalizedError {
             "Speech recognition is unavailable on this device or locale."
         case .noSpeechDetected:
             "I didn't catch that — no speech detected."
-        case .audioEngine(let detail):
+        case let .audioEngine(detail):
             "Couldn't start audio capture: \(detail)"
-        case .recognition(let detail):
+        case let .recognition(detail):
             "Recognition failed: \(detail)"
         }
     }
@@ -57,9 +57,9 @@ enum VoiceCaptureError: LocalizedError {
 /// State hints delivered to the caller during a live recording so the UI
 /// can reflect what the audio layer is doing.
 enum VoiceCaptureEvent: Sendable {
-    case micHot  // first audio buffer accepted by the engine
-    case speechStarted  // first audio buffer above audibleThreshold (or first transcriber result, if quieter)
-    case speechEnded  // silence timer fired (or manual stopRecording)
+    case micHot // first audio buffer accepted by the engine
+    case speechStarted // first audio buffer above audibleThreshold (or first transcriber result, if quieter)
+    case speechEnded // silence timer fired (or manual stopRecording)
 }
 
 /// Audio capture / STT surface. Owned by `VoiceAgentController`.
@@ -343,8 +343,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         let nativeFormat = inputNode.outputFormat(forBus: 0)
         let converter =
             nativeFormat == analyzerFormat
-            ? nil
-            : AVAudioConverter(from: nativeFormat, to: analyzerFormat)
+                ? nil
+                : AVAudioConverter(from: nativeFormat, to: analyzerFormat)
 
         let pumpContinuation = continuation
         let target = analyzerFormat
@@ -359,8 +359,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             // Fire mic_hot on first buffer (back on main actor).
             Task { @MainActor [weak self] in
                 guard let self, !self.hasFiredMicHot else { return }
-                self.hasFiredMicHot = true
-                self.log.event("first_buffer")
+                hasFiredMicHot = true
+                log.event("first_buffer")
                 onEvent(.micHot)
             }
             // RMS-based VAD: every audible buffer drives `speechStarted`
@@ -371,9 +371,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             let isAudible = rms > Self.audibleThreshold
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if rms > self.audioWindowMaxRMS { self.audioWindowMaxRMS = rms }
+                if rms > audioWindowMaxRMS { audioWindowMaxRMS = rms }
                 if isAudible {
-                    self.markAudible(rms: rms, onEvent: onEvent)
+                    markAudible(rms: rms, onEvent: onEvent)
                 }
             }
         }
@@ -397,8 +397,8 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         maxDurationTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: Self.maxRecordingDuration) } catch { return }
             guard let self else { return }
-            self.log.event("max_duration_reached")
-            self.signalEnd(.timeout)
+            log.event("max_duration_reached")
+            signalEnd(.timeout)
         }
 
         // Diagnostic: log the max RMS observed per `audioWindowPeriod`.
@@ -409,9 +409,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             while !Task.isCancelled {
                 do { try await Task.sleep(for: Self.audioWindowPeriod) } catch { return }
                 guard let self else { return }
-                let maxRMS = self.audioWindowMaxRMS
-                self.audioWindowMaxRMS = 0
-                self.log.event(
+                let maxRMS = audioWindowMaxRMS
+                audioWindowMaxRMS = 0
+                log.event(
                     "audio_window",
                     detail: "max_rms=\(String(format: "%.4f", maxRMS))",
                 )
@@ -581,8 +581,7 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     /// internal drain). Without this gate, those drain events would
     /// keep rearming the silence timer and push end-of-utterance
     /// detection well past the real end.
-    private func markAudible(rms: Float?, onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void)
-    {
+    private func markAudible(rms: Float?, onEvent: @escaping @MainActor (VoiceCaptureEvent) -> Void) {
         if rms != nil {
             hasAudibleAudioFired = true
         } else if hasAudibleAudioFired {
@@ -613,12 +612,12 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         silenceTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: Self.silenceTimeout) } catch { return }
             guard let self else { return }
-            self.log.event("silence_timeout")
-            if !self.hasFiredSpeechEnded {
-                self.hasFiredSpeechEnded = true
+            log.event("silence_timeout")
+            if !hasFiredSpeechEnded {
+                hasFiredSpeechEnded = true
                 onEvent(.speechEnded)
             }
-            self.signalEnd(.silence)
+            signalEnd(.silence)
         }
     }
 
@@ -667,8 +666,7 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         // installation request. This doesn't start any audio work.
         let probe = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
         do {
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe])
-            {
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
                 log.event("model_download_start")
                 try await request.downloadAndInstall()
                 log.event("model_downloaded")
@@ -782,7 +780,7 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         }
         let samples = channelData[0]
         var sumSquares: Float = 0
-        for i in 0..<frameLength {
+        for i in 0 ..< frameLength {
             let sample = samples[i]
             sumSquares += sample * sample
         }

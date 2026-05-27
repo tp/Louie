@@ -13,7 +13,7 @@ import Foundation
 enum HeyLouieCatalog {
     struct Entry: Sendable {
         let id: String
-        let type: String  // "artist" | "album" | "genre" | "playlist" | "track"
+        let type: String // "artist" | "album" | "genre" | "playlist" | "track"
         let title: String
         let tokens: [String]
     }

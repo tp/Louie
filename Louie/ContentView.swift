@@ -80,7 +80,7 @@ private struct ContentViewBody: View {
         }
         .environment(\.bottomContentClearance, playBarHeight)
         .safeAreaInset(edge: .bottom) {
-          HStack(alignment: .bottom) {
+            HStack(alignment: .bottom) {
                 PlayerBar(state: linn)
                     .padding(.top, 10)
                     .onGeometryChange(for: CGFloat.self) { proxy in

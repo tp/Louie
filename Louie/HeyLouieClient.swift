@@ -182,7 +182,7 @@ final class HeyLouieClient {
     /// the pump on a detached task to avoid hopping to the main actor for
     /// every `receive()`.
     func messages() -> AsyncThrowingStream<HeyLouieInbound, Error> {
-        let task = self.task
+        let task = task
         return AsyncThrowingStream { continuation in
             let pump = Task.detached {
                 do {
@@ -217,7 +217,7 @@ final class HeyLouieClient {
         }
     }
 
-    nonisolated private static func decode(_ raw: String) throws -> HeyLouieInbound {
+    private nonisolated static func decode(_ raw: String) throws -> HeyLouieInbound {
         guard let data = raw.data(using: .utf8),
               let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String
