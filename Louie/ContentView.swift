@@ -26,6 +26,7 @@ private struct ContentViewBody: View {
     // typed as `any VoiceAgent` and doesn't expose the fake state.
     @State private var heyLouie: HeyLouieWebSocketAgent
     @State private var voiceAgent: VoiceAgentController
+    @State private var realtimeVoice: RealtimeVoiceController
 
     init(linn: Linn) {
         self.linn = linn
@@ -39,6 +40,7 @@ private struct ContentViewBody: View {
             capture: voice,
             synth: voice,
         ))
+        _realtimeVoice = State(initialValue: RealtimeVoiceController(linn: linn))
     }
 
     @State private var selectedSection: AppSection? = .home
@@ -73,10 +75,13 @@ private struct ContentViewBody: View {
             linn.start()
         }
         .task {
-            await voiceAgent.capture.prewarm()
+            if HeyLouieVoiceMode.current == .legacyPushToTalk {
+                await voiceAgent.capture.prewarm()
+            }
         }
         .onDisappear {
             linn.stop()
+            activeVoiceHandle(.cancel)
         }
         .environment(\.bottomContentClearance, playBarHeight)
         .safeAreaInset(edge: .bottom) {
@@ -91,8 +96,8 @@ private struct ContentViewBody: View {
                     .animation(.smooth(duration: 0.25), value: leadingInset)
 
                 VoiceAgentOverlay(
-                    state: voiceAgent.state,
-                    onEvent: voiceAgent.handle,
+                    state: activeVoiceState,
+                    onEvent: activeVoiceHandle,
                 )
             }
             .padding(.leading, leadingInset)
@@ -102,6 +107,24 @@ private struct ContentViewBody: View {
 
     private var activeSection: AppSection {
         selectedSection ?? .home
+    }
+
+    private var activeVoiceState: VoiceAgentState {
+        switch HeyLouieVoiceMode.current {
+        case .legacyPushToTalk:
+            voiceAgent.state
+        case .realtimeWebRTC:
+            realtimeVoice.state
+        }
+    }
+
+    private func activeVoiceHandle(_ event: VoiceAgentEvent) {
+        switch HeyLouieVoiceMode.current {
+        case .legacyPushToTalk:
+            voiceAgent.handle(event)
+        case .realtimeWebRTC:
+            realtimeVoice.handle(event)
+        }
     }
 
     @ViewBuilder
@@ -125,11 +148,22 @@ private struct ContentViewBody: View {
         #if DEBUG
             case .debug:
                 NavigationStack {
-                    HeyLouieDebugView(state: heyLouie.fake)
+                    HeyLouieDebugView(state: activeDebugState)
                 }
         #endif
         }
     }
+
+    #if DEBUG
+        private var activeDebugState: HeyLouieFakeState {
+            switch HeyLouieVoiceMode.current {
+            case .legacyPushToTalk:
+                heyLouie.fake
+            case .realtimeWebRTC:
+                realtimeVoice.fake
+            }
+        }
+    #endif
 
     private func sectionPathBinding(
         _ section: AppSection,

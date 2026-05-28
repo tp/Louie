@@ -28,9 +28,9 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Louie connects to your Linn music system on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Louie listens to your voice commands while you hold the push-to-talk button.</string>
+	<string>Louie listens to your voice commands while voice mode is active.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Louie transcribes your push-to-talk voice commands on-device so it can act on them.</string>
+	<string>Louie can transcribe push-to-talk voice commands on-device so it can act on them.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

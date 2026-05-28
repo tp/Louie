@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		241AC65F2FB3960800C7A37D /* Linn in Frameworks */ = {isa = PBXBuildFile; productRef = 241AC65E2FB3960800C7A37D /* Linn */; };
 		248FC7FC2FC5C2C900066145 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 248FC7FB2FC5C2C900066145 /* Sentry */; };
+		248FC8012FC7390B00066145 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 248FC8002FC7390B00066145 /* WebRTC */; };
 		24CAE00E2FB884D30085ADFF /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = 24CAE00D2FB884D30085ADFF /* NukeUI */; };
 /* End PBXBuildFile section */
 
@@ -71,6 +72,7 @@
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				241AC65F2FB3960800C7A37D /* Linn in Frameworks */,
+				248FC8012FC7390B00066145 /* WebRTC in Frameworks */,
 				24CAE00E2FB884D30085ADFF /* NukeUI in Frameworks */,
 				248FC7FC2FC5C2C900066145 /* Sentry in Frameworks */,
 			);
@@ -129,6 +131,7 @@
 				241AC65E2FB3960800C7A37D /* Linn */,
 				24CAE00D2FB884D30085ADFF /* NukeUI */,
 				248FC7FB2FC5C2C900066145 /* Sentry */,
+				248FC8002FC7390B00066145 /* WebRTC */,
 			);
 			productName = Louie;
 			productReference = 241AC6162FB3177900C7A37D /* Louie.app */;
@@ -213,6 +216,7 @@
 				241AC65D2FB3960800C7A37D /* XCLocalSwiftPackageReference "Packages/Linn" */,
 				24CAE00C2FB884D30085ADFF /* XCRemoteSwiftPackageReference "Nuke" */,
 				248FC7FA2FC5C2C900066145 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+				248FC7FF2FC7390B00066145 /* XCRemoteSwiftPackageReference "WebRTC" */,
 			);
 			preferredProjectObjectVersion = 100;
 			productRefGroup = 241AC6172FB3177900C7A37D /* Products */;
@@ -596,6 +600,14 @@
 				minimumVersion = 9.14.0;
 			};
 		};
+		248FC7FF2FC7390B00066145 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 147.0.0;
+			};
+		};
 		24CAE00C2FB884D30085ADFF /* XCRemoteSwiftPackageReference "Nuke" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/kean/Nuke";
@@ -615,6 +627,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 248FC7FA2FC5C2C900066145 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
+		};
+		248FC8002FC7390B00066145 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 248FC7FF2FC7390B00066145 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
 		};
 		24CAE00D2FB884D30085ADFF /* NukeUI */ = {
 			isa = XCSwiftPackageProductDependency;
