@@ -36,6 +36,7 @@ final class RealtimeVoiceController {
     private var sessionTransaction: (any Span)?
 
     private static let logger = Logger(subsystem: "Louie", category: "RealtimeVoiceController")
+    private static let startupAudioBackfillEnabled = true
 
     init(linn: Linn? = nil) {
         let resolved = HeyLouieFeatureFlags.useLinnForMusic ? linn : nil
@@ -65,7 +66,7 @@ final class RealtimeVoiceController {
 
     private func startSession() {
         cancelEverything()
-        state = .connecting
+        state = .listening
 
         let tx = SentrySDK.startTransaction(
             name: "voice session",
@@ -75,22 +76,25 @@ final class RealtimeVoiceController {
         tx.setData(value: "louie", key: "gen_ai.agent.name")
         sessionTransaction = tx
 
+        let transport = WebRTCRealtimeVoiceTransport(
+            startupAudioBackfillEnabled: Self.startupAudioBackfillEnabled
+        )
+        self.transport = transport
+
         sessionTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await runSession()
+            await runSession(transport: transport)
         }
     }
 
-    private func runSession() async {
+    private func runSession(transport: WebRTCRealtimeVoiceTransport) async {
         var headers: [String: String] = [:]
         if let span = SentrySDK.span {
             headers["sentry-trace"] = span.toTraceHeader().value()
         }
 
         let client = RealtimeVoiceControlClient(headers: headers)
-        let transport = WebRTCRealtimeVoiceTransport()
         self.client = client
-        self.transport = transport
         client.open()
 
         let env = VoiceAgentEnvironment(
@@ -110,6 +114,23 @@ final class RealtimeVoiceController {
         )
 
         do {
+            if Self.startupAudioBackfillEnabled {
+                let startupCaptureSpan = sessionTransaction?.startChild(
+                    operation: "audio.startup_capture",
+                    description: "Start local microphone capture for Realtime backfill",
+                )
+                do {
+                    try await transport.startStartupAudioCapture()
+                    startupCaptureSpan?.finish()
+                } catch is CancellationError {
+                    startupCaptureSpan?.finish(status: .cancelled)
+                    throw CancellationError()
+                } catch {
+                    startupCaptureSpan?.finish(status: .internalError)
+                    throw error
+                }
+            }
+
             let prepareOfferSpan = sessionTransaction?.startChild(
                 operation: "webrtc.prepare_offer",
                 description: "Configure audio and create local SDP offer",
@@ -154,6 +175,22 @@ final class RealtimeVoiceController {
                         applyAnswerSpan?.finish(status: .internalError)
                         throw error
                     }
+                    if Self.startupAudioBackfillEnabled {
+                        let backfillSpan = sessionTransaction?.startChild(
+                            operation: "audio.startup_backfill",
+                            description: "Send buffered startup audio over Realtime data channel",
+                        )
+                        do {
+                            try await transport.finishStartupAudioBackfillAndEnableLiveMicrophone()
+                            backfillSpan?.finish()
+                        } catch is CancellationError {
+                            backfillSpan?.finish(status: .cancelled)
+                            throw CancellationError()
+                        } catch {
+                            backfillSpan?.finish(status: .internalError)
+                            throw error
+                        }
+                    }
                     didApplyAnswer = true
                     if let callId {
                         sessionTransaction?.setData(value: callId, key: "openai.realtime.call_id")
@@ -178,11 +215,11 @@ final class RealtimeVoiceController {
                     state = .listening
                 case .done:
                     didReceiveDone = true
-                    await transport.finishAfterServerDone()
-                    self.transport = nil
                     client.close()
                     self.client = nil
                     state = .idle
+                    await transport.finishAfterServerDone()
+                    self.transport = nil
                 case let .error(message):
                     throw RealtimeVoiceError.backend(message)
                 }

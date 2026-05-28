@@ -475,7 +475,7 @@ private struct VoiceAgentStatusBanner: View {
         case .connecting:
             Line(text: "Connecting…", tint: .primary)
         case .listening:
-            Line(text: "Listening…", tint: .primary)
+            Line(text: "I'm ready. Start talking.", tint: .primary)
         case .speaking:
             Line(text: "Speaking…", tint: .primary)
         case .recording:

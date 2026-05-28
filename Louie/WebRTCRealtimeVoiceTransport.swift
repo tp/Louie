@@ -3,7 +3,7 @@
 //  Louie
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 import OSLog
 @preconcurrency import WebRTC
@@ -13,6 +13,8 @@ enum WebRTCRealtimeVoiceTransportError: LocalizedError {
     case offerFailed(String)
     case localDescriptionFailed(String)
     case remoteDescriptionFailed(String)
+    case dataChannelUnavailable
+    case dataChannelSendFailed
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +22,8 @@ enum WebRTCRealtimeVoiceTransportError: LocalizedError {
         case let .offerFailed(message): "WebRTC offer failed: \(message)"
         case let .localDescriptionFailed(message): "WebRTC local description failed: \(message)"
         case let .remoteDescriptionFailed(message): "WebRTC remote description failed: \(message)"
+        case .dataChannelUnavailable: "Realtime data channel did not open."
+        case .dataChannelSendFailed: "Realtime data channel could not send startup audio."
         }
     }
 }
@@ -27,16 +31,33 @@ enum WebRTCRealtimeVoiceTransportError: LocalizedError {
 @MainActor
 final class WebRTCRealtimeVoiceTransport: NSObject {
     private let factory = RTCPeerConnectionFactory()
+    private let startupAudioBackfillEnabled: Bool
     private var peerConnection: RTCPeerConnection?
     private var localAudioTrack: RTCAudioTrack?
-    private static let logger = Logger(subsystem: "Louie", category: "WebRTCRealtimeVoiceTransport")
-    private static let doneMinimumDrainDelay: Duration = .milliseconds(1500)
-    private static let doneEstimatedDurationTail: Duration = .milliseconds(750)
-    private static let doneFallbackDrainDelay: Duration = .seconds(12)
-    private static let doneMaximumDrainWait: Duration = .seconds(30)
+    private var dataChannel: RTCDataChannel?
+    private var startupCapture: RealtimeStartupAudioCapture?
+    private nonisolated static let logger = Logger(subsystem: "Louie", category: "WebRTCRealtimeVoiceTransport")
+    private static let doneDrainDelay: Duration = .milliseconds(1500)
+    private static let dataChannelOpenTimeout: Duration = .seconds(3)
+    private static let dataChannelDrainTimeout: Duration = .seconds(2)
+    private static let startupBackfillCatchUpTimeout: Duration = .seconds(2)
+
+    init(startupAudioBackfillEnabled: Bool = false) {
+        self.startupAudioBackfillEnabled = startupAudioBackfillEnabled
+        super.init()
+    }
+
+    func startStartupAudioCapture() async throws {
+        guard startupAudioBackfillEnabled else { return }
+        let capture = RealtimeStartupAudioCapture()
+        try await capture.start()
+        startupCapture = capture
+    }
 
     func startAndCreateOffer() async throws -> String {
-        try configureAudioSession()
+        if startupCapture == nil {
+            try configureAudioSession()
+        }
 
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
@@ -55,9 +76,21 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         }
         self.peerConnection = peerConnection
 
+        let dataChannelConfig = RTCDataChannelConfiguration()
+        dataChannelConfig.isOrdered = true
+        guard let dataChannel = peerConnection.dataChannel(
+            forLabel: "oai-events",
+            configuration: dataChannelConfig
+        ) else {
+            throw WebRTCRealtimeVoiceTransportError.dataChannelUnavailable
+        }
+        dataChannel.delegate = self
+        self.dataChannel = dataChannel
+
         let audioConstraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         let audioSource = factory.audioSource(with: audioConstraints)
         let audioTrack = factory.audioTrack(with: audioSource, trackId: "louie-microphone")
+        audioTrack.isEnabled = !startupAudioBackfillEnabled
         localAudioTrack = audioTrack
 
         let transceiverInit = RTCRtpTransceiverInit()
@@ -85,6 +118,33 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         try await setRemoteDescription(answer, on: peerConnection)
     }
 
+    func finishStartupAudioBackfillAndEnableLiveMicrophone() async throws {
+        guard startupAudioBackfillEnabled else {
+            localAudioTrack?.isEnabled = true
+            return
+        }
+        var summary = RealtimeStartupAudioBackfillSummary()
+        do {
+            try await waitForDataChannelOpen(timeout: Self.dataChannelOpenTimeout)
+            summary.merge(try await sendStartupAudioBackfillUntilCaughtUp())
+            startupCapture?.stop()
+            summary.merge(try await sendStartupAudioBackfill(logEmptyDrain: false))
+            try await waitForDataChannelToDrain(timeout: Self.dataChannelDrainTimeout)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            Self.logger.warning("Startup audio backfill skipped: \(error.localizedDescription, privacy: .public)")
+        }
+
+        startupCapture?.stop()
+        startupCapture = nil
+        Self.logger.info(
+            "Startup audio backfill complete; sent_batches=\(summary.sentBatches, privacy: .public) sent_bytes=\(summary.sentBytes, privacy: .public) source_chunks=\(summary.sourceChunks, privacy: .public) speech_chunks=\(summary.speechChunks, privacy: .public) source_duration=\(summary.sourceDuration, privacy: .public)"
+        )
+        try Task.checkCancellation()
+        localAudioTrack?.isEnabled = true
+    }
+
     func finishAfterServerDone() async {
         localAudioTrack?.isEnabled = false
         await waitForRemoteAudioToDrain()
@@ -92,8 +152,13 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
     }
 
     func close() {
+        startupCapture?.stop()
+        startupCapture = nil
         localAudioTrack?.isEnabled = false
         localAudioTrack = nil
+        dataChannel?.delegate = nil
+        dataChannel?.close()
+        dataChannel = nil
         peerConnection?.receivers.forEach { receiver in
             receiver.track?.isEnabled = false
         }
@@ -137,6 +202,88 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         }
     }
 
+    private func sendStartupAudioBackfill(logEmptyDrain: Bool = true) async throws -> RealtimeStartupAudioBackfillSummary {
+        guard let startupCapture else { return RealtimeStartupAudioBackfillSummary() }
+        let backfill = await startupCapture.drainBackfill()
+        guard !backfill.batches.isEmpty else {
+            if logEmptyDrain {
+                Self.logger.info(
+                    "No startup audio backfill to send; chunks=\(backfill.totalChunks, privacy: .public) speech_chunks=\(backfill.speechChunks, privacy: .public) duration=\(backfill.totalDuration, privacy: .public)"
+                )
+            }
+            return RealtimeStartupAudioBackfillSummary()
+        }
+
+        Self.logger.debug(
+            "Sending \(backfill.batches.count, privacy: .public) continuous startup audio backfill chunk(s); bytes=\(backfill.byteCount, privacy: .public) chunks=\(backfill.totalChunks, privacy: .public) speech_chunks=\(backfill.speechChunks, privacy: .public) duration=\(backfill.totalDuration, privacy: .public)"
+        )
+        for batch in backfill.batches {
+            try Task.checkCancellation()
+            try sendRealtimeEvent([
+                "type": "input_audio_buffer.append",
+                "audio": batch.base64EncodedString(),
+            ])
+        }
+        return RealtimeStartupAudioBackfillSummary(backfill)
+    }
+
+    private func sendStartupAudioBackfillUntilCaughtUp() async throws -> RealtimeStartupAudioBackfillSummary {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: Self.startupBackfillCatchUpTimeout)
+        var summary = RealtimeStartupAudioBackfillSummary()
+        while true {
+            summary.merge(try await sendStartupAudioBackfill())
+            try Task.checkCancellation()
+            guard clock.now < deadline else {
+                Self.logger.info("Startup audio backfill catch-up timeout reached")
+                return summary
+            }
+            try await Task.sleep(for: .milliseconds(20))
+            guard let startupCapture, await startupCapture.hasBufferedAudio else {
+                return summary
+            }
+        }
+    }
+
+    private func sendRealtimeEvent(_ payload: [String: Any]) throws {
+        guard let dataChannel, dataChannel.readyState == .open else {
+            throw WebRTCRealtimeVoiceTransportError.dataChannelUnavailable
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let buffer = RTCDataBuffer(data: data, isBinary: false)
+        guard dataChannel.sendData(buffer) else {
+            throw WebRTCRealtimeVoiceTransportError.dataChannelSendFailed
+        }
+    }
+
+    private func waitForDataChannelOpen(timeout: Duration) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while dataChannel?.readyState != .open {
+            try Task.checkCancellation()
+            guard clock.now < deadline else {
+                throw WebRTCRealtimeVoiceTransportError.dataChannelUnavailable
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private func waitForDataChannelToDrain(timeout: Duration) async throws {
+        guard let dataChannel else {
+            throw WebRTCRealtimeVoiceTransportError.dataChannelUnavailable
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while dataChannel.bufferedAmount > 0 {
+            try Task.checkCancellation()
+            guard clock.now < deadline else {
+                Self.logger.info("Proceeding before Realtime data channel fully drained")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
     private func setRemoteDescription(
         _ sdp: RTCSessionDescription,
         on peerConnection: RTCPeerConnection,
@@ -164,68 +311,8 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
     }
 
     private func waitForRemoteAudioToDrain() async {
-        guard let peerConnection else {
-            return
-        }
-
-        // WebRTC does not expose a playout-drained callback here. Audio level
-        // can go quiet once RTP stops arriving, even while the playout buffer
-        // still has speech queued, so use received audio duration as the
-        // conservative client-side bound before tearing down the connection.
-        let drainDelay: Duration
-        if let duration = await remoteAudioDuration(on: peerConnection) {
-            drainDelay = Self.boundedDrainDelay(forRemoteAudioDuration: duration)
-        } else {
-            drainDelay = Self.doneFallbackDrainDelay
-        }
-
-        Self.logger.info("Waiting \(String(describing: drainDelay), privacy: .public) for remote audio playout after done")
-        try? await Task.sleep(for: drainDelay)
-    }
-
-    private func remoteAudioDuration(on peerConnection: RTCPeerConnection) async -> Duration? {
-        let receivers = peerConnection.receivers.filter { receiver in
-            receiver.track?.kind == kRTCMediaStreamTrackKindAudio
-        }
-        guard !receivers.isEmpty else {
-            return nil
-        }
-
-        var durations: [Double] = []
-        for receiver in receivers {
-            if let duration = await receiverAudioDuration(receiver, on: peerConnection) {
-                durations.append(duration)
-            }
-        }
-
-        guard let seconds = durations.max() else {
-            return nil
-        }
-        return .milliseconds(Int64((seconds * 1000).rounded(.up)))
-    }
-
-    private func receiverAudioDuration(_ receiver: RTCRtpReceiver, on peerConnection: RTCPeerConnection) async -> Double? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Double?, Never>) in
-            peerConnection.statistics(for: receiver) { report in
-                var duration: Double?
-                for statistics in report.statistics.values {
-                    guard statistics.type == "inbound-rtp" || statistics.type == "track" else {
-                        continue
-                    }
-                    if let totalSamplesDuration = statistics.values["totalSamplesDuration"] as? NSNumber {
-                        duration = max(duration ?? 0, totalSamplesDuration.doubleValue)
-                    }
-                    if let totalSamplesReceived = statistics.values["totalSamplesReceived"] as? NSNumber {
-                        duration = max(duration ?? 0, totalSamplesReceived.doubleValue / 48_000)
-                    }
-                }
-                continuation.resume(returning: duration)
-            }
-        }
-    }
-
-    private static func boundedDrainDelay(forRemoteAudioDuration duration: Duration) -> Duration {
-        min(max(duration + doneEstimatedDurationTail, doneMinimumDrainDelay), doneMaximumDrainWait)
+        Self.logger.info("Waiting \(String(describing: Self.doneDrainDelay), privacy: .public) for remote audio playout after done")
+        try? await Task.sleep(for: Self.doneDrainDelay)
     }
 }
 
@@ -239,4 +326,331 @@ extension WebRTCRealtimeVoiceTransport: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_: RTCPeerConnection, didGenerate _: RTCIceCandidate) {}
     nonisolated func peerConnection(_: RTCPeerConnection, didRemove _: [RTCIceCandidate]) {}
     nonisolated func peerConnection(_: RTCPeerConnection, didOpen _: RTCDataChannel) {}
+}
+
+extension WebRTCRealtimeVoiceTransport: RTCDataChannelDelegate {
+    nonisolated func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        Self.logger.debug("Realtime data channel state changed: \(dataChannel.readyState.rawValue, privacy: .public)")
+    }
+
+    nonisolated func dataChannel(_: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+        guard let message = String(data: buffer.data, encoding: .utf8) else {
+            Self.logger.debug("Realtime data channel received \(buffer.data.count, privacy: .public) binary byte(s)")
+            return
+        }
+        Self.logger.debug("Realtime data channel received: \(message, privacy: .public)")
+    }
+}
+
+@MainActor
+private final class RealtimeStartupAudioCapture {
+    private let store = RealtimeStartupAudioBackfillStore()
+    private var audioEngine: AVAudioEngine?
+    private var didLogFirstTap = false
+    private nonisolated static let logger = Logger(subsystem: "Louie", category: "RealtimeStartupAudioCapture")
+
+    private static let sampleRate = 24000.0
+    private static let channelCount: AVAudioChannelCount = 1
+
+    func start() async throws {
+        stop()
+
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            break
+        case .denied:
+            throw VoiceCaptureError.microphoneDenied
+        case .undetermined:
+            let granted = await AVAudioApplication.requestRecordPermission()
+            if !granted { throw VoiceCaptureError.microphoneDenied }
+        @unknown default:
+            throw VoiceCaptureError.microphoneDenied
+        }
+
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.allowBluetoothHFP, .defaultToSpeaker]
+            )
+            try session.setActive(true)
+        } catch {
+            throw VoiceCaptureError.audioEngine(error.localizedDescription)
+        }
+
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let nativeFormat = inputNode.outputFormat(forBus: 0)
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: Self.sampleRate,
+            channels: Self.channelCount,
+            interleaved: false
+        ) else {
+            throw VoiceCaptureError.audioEngine("Could not create startup audio format.")
+        }
+        Self.logger.info(
+            "Starting startup capture; native_rate=\(nativeFormat.sampleRate, privacy: .public) native_channels=\(nativeFormat.channelCount, privacy: .public)"
+        )
+
+        let converter =
+            nativeFormat == targetFormat
+                ? nil
+                : AVAudioConverter(from: nativeFormat, to: targetFormat)
+        let store = store
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { buffer, _ in
+            let converted: AVAudioPCMBuffer?
+            if let converter {
+                converted = Self.convert(buffer, with: converter, to: targetFormat)
+            } else {
+                converted = buffer
+            }
+            guard let converted,
+                  let data = Self.pcm16Data(from: converted),
+                  !data.isEmpty
+            else {
+                Self.logger.warning("Startup capture dropped a buffer during conversion")
+                return
+            }
+
+            let duration = Double(converted.frameLength) / converted.format.sampleRate
+            let rms = Self.computeRMS(buffer)
+            Task { @MainActor [weak self] in
+                guard let self, !didLogFirstTap else { return }
+                didLogFirstTap = true
+                Self.logger.info(
+                    "Startup capture received first buffer; frames=\(converted.frameLength, privacy: .public) rms=\(rms, privacy: .public)"
+                )
+            }
+            Task {
+                await store.append(data: data, duration: duration, rms: rms)
+            }
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            throw VoiceCaptureError.audioEngine(error.localizedDescription)
+        }
+        audioEngine = engine
+        Self.logger.info("Startup capture engine started")
+    }
+
+    var hasBufferedAudio: Bool {
+        get async {
+            await store.hasBufferedAudio
+        }
+    }
+
+    func drainBackfill() async -> RealtimeStartupAudioBackfill {
+        await store.drainBackfill()
+    }
+
+    func stop() {
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine = nil
+        didLogFirstTap = false
+    }
+
+    private static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data? {
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0, let channelData = buffer.int16ChannelData else {
+            return nil
+        }
+        return Data(bytes: channelData[0], count: frameLength * MemoryLayout<Int16>.size)
+    }
+
+    private static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0, let channelData = buffer.floatChannelData else {
+            return 0
+        }
+        let samples = channelData[0]
+        var sumSquares: Float = 0
+        for i in 0 ..< frameLength {
+            let sample = samples[i]
+            sumSquares += sample * sample
+        }
+        return (sumSquares / Float(frameLength)).squareRoot()
+    }
+
+    private static func convert(
+        _ buffer: AVAudioPCMBuffer,
+        with converter: AVAudioConverter,
+        to target: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let capacity = AVAudioFrameCount(
+            Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate + 0.5
+        )
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
+            return nil
+        }
+        var consumed = false
+        var error: NSError?
+        converter.convert(to: output, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        if error != nil { return nil }
+        return output
+    }
+}
+
+private struct RealtimeStartupAudioBackfill: Sendable {
+    var batches: [Data]
+    var totalChunks: Int
+    var speechChunks: Int
+    var totalDuration: TimeInterval
+    var trimmedDuration: TimeInterval
+
+    var byteCount: Int {
+        batches.reduce(0) { $0 + $1.count }
+    }
+}
+
+private struct RealtimeStartupAudioBackfillSummary: Sendable {
+    var sentBatches = 0
+    var sentBytes = 0
+    var sourceChunks = 0
+    var speechChunks = 0
+    var sourceDuration: TimeInterval = 0
+
+    init() {}
+
+    init(_ backfill: RealtimeStartupAudioBackfill) {
+        sentBatches = backfill.batches.count
+        sentBytes = backfill.byteCount
+        sourceChunks = backfill.totalChunks
+        speechChunks = backfill.speechChunks
+        sourceDuration = backfill.totalDuration
+    }
+
+    mutating func merge(_ other: RealtimeStartupAudioBackfillSummary) {
+        sentBatches += other.sentBatches
+        sentBytes += other.sentBytes
+        sourceChunks += other.sourceChunks
+        speechChunks += other.speechChunks
+        sourceDuration += other.sourceDuration
+    }
+}
+
+private actor RealtimeStartupAudioBackfillStore {
+    private struct Chunk {
+        var data: Data
+        var duration: TimeInterval
+        var isSpeech: Bool
+    }
+
+    private var chunks: [Chunk] = []
+    private var totalDuration: TimeInterval = 0
+
+    private static let maximumBufferedDuration: TimeInterval = 8
+    private static let speechThreshold: Float = 0.0015
+    private static let preRollDuration: TimeInterval = 0.24
+    private static let tailDuration: TimeInterval = 0.36
+    private static let maxBatchBytes = 48_000
+
+    var hasBufferedAudio: Bool {
+        !chunks.isEmpty
+    }
+
+    func append(data: Data, duration: TimeInterval, rms: Float) {
+        chunks.append(Chunk(
+            data: data,
+            duration: duration,
+            isSpeech: rms > Self.speechThreshold
+        ))
+        totalDuration += duration
+
+        while totalDuration > Self.maximumBufferedDuration, let first = chunks.first {
+            totalDuration -= first.duration
+            chunks.removeFirst()
+        }
+    }
+
+    func drainBackfill() -> RealtimeStartupAudioBackfill {
+        defer {
+            chunks.removeAll()
+            totalDuration = 0
+        }
+
+        let totalChunks = chunks.count
+        let totalDuration = chunks.reduce(0) { $0 + $1.duration }
+        let speechChunks = chunks.count { $0.isSpeech }
+        let outputChunks = chunks
+        let batches = Self.batches(from: outputChunks.map(\.data))
+        return RealtimeStartupAudioBackfill(
+            batches: batches,
+            totalChunks: totalChunks,
+            speechChunks: speechChunks,
+            totalDuration: totalDuration,
+            trimmedDuration: outputChunks.reduce(0) { $0 + $1.duration }
+        )
+    }
+
+    private func speechTrimmedChunks() -> [Chunk] {
+        let speechIndices = chunks.indices.filter { chunks[$0].isSpeech }
+        guard !speechIndices.isEmpty else { return [] }
+
+        var selected = Set<Int>()
+        for speechIndex in speechIndices {
+            selected.insert(speechIndex)
+
+            var preRoll = 0.0
+            var index = chunks.index(before: speechIndex)
+            while index >= chunks.startIndex, preRoll < Self.preRollDuration {
+                selected.insert(index)
+                preRoll += chunks[index].duration
+                if index == chunks.startIndex { break }
+                index = chunks.index(before: index)
+            }
+
+            var tail = 0.0
+            index = chunks.index(after: speechIndex)
+            while index < chunks.endIndex, tail < Self.tailDuration {
+                selected.insert(index)
+                tail += chunks[index].duration
+                index = chunks.index(after: index)
+            }
+        }
+
+        return chunks.indices
+            .filter { selected.contains($0) }
+            .map { chunks[$0] }
+    }
+
+    private static func batches(from chunks: [Data]) -> [Data] {
+        var batches: [Data] = []
+        var current = Data()
+        for chunk in chunks {
+            if current.count + chunk.count > maxBatchBytes, !current.isEmpty {
+                batches.append(current)
+                current.removeAll(keepingCapacity: true)
+            }
+
+            if chunk.count > maxBatchBytes {
+                var offset = 0
+                while offset < chunk.count {
+                    let end = min(offset + maxBatchBytes, chunk.count)
+                    batches.append(chunk.subdata(in: offset ..< end))
+                    offset = end
+                }
+            } else {
+                current.append(chunk)
+            }
+        }
+        if !current.isEmpty {
+            batches.append(current)
+        }
+        return batches
+    }
 }
