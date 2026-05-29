@@ -36,6 +36,11 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
     private var localAudioTrack: RTCAudioTrack?
     private var dataChannel: RTCDataChannel?
     private var startupCapture: RealtimeStartupAudioCapture?
+    /// Driven by `output_audio_buffer.started/stopped/cleared` events on the data
+    /// channel: whether the model is currently speaking, and whether it ever did
+    /// this turn. Used to hold teardown until the reply has actually finished.
+    private var isOutputAudioActive = false
+    private var didObserveOutputAudio = false
     /// DEBUG: when true, the exact PCM bytes sent as startup backfill are
     /// accumulated and written to a WAV in the app's Documents directory so the
     /// captured audio can be auditioned directly (isolates capture/format issues
@@ -48,7 +53,15 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
     private var debugBackfillPCM = Data()
     private var debugBackfillPlayer: AVAudioPlayer?
     private nonisolated static let logger = Logger(subsystem: "Louie", category: "WebRTCRealtimeVoiceTransport")
-    private static let doneDrainDelay: Duration = .milliseconds(1500)
+    /// How long after the server's `done` we wait for output audio to *begin*,
+    /// in case `done` arrives before the spoken reply starts (or there is no
+    /// spoken reply at all, e.g. a tool-only turn).
+    private static let doneStartGrace: Duration = .seconds(2)
+    /// Flush time after the output-audio buffer stops, to let the last buffered
+    /// samples play out before we close the peer connection.
+    private static let doneTailDelay: Duration = .milliseconds(400)
+    /// Hard safety cap so a missing `stopped` event can't hang teardown forever.
+    private static let doneMaximumDrainWait: Duration = .seconds(30)
     private static let dataChannelOpenTimeout: Duration = .seconds(3)
     private static let dataChannelDrainTimeout: Duration = .seconds(2)
     private static let iceConnectTimeout: Duration = .seconds(20)
@@ -213,6 +226,21 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
             } catch {
                 Self.logger.warning("Debug backfill playback failed: \(error.localizedDescription, privacy: .public)")
             }
+        }
+    }
+
+    /// Tracks the model's spoken-output lifecycle from data-channel events so
+    /// teardown can wait for the reply to actually finish (see
+    /// `waitForRemoteAudioToDrain`).
+    private func handleRealtimeEvent(type: String) {
+        switch type {
+        case "output_audio_buffer.started":
+            isOutputAudioActive = true
+            didObserveOutputAudio = true
+        case "output_audio_buffer.stopped", "output_audio_buffer.cleared":
+            isOutputAudioActive = false
+        default:
+            break
         }
     }
 
@@ -397,9 +425,42 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         }
     }
 
+    /// Waits until the model's spoken reply has finished playing out before the
+    /// caller tears down the peer connection. The server's `done` (a control
+    /// signal) can arrive while the reply is still playing — or before it even
+    /// starts — so we key off the `output_audio_buffer` events instead of a
+    /// fixed timer. Bounded by `doneMaximumDrainWait` so a missing `stopped`
+    /// event can't hang teardown.
     private func waitForRemoteAudioToDrain() async {
-        Self.logger.info("Waiting \(String(describing: Self.doneDrainDelay), privacy: .public) for remote audio playout after done")
-        try? await Task.sleep(for: Self.doneDrainDelay)
+        let clock = ContinuousClock()
+        let overallDeadline = clock.now.advanced(by: Self.doneMaximumDrainWait)
+        let startGraceDeadline = clock.now.advanced(by: Self.doneStartGrace)
+
+        while clock.now < overallDeadline {
+            if isOutputAudioActive {
+                try? await Task.sleep(for: .milliseconds(50))
+                continue
+            }
+            if !didObserveOutputAudio {
+                // No spoken reply yet. Give it a moment to start (the `done`
+                // control signal can precede the audio); if nothing begins
+                // within the grace window, assume a silent turn and proceed.
+                if clock.now >= startGraceDeadline {
+                    Self.logger.info("No output audio after done within start grace; proceeding with teardown")
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+                continue
+            }
+            // Audio played and is no longer active. Let a tail flush, then
+            // confirm it didn't resume (a brief mid-reply pause) before closing.
+            try? await Task.sleep(for: Self.doneTailDelay)
+            if !isOutputAudioActive {
+                Self.logger.info("Output audio finished; proceeding with teardown")
+                return
+            }
+        }
+        Self.logger.info("Reached max drain wait; tearing down with output_audio_active=\(self.isOutputAudioActive, privacy: .public)")
     }
 }
 
@@ -436,6 +497,13 @@ extension WebRTCRealtimeVoiceTransport: RTCDataChannelDelegate {
             return
         }
         Self.logger.debug("Realtime data channel received: \(message, privacy: .public)")
+        guard let type = Self.eventType(from: buffer.data) else { return }
+        Task { @MainActor [weak self] in self?.handleRealtimeEvent(type: type) }
+    }
+
+    private nonisolated static func eventType(from data: Data) -> String? {
+        let object = try? JSONSerialization.jsonObject(with: data)
+        return (object as? [String: Any])?["type"] as? String
     }
 }
 
