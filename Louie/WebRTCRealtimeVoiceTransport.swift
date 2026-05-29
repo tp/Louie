@@ -36,11 +36,21 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
     private var localAudioTrack: RTCAudioTrack?
     private var dataChannel: RTCDataChannel?
     private var startupCapture: RealtimeStartupAudioCapture?
+    /// DEBUG: when true, the exact PCM bytes sent as startup backfill are
+    /// accumulated and written to a WAV in the app's Documents directory so the
+    /// captured audio can be auditioned directly (isolates capture/format issues
+    /// from transport/server interpretation). Remove once backfill is trusted.
+    private static let debugDumpBackfillWAV = true
+    /// DEBUG: when true, the backfill audio is played back through the speaker
+    /// right after it's sent, so you can hear exactly what the model received
+    /// without extracting the file from the device.
+    private static let debugPlayBackfillAfterSending = true
+    private var debugBackfillPCM = Data()
+    private var debugBackfillPlayer: AVAudioPlayer?
     private nonisolated static let logger = Logger(subsystem: "Louie", category: "WebRTCRealtimeVoiceTransport")
     private static let doneDrainDelay: Duration = .milliseconds(1500)
     private static let dataChannelOpenTimeout: Duration = .seconds(3)
     private static let dataChannelDrainTimeout: Duration = .seconds(2)
-    private static let startupBackfillCatchUpTimeout: Duration = .seconds(2)
 
     init(startupAudioBackfillEnabled: Bool = false) {
         self.startupAudioBackfillEnabled = startupAudioBackfillEnabled
@@ -126,7 +136,9 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         var summary = RealtimeStartupAudioBackfillSummary()
         do {
             try await waitForDataChannelOpen(timeout: Self.dataChannelOpenTimeout)
-            summary.merge(try await sendStartupAudioBackfillUntilCaughtUp())
+            // The connect typically outlasts the (one-shot, push-to-talk)
+            // utterance, so capture is already complete: stop it, then send the
+            // whole buffered utterance — trimmed to speech — in one pass.
             await startupCapture?.finishCapturing()
             summary.merge(try await sendStartupAudioBackfill(logEmptyDrain: false))
             try await waitForDataChannelToDrain(timeout: Self.dataChannelDrainTimeout)
@@ -139,10 +151,62 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         startupCapture?.stop()
         startupCapture = nil
         Self.logger.info(
-            "Startup audio backfill complete; sent_batches=\(summary.sentBatches, privacy: .public) sent_bytes=\(summary.sentBytes, privacy: .public) source_chunks=\(summary.sourceChunks, privacy: .public) speech_chunks=\(summary.speechChunks, privacy: .public) source_duration=\(summary.sourceDuration, privacy: .public)"
+            "Startup audio backfill complete; sent_batches=\(summary.sentBatches, privacy: .public) sent_bytes=\(summary.sentBytes, privacy: .public) source_chunks=\(summary.sourceChunks, privacy: .public) speech_chunks=\(summary.speechChunks, privacy: .public) source_duration=\(summary.sourceDuration, privacy: .public) sent_duration=\(summary.sentDuration, privacy: .public)"
         )
+        if Self.debugDumpBackfillWAV { writeDebugBackfillWAV() }
         try Task.checkCancellation()
         localAudioTrack?.isEnabled = true
+    }
+
+    /// DEBUG: builds a 24 kHz mono 16-bit WAV from the accumulated backfill PCM
+    /// (exactly what we base64-sent), writes it to Documents, and optionally
+    /// plays it through the speaker. If it sounds mangled, the fault is
+    /// capture/format; if clean, the fault is transport/server interpretation.
+    private func writeDebugBackfillWAV() {
+        let pcm = debugBackfillPCM
+        debugBackfillPCM = Data()
+        guard !pcm.isEmpty else {
+            Self.logger.info("Debug backfill WAV skipped: no PCM accumulated")
+            return
+        }
+        let sampleRate: UInt32 = 24000
+        let channels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let byteRate = sampleRate * UInt32(channels) * UInt32(bitsPerSample / 8)
+        let blockAlign = channels * (bitsPerSample / 8)
+        let dataLen = UInt32(pcm.count)
+
+        var wav = Data()
+        func append(_ string: String) { wav.append(contentsOf: string.utf8) }
+        func append(le32 value: UInt32) { withUnsafeBytes(of: value.littleEndian) { wav.append(contentsOf: $0) } }
+        func append(le16 value: UInt16) { withUnsafeBytes(of: value.littleEndian) { wav.append(contentsOf: $0) } }
+
+        append("RIFF"); append(le32: 36 + dataLen); append("WAVE")
+        append("fmt "); append(le32: 16); append(le16: 1); append(le16: channels)
+        append(le32: sampleRate); append(le32: byteRate); append(le16: blockAlign); append(le16: bitsPerSample)
+        append("data"); append(le32: dataLen)
+        wav.append(pcm)
+
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = dir.appendingPathComponent("backfill-\(Int(Date().timeIntervalSince1970)).wav")
+        do {
+            try wav.write(to: url)
+            Self.logger.info("Debug backfill WAV written: \(url.path, privacy: .public) bytes=\(pcm.count, privacy: .public)")
+        } catch {
+            Self.logger.warning("Debug backfill WAV write failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        if Self.debugPlayBackfillAfterSending {
+            do {
+                let player = try AVAudioPlayer(data: wav)
+                player.prepareToPlay()
+                player.play()
+                debugBackfillPlayer = player // retain so it isn't deallocated mid-playback
+                Self.logger.info("Debug backfill playback started; duration=\(player.duration, privacy: .public)s")
+            } catch {
+                Self.logger.warning("Debug backfill playback failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func finishAfterServerDone() async {
@@ -219,30 +283,13 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         )
         for batch in backfill.batches {
             try Task.checkCancellation()
+            if Self.debugDumpBackfillWAV { debugBackfillPCM.append(batch) }
             try sendRealtimeEvent([
                 "type": "input_audio_buffer.append",
                 "audio": batch.base64EncodedString(),
             ])
         }
         return RealtimeStartupAudioBackfillSummary(backfill)
-    }
-
-    private func sendStartupAudioBackfillUntilCaughtUp() async throws -> RealtimeStartupAudioBackfillSummary {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: Self.startupBackfillCatchUpTimeout)
-        var summary = RealtimeStartupAudioBackfillSummary()
-        while true {
-            summary.merge(try await sendStartupAudioBackfill())
-            try Task.checkCancellation()
-            guard clock.now < deadline else {
-                Self.logger.info("Startup audio backfill catch-up timeout reached")
-                return summary
-            }
-            try await Task.sleep(for: .milliseconds(20))
-            guard let startupCapture, await startupCapture.hasBufferedAudio else {
-                return summary
-            }
-        }
     }
 
     private func sendRealtimeEvent(_ payload: [String: Any]) throws {
@@ -462,12 +509,6 @@ private final class RealtimeStartupAudioCapture {
         Self.logger.info("Startup capture engine started")
     }
 
-    var hasBufferedAudio: Bool {
-        get async {
-            await store.hasBufferedAudio
-        }
-    }
-
     func drainBackfill() async -> RealtimeStartupAudioBackfill {
         await store.drainBackfill()
     }
@@ -551,6 +592,8 @@ private struct RealtimeStartupAudioBackfill: Sendable {
     var totalChunks: Int
     var speechChunks: Int
     var totalDuration: TimeInterval
+    /// Duration actually sent after trimming surrounding silence.
+    var sentDuration: TimeInterval
 
     var byteCount: Int {
         batches.reduce(0) { $0 + $1.count }
@@ -563,6 +606,7 @@ private struct RealtimeStartupAudioBackfillSummary: Sendable {
     var sourceChunks = 0
     var speechChunks = 0
     var sourceDuration: TimeInterval = 0
+    var sentDuration: TimeInterval = 0
 
     init() {}
 
@@ -572,6 +616,7 @@ private struct RealtimeStartupAudioBackfillSummary: Sendable {
         sourceChunks = backfill.totalChunks
         speechChunks = backfill.speechChunks
         sourceDuration = backfill.totalDuration
+        sentDuration = backfill.sentDuration
     }
 
     mutating func merge(_ other: RealtimeStartupAudioBackfillSummary) {
@@ -580,6 +625,7 @@ private struct RealtimeStartupAudioBackfillSummary: Sendable {
         sourceChunks += other.sourceChunks
         speechChunks += other.speechChunks
         sourceDuration += other.sourceDuration
+        sentDuration += other.sentDuration
     }
 }
 
@@ -593,13 +639,16 @@ private actor RealtimeStartupAudioBackfillStore {
     private var chunks: [Chunk] = []
     private var totalDuration: TimeInterval = 0
 
-    private static let maximumBufferedDuration: TimeInterval = 8
+    /// Safety ceiling only — high enough that a slow connect never evicts the
+    /// user's opening words (the bug that made backfill replay silence). The
+    /// speech-trim on drain is what actually bounds what we send.
+    private static let maximumBufferedDuration: TimeInterval = 120
     private static let speechThreshold: Float = 0.0015
+    /// Audio kept before the first / after the last speech chunk, so we don't
+    /// clip onsets or tails when trimming the surrounding silence.
+    private static let preRollDuration: TimeInterval = 0.3
+    private static let tailDuration: TimeInterval = 0.4
     private static let maxBatchBytes = 48_000
-
-    var hasBufferedAudio: Bool {
-        !chunks.isEmpty
-    }
 
     func append(data: Data, duration: TimeInterval, rms: Float) {
         chunks.append(Chunk(
@@ -624,13 +673,44 @@ private actor RealtimeStartupAudioBackfillStore {
         let totalChunks = chunks.count
         let totalDuration = chunks.reduce(0) { $0 + $1.duration }
         let speechChunks = chunks.count { $0.isSpeech }
-        let batches = Self.batches(from: chunks.map(\.data))
+        let trimmed = trimmedToSpeech(chunks)
+        let batches = Self.batches(from: trimmed.map(\.data))
         return RealtimeStartupAudioBackfill(
             batches: batches,
             totalChunks: totalChunks,
             speechChunks: speechChunks,
-            totalDuration: totalDuration
+            totalDuration: totalDuration,
+            sentDuration: trimmed.reduce(0) { $0 + $1.duration }
         )
+    }
+
+    /// Returns the contiguous run from `preRollDuration` before the first speech
+    /// chunk to `tailDuration` after the last, dropping the silence on either
+    /// side. The run is contiguous, so inter-word pauses are preserved (no
+    /// splicing that would distort timing). Falls back to the whole buffer when
+    /// no chunk reads as speech, so a mis-tuned threshold never sends nothing.
+    private func trimmedToSpeech(_ chunks: [Chunk]) -> [Chunk] {
+        guard let firstSpeech = chunks.firstIndex(where: \.isSpeech),
+              let lastSpeech = chunks.lastIndex(where: \.isSpeech)
+        else {
+            return chunks
+        }
+
+        var start = firstSpeech
+        var preRoll = 0.0
+        while start > 0, preRoll < Self.preRollDuration {
+            start -= 1
+            preRoll += chunks[start].duration
+        }
+
+        var end = lastSpeech
+        var tail = 0.0
+        while end < chunks.count - 1, tail < Self.tailDuration {
+            end += 1
+            tail += chunks[end].duration
+        }
+
+        return Array(chunks[start ... end])
     }
 
     private static func batches(from chunks: [Data]) -> [Data] {
