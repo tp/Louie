@@ -51,6 +51,11 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
     private static let doneDrainDelay: Duration = .milliseconds(1500)
     private static let dataChannelOpenTimeout: Duration = .seconds(3)
     private static let dataChannelDrainTimeout: Duration = .seconds(2)
+    private static let iceConnectTimeout: Duration = .seconds(20)
+    /// Set when the peer connection is created; all connectivity-state log lines
+    /// report their elapsed time relative to this, so the connection timeline
+    /// (ICE gathering → ICE connected → data channel open) is visible.
+    private var connectStart: ContinuousClock.Instant?
 
     init(startupAudioBackfillEnabled: Bool = false) {
         self.startupAudioBackfillEnabled = startupAudioBackfillEnabled
@@ -68,6 +73,8 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         if startupCapture == nil {
             try configureAudioSession()
         }
+
+        connectStart = ContinuousClock().now
 
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
@@ -346,6 +353,39 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         }
     }
 
+    /// Awaits the ICE connection reaching `connected`/`completed` — i.e. the
+    /// media path (audio return channel) is actually live, not merely that the
+    /// answer was applied. Returns on timeout so a slow/failed connect still
+    /// proceeds (and is visible in the enclosing span / logs).
+    func waitUntilConnected() async throws {
+        guard let peerConnection else {
+            throw WebRTCRealtimeVoiceTransportError.peerConnectionUnavailable
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: Self.iceConnectTimeout)
+        while true {
+            switch peerConnection.iceConnectionState {
+            case .connected, .completed:
+                return
+            default:
+                break
+            }
+            try Task.checkCancellation()
+            guard clock.now < deadline else {
+                Self.logger.info("Proceeding before ICE connection established; state=\(peerConnection.iceConnectionState.rawValue, privacy: .public)")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    /// Logs a connectivity-state transition with its elapsed time since the peer
+    /// connection was created, so the connect timeline is reconstructable.
+    private func logConnectivity(_ kind: String, rawState: Int, at instant: ContinuousClock.Instant) {
+        let elapsed = connectStart.map { String(describing: $0.duration(to: instant)) } ?? "n/a"
+        Self.logger.info("WebRTC \(kind, privacy: .public) state=\(rawState, privacy: .public) elapsed=\(elapsed, privacy: .public)")
+    }
+
     private func waitForIceGatheringComplete(on peerConnection: RTCPeerConnection) async {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(2))
@@ -368,8 +408,16 @@ extension WebRTCRealtimeVoiceTransport: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_: RTCPeerConnection, didAdd _: RTCMediaStream) {}
     nonisolated func peerConnection(_: RTCPeerConnection, didRemove _: RTCMediaStream) {}
     nonisolated func peerConnectionShouldNegotiate(_: RTCPeerConnection) {}
-    nonisolated func peerConnection(_: RTCPeerConnection, didChange _: RTCIceConnectionState) {}
-    nonisolated func peerConnection(_: RTCPeerConnection, didChange _: RTCIceGatheringState) {}
+    nonisolated func peerConnection(_: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        let now = ContinuousClock().now
+        Task { @MainActor [weak self] in self?.logConnectivity("ice_connection", rawState: newState.rawValue, at: now) }
+    }
+
+    nonisolated func peerConnection(_: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        let now = ContinuousClock().now
+        Task { @MainActor [weak self] in self?.logConnectivity("ice_gathering", rawState: newState.rawValue, at: now) }
+    }
+
     nonisolated func peerConnection(_: RTCPeerConnection, didGenerate _: RTCIceCandidate) {}
     nonisolated func peerConnection(_: RTCPeerConnection, didRemove _: [RTCIceCandidate]) {}
     nonisolated func peerConnection(_: RTCPeerConnection, didOpen _: RTCDataChannel) {}
@@ -377,7 +425,9 @@ extension WebRTCRealtimeVoiceTransport: RTCPeerConnectionDelegate {
 
 extension WebRTCRealtimeVoiceTransport: RTCDataChannelDelegate {
     nonisolated func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
-        Self.logger.debug("Realtime data channel state changed: \(dataChannel.readyState.rawValue, privacy: .public)")
+        let now = ContinuousClock().now
+        let rawState = dataChannel.readyState.rawValue
+        Task { @MainActor [weak self] in self?.logConnectivity("data_channel", rawState: rawState, at: now) }
     }
 
     nonisolated func dataChannel(_: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {

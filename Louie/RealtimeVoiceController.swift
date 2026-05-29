@@ -147,6 +147,13 @@ final class RealtimeVoiceController {
                 throw error
             }
             try Task.checkCancellation()
+            // Time from sending the offer until the backend returns the SDP
+            // answer — the round-trip that sets up the OpenAI realtime session
+            // (and pays any cold-start cost). Finished when the answer arrives.
+            let awaitAnswerSpan = sessionTransaction?.startChild(
+                operation: "backend.await_answer",
+                description: "Await SDP answer (backend + OpenAI realtime session setup)",
+            )
             try await client.sendHello(
                 sessionId: UUID().uuidString,
                 sdpOffer: offer,
@@ -161,6 +168,7 @@ final class RealtimeVoiceController {
                 try Task.checkCancellation()
                 switch message {
                 case let .sdpAnswer(sdp, callId):
+                    awaitAnswerSpan?.finish()
                     let applyAnswerSpan = sessionTransaction?.startChild(
                         operation: "webrtc.apply_answer",
                         description: "Apply remote SDP answer",
@@ -173,6 +181,20 @@ final class RealtimeVoiceController {
                         throw CancellationError()
                     } catch {
                         applyAnswerSpan?.finish(status: .internalError)
+                        throw error
+                    }
+                    let iceConnectSpan = sessionTransaction?.startChild(
+                        operation: "webrtc.ice_connect",
+                        description: "Await ICE/DTLS connection (audio return channel live)",
+                    )
+                    do {
+                        try await transport.waitUntilConnected()
+                        iceConnectSpan?.finish()
+                    } catch is CancellationError {
+                        iceConnectSpan?.finish(status: .cancelled)
+                        throw CancellationError()
+                    } catch {
+                        iceConnectSpan?.finish(status: .internalError)
                         throw error
                     }
                     if Self.startupAudioBackfillEnabled {
