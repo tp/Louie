@@ -127,7 +127,7 @@ final class WebRTCRealtimeVoiceTransport: NSObject {
         do {
             try await waitForDataChannelOpen(timeout: Self.dataChannelOpenTimeout)
             summary.merge(try await sendStartupAudioBackfillUntilCaughtUp())
-            startupCapture?.stop()
+            await startupCapture?.finishCapturing()
             summary.merge(try await sendStartupAudioBackfill(logEmptyDrain: false))
             try await waitForDataChannelToDrain(timeout: Self.dataChannelDrainTimeout)
         } catch is CancellationError {
@@ -344,9 +344,22 @@ extension WebRTCRealtimeVoiceTransport: RTCDataChannelDelegate {
 
 @MainActor
 private final class RealtimeStartupAudioCapture {
+    /// Captured PCM16 chunk, carried in order from the audio tap to the store.
+    private struct Chunk: Sendable {
+        var data: Data
+        var duration: TimeInterval
+        var rms: Float
+    }
+
     private let store = RealtimeStartupAudioBackfillStore()
     private var audioEngine: AVAudioEngine?
     private var didLogFirstTap = false
+    /// The audio tap runs on a realtime thread and yields here synchronously,
+    /// so chunks reach `store` in strict capture order; a single consumer task
+    /// drains the stream. This replaces per-buffer `Task { await … }` spawning,
+    /// whose completion order is not guaranteed and scrambled the audio.
+    private var captureContinuation: AsyncStream<Chunk>.Continuation?
+    private var consumerTask: Task<Void, Never>?
     private nonisolated static let logger = Logger(subsystem: "Louie", category: "RealtimeStartupAudioCapture")
 
     private static let sampleRate = 24000.0
@@ -398,7 +411,19 @@ private final class RealtimeStartupAudioCapture {
             nativeFormat == targetFormat
                 ? nil
                 : AVAudioConverter(from: nativeFormat, to: targetFormat)
+
+        // Wire the ordered capture pipeline before installing the tap so no
+        // early buffer is dropped: the tap yields chunks in order and a single
+        // consumer appends them to the store in that same order.
+        let (stream, continuation) = AsyncStream<Chunk>.makeStream()
+        captureContinuation = continuation
         let store = store
+        consumerTask = Task {
+            for await chunk in stream {
+                await store.append(data: chunk.data, duration: chunk.duration, rms: chunk.rms)
+            }
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { buffer, _ in
             let converted: AVAudioPCMBuffer?
             if let converter {
@@ -416,15 +441,13 @@ private final class RealtimeStartupAudioCapture {
 
             let duration = Double(converted.frameLength) / converted.format.sampleRate
             let rms = Self.computeRMS(buffer)
+            continuation.yield(Chunk(data: data, duration: duration, rms: rms))
             Task { @MainActor [weak self] in
                 guard let self, !didLogFirstTap else { return }
                 didLogFirstTap = true
                 Self.logger.info(
                     "Startup capture received first buffer; frames=\(converted.frameLength, privacy: .public) rms=\(rms, privacy: .public)"
                 )
-            }
-            Task {
-                await store.append(data: data, duration: duration, rms: rms)
             }
         }
 
@@ -449,11 +472,29 @@ private final class RealtimeStartupAudioCapture {
         await store.drainBackfill()
     }
 
+    /// Stops capture and waits for every already-captured chunk to land in the
+    /// store, so a subsequent `drainBackfill()` sees the complete tail. Use
+    /// this on the flush path; `stop()` is the synchronous teardown.
+    func finishCapturing() async {
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine = nil
+        didLogFirstTap = false
+        captureContinuation?.finish()
+        captureContinuation = nil
+        await consumerTask?.value
+        consumerTask = nil
+    }
+
     func stop() {
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine = nil
         didLogFirstTap = false
+        captureContinuation?.finish()
+        captureContinuation = nil
+        consumerTask?.cancel()
+        consumerTask = nil
     }
 
     private static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data? {
@@ -510,7 +551,6 @@ private struct RealtimeStartupAudioBackfill: Sendable {
     var totalChunks: Int
     var speechChunks: Int
     var totalDuration: TimeInterval
-    var trimmedDuration: TimeInterval
 
     var byteCount: Int {
         batches.reduce(0) { $0 + $1.count }
@@ -555,8 +595,6 @@ private actor RealtimeStartupAudioBackfillStore {
 
     private static let maximumBufferedDuration: TimeInterval = 8
     private static let speechThreshold: Float = 0.0015
-    private static let preRollDuration: TimeInterval = 0.24
-    private static let tailDuration: TimeInterval = 0.36
     private static let maxBatchBytes = 48_000
 
     var hasBufferedAudio: Bool {
@@ -586,46 +624,13 @@ private actor RealtimeStartupAudioBackfillStore {
         let totalChunks = chunks.count
         let totalDuration = chunks.reduce(0) { $0 + $1.duration }
         let speechChunks = chunks.count { $0.isSpeech }
-        let outputChunks = chunks
-        let batches = Self.batches(from: outputChunks.map(\.data))
+        let batches = Self.batches(from: chunks.map(\.data))
         return RealtimeStartupAudioBackfill(
             batches: batches,
             totalChunks: totalChunks,
             speechChunks: speechChunks,
-            totalDuration: totalDuration,
-            trimmedDuration: outputChunks.reduce(0) { $0 + $1.duration }
+            totalDuration: totalDuration
         )
-    }
-
-    private func speechTrimmedChunks() -> [Chunk] {
-        let speechIndices = chunks.indices.filter { chunks[$0].isSpeech }
-        guard !speechIndices.isEmpty else { return [] }
-
-        var selected = Set<Int>()
-        for speechIndex in speechIndices {
-            selected.insert(speechIndex)
-
-            var preRoll = 0.0
-            var index = chunks.index(before: speechIndex)
-            while index >= chunks.startIndex, preRoll < Self.preRollDuration {
-                selected.insert(index)
-                preRoll += chunks[index].duration
-                if index == chunks.startIndex { break }
-                index = chunks.index(before: index)
-            }
-
-            var tail = 0.0
-            index = chunks.index(after: speechIndex)
-            while index < chunks.endIndex, tail < Self.tailDuration {
-                selected.insert(index)
-                tail += chunks[index].duration
-                index = chunks.index(after: index)
-            }
-        }
-
-        return chunks.indices
-            .filter { selected.contains($0) }
-            .map { chunks[$0] }
     }
 
     private static func batches(from chunks: [Data]) -> [Data] {
