@@ -48,13 +48,13 @@ final class TimedLogger {
             let sincePrev = Int((now.timeIntervalSince(last) * 1000).rounded())
             let sinceStart = Int((now.timeIntervalSince(first) * 1000).rounded())
             logger.info(
-                "[\(label, privacy: .public)] \(name, privacy: .public) @ \(timestamp, privacy: .public) (+\(sincePrev)ms, total \(sinceStart)ms)\(detailSuffix, privacy: .public)",
+                "[\(self.label, privacy: .public)] \(name, privacy: .public) @ \(timestamp, privacy: .public) (+\(sincePrev)ms, total \(sinceStart)ms)\(detailSuffix, privacy: .public)",
             )
         } else {
             firstEventAt = now
             lastEventAt = now
             logger.info(
-                "[\(label, privacy: .public)] \(name, privacy: .public) @ \(timestamp, privacy: .public) (start)\(detailSuffix, privacy: .public)",
+                "[\(self.label, privacy: .public)] \(name, privacy: .public) @ \(timestamp, privacy: .public) (start)\(detailSuffix, privacy: .public)",
             )
             return
         }
