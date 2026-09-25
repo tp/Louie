@@ -25,6 +25,8 @@ struct ConnectionGateView: View {
     /// Detailed connecting card (error copy + actions) instead of the splash.
     @State private var isExpanded = false
     @State private var isShowingHelp = false
+    /// Splash content (wordmark, card) faded out; backdrop still opaque.
+    @State private var splashFaded = false
     /// Overlay fully dismissed; the app stands alone.
     @State private var overlayDone = false
     @Environment(\.scenePhase) private var scenePhase
@@ -60,14 +62,24 @@ struct ConnectionGateView: View {
             }
             hasConnected = true
             // Let the app render its first frame beneath the splash, then
-            // crossfade to reveal it.
+            // reveal it in two quick steps: the wordmark fades over the
+            // still-solid backdrop first, then the backdrop fades away — so
+            // the wordmark is never semi-transparent over app content.
             Task {
                 do {
                     try await Task.sleep(for: .milliseconds(200))
                 } catch {
                     return
                 }
-                withAnimation(.easeInOut(duration: 0.45)) {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    splashFaded = true
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(180))
+                } catch {
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.3)) {
                     overlayDone = true
                 }
             }
@@ -147,35 +159,40 @@ struct ConnectionGateView: View {
             Color(white: 0.97)
                 .ignoresSafeArea()
 
-            if linn == nil {
-                VStack(spacing: 28) {
-                    header
-                    addressCard
-                    helpLink
-                }
-                .padding(28)
-                .frame(maxWidth: 440)
-            } else if isExpanded {
-                VStack(spacing: 28) {
-                    header
-                    connectingCard
-                    helpLink
-                }
-                .padding(28)
-                .frame(maxWidth: 440)
-            } else {
-                // Splash: wordmark + spinner, nothing else.
-                VStack(spacing: 36) {
-                    WordmarkViewport(width: 180)
-                        .frame(width: 152)
+            Group {
+                if linn == nil {
+                    VStack(spacing: 28) {
+                        header
+                        addressCard
+                        helpLink
+                    }
+                    .padding(28)
+                    .frame(maxWidth: 440)
+                } else if isExpanded {
+                    VStack(spacing: 28) {
+                        header
+                        connectingCard
+                        helpLink
+                    }
+                    .padding(28)
+                    .frame(maxWidth: 440)
+                } else {
+                    // Splash: wordmark + spinner, nothing else.
+                    VStack(spacing: 36) {
+                        WordmarkViewport(width: 180)
+                            .frame(width: 152)
 
-                    ProgressView()
-                        .controlSize(.large)
-                        .opacity(hasConnected ? 0 : 1)
-                        .animation(.easeOut(duration: 0.15), value: hasConnected)
+                        ProgressView()
+                            .controlSize(.large)
+                            .opacity(hasConnected ? 0 : 1)
+                            .animation(.easeOut(duration: 0.15), value: hasConnected)
+                    }
+                    .offset(y: -24)
                 }
-                .offset(y: -24)
             }
+            // Fades ahead of the backdrop during the reveal, so the wordmark
+            // (or card) is gone before any app content shows through.
+            .opacity(splashFaded ? 0 : 1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
