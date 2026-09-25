@@ -1236,6 +1236,12 @@ func unknownSizeAdditionsAndFailuresLeaveTheCountToTheDevice() async throws {
     linn.play(artist, placement: .last)
     #expect(linn.remainingQueueCount == 1)
 
+    // A replace of unknown size voids earlier anticipated additions.
+    linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
+    #expect(linn.remainingQueueCount == 2)
+    linn.play(artist, placement: .replace)
+    #expect(linn.remainingQueueCount == 1)
+
     await gateway.failMediaSelections()
     linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .last)
     #expect(linn.remainingQueueCount == 2)

@@ -546,6 +546,10 @@ public final class Linn {
         let previewGeneration = startsPlaying ? previewMediaSelection(item) : nil
         if let trackCount = queuedTrackCount(for: item) {
             anticipateQueueLength(adding: trackCount, placement: placement)
+        } else if startsPlaying {
+            // An unknown number of songs now leads (or replaces) the queue,
+            // so earlier anticipated additions no longer say what's left.
+            pendingQueueLength = nil
         }
 
         performControl(onFailure: { [weak self] in
