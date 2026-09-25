@@ -30,14 +30,23 @@ struct ConnectionGateView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        ZStack {
-            if let linn, hasConnected {
+        Group {
+            // ContentView mounts as soon as Linn exists, not on connect: the
+            // window chrome (titlebar, toolbar, sidebar toggle) belongs to
+            // its NavigationSplitView, and installing it later grows the safe
+            // area and pushes everything down mid-reveal. The splash is an
+            // overlay of ContentView — same geometry, drawn above it — so
+            // the crossfade only ever unveils content, never moves it.
+            if let linn {
                 ContentView(linn: linn)
-            }
-
-            if !overlayDone {
+                    .overlay {
+                        if !overlayDone {
+                            gateOverlay
+                                .transition(.opacity)
+                        }
+                    }
+            } else {
                 gateOverlay
-                    .transition(.opacity)
             }
         }
         .onAppear {
