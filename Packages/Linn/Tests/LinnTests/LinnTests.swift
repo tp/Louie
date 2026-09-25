@@ -1247,7 +1247,7 @@ func playingAnUnbrowsedAlbumCountsItsReportedTracks() async throws {
 
 @Test
 @MainActor
-func unknownSizeAdditionsAndFailuresLeaveTheCountToTheDevice() async throws {
+func unknownSizeCommandsLeaveTheCountToTheDevice() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
 
@@ -1261,19 +1261,60 @@ func unknownSizeAdditionsAndFailuresLeaveTheCountToTheDevice() async throws {
     linn.play(artist, placement: .last)
     #expect(linn.remainingQueueCount == 1)
 
-    // A replace of unknown size voids earlier anticipated additions.
+    // A replace of unknown size voids earlier anticipated additions, and
+    // later ones can't be counted on top of a queue that's about to go.
     linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
     #expect(linn.remainingQueueCount == 2)
     linn.play(artist, placement: .replace)
     #expect(linn.remainingQueueCount == 1)
+    linn.play(Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"), placement: .last)
+    #expect(linn.remainingQueueCount == 1)
+}
 
-    await gateway.failMediaSelections()
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .last)
-    #expect(linn.remainingQueueCount == 2)
+@Test
+@MainActor
+func aFailedAdditionTakesBackOnlyItsOwnTracks() async throws {
+    let gateway = TestGateway()
+    await gateway.failMediaSelections(for: ["track-a"])
+    let linn = Linn(gateway: gateway)
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"]))
+    try await waitUntil {
+        linn.remainingQueueCount == 1
+    }
+
+    linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
+    linn.play(Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"), placement: .last)
+    #expect(linn.remainingQueueCount == 3)
+
     try await waitUntil {
         linn.lastErrorMessage != nil
     }
-    #expect(linn.remainingQueueCount == 1)
+    #expect(linn.remainingQueueCount == 2)
+}
+
+@Test
+@MainActor
+func aFailedReplaceDoesNotUndoTheNewerOne() async throws {
+    let gateway = TestGateway()
+    await gateway.failMediaSelections(for: ["album-first"])
+    let linn = Linn(gateway: gateway)
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two", "Three", "Four"]))
+    try await waitUntil {
+        linn.remainingQueueCount == 4
+    }
+
+    linn.play(Linn.LibraryItem(id: "album-first", kind: "md.album.qobuz", title: "First", childCount: 9), placement: .replace)
+    linn.play(Linn.LibraryItem(id: "album-second", kind: "md.album.qobuz", title: "Second", childCount: 3), placement: .replace)
+    #expect(linn.remainingQueueCount == 2)
+
+    try await waitUntil {
+        linn.lastErrorMessage != nil
+    }
+    #expect(linn.remainingQueueCount == 2)
 }
 
 private let threeTrackAlbumPage = CiGateway.MediaPage(
@@ -1314,6 +1355,7 @@ private actor TestGateway: LinnGateway {
     private var shouldSuspendSelections = false
     private var suspendedSelections: [CheckedContinuation<Void, Never>] = []
     private var shouldFailMediaSelections = false
+    private var failingMediaIDs: Set<String> = []
     private var shouldSuspendMediaServices = false
     private var suspendedMediaServices: [CheckedContinuation<Void, Never>] = []
     private var services: [CiGateway.MediaService] = []
@@ -1400,9 +1442,13 @@ private actor TestGateway: LinnGateway {
 
     func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
         selectedMedia.append(SelectedMediaItem(mediaID: mediaID, room: room, queue: queue))
-        if shouldFailMediaSelections {
+        if shouldFailMediaSelections || failingMediaIDs.contains(mediaID) {
             throw MediaSelectionFailed()
         }
+    }
+
+    func failMediaSelections(for mediaIDs: Set<String>) {
+        failingMediaIDs.formUnion(mediaIDs)
     }
 
     func failMediaSelections() {

@@ -96,9 +96,9 @@ public final class Linn {
     /// including library additions the device hasn't reported yet.
     public var remainingQueueCount: Int {
         let effectiveCurrentIndex = pendingQueueIndex ?? playlist.currentIndex
-        if let pendingQueueLength {
+        if let pendingQueueLength, let total = pendingQueueLength.total {
             let currentIndex = pendingQueueLength.currentIndex ?? effectiveCurrentIndex ?? -1
-            return max(0, pendingQueueLength.total - currentIndex - 1)
+            return max(0, total - currentIndex - 1)
         }
 
         guard let total = playlist.total else {
@@ -125,6 +125,7 @@ public final class Linn {
     }
 
     private var pendingQueueLength: PendingQueueLength?
+    @ObservationIgnored private var queueCommandGeneration = 0
     private var optimisticPlayState: OptimisticPlayState?
     private var optimisticVolume: OptimisticVolume?
     private var optimisticMute: OptimisticMute?
@@ -171,7 +172,10 @@ public final class Linn {
     /// Queue length the device will report once library items it was just
     /// sent land, so the queue count responds right away.
     private struct PendingQueueLength {
-        var total: Int
+        /// Nil once a replace or play-now of unknown size was sent: the count
+        /// follows the device until its new queue shows up, and additions
+        /// can't be counted on top of the old one.
+        var total: Int?
         /// Where the new queue starts playing, for a replace or play-now.
         /// Nil for additions, which count from wherever playback is.
         var currentIndex: Int?
@@ -179,6 +183,9 @@ public final class Linn {
         /// tells the swapped queue apart from the old one.
         var requiresNewRevision: Bool
         var revisionAtRequest: Int?
+        /// The replace this count is built on. Additions sent before it were
+        /// discarded with the old queue, so their failure changes nothing.
+        var replaceCommand: Int?
         var expiresAt: Date
     }
 
@@ -544,16 +551,13 @@ public final class Linn {
 
         let startsPlaying = placement == .replace || placement == .now
         let previewGeneration = startsPlaying ? previewMediaSelection(item) : nil
-        if let trackCount = queuedTrackCount(for: item) {
-            anticipateQueueLength(adding: trackCount, placement: placement)
-        } else if startsPlaying {
-            // An unknown number of songs now leads (or replaces) the queue,
-            // so earlier anticipated additions no longer say what's left.
-            pendingQueueLength = nil
-        }
+        queueCommandGeneration += 1
+        let command = queueCommandGeneration
+        let trackCount = queuedTrackCount(for: item)
+        anticipateQueueLength(adding: trackCount, placement: placement, command: command)
 
         performControl(onFailure: { [weak self] in
-            self?.pendingQueueLength = nil
+            self?.retractQueueLength(adding: trackCount, placement: placement, command: command)
             if let previewGeneration {
                 self?.revertMediaSelectionPreview(generation: previewGeneration)
             }
@@ -1152,32 +1156,65 @@ public final class Linn {
         return nil
     }
 
-    private func anticipateQueueLength(adding trackCount: Int, placement: QueuePlacement) {
+    private func anticipateQueueLength(adding trackCount: Int?, placement: QueuePlacement, command: Int) {
         let expiresAt = Date().addingTimeInterval(6)
-        guard placement != .replace else {
+        if placement == .replace {
             pendingQueueLength = PendingQueueLength(
                 total: trackCount,
-                currentIndex: 0,
+                currentIndex: trackCount.map { _ in 0 },
                 requiresNewRevision: true,
                 revisionAtRequest: playlistContentRevision,
+                replaceCommand: command,
                 expiresAt: expiresAt
             )
+            return
+        }
+        // An addition of unknown size only delays the count until the device
+        // reports it; one that starts playing changes what's left.
+        if trackCount == nil, placement != .now {
             return
         }
 
         // Additions stack on anything still pending.
         let pending = pendingQueueLength
+        let baseTotal = pending.map(\.total) ?? playlist.total ?? 0
         var currentIndex = pending?.currentIndex
         if placement == .now {
             currentIndex = (currentIndex ?? pendingQueueIndex ?? playlist.currentIndex ?? -1) + 1
         }
         pendingQueueLength = PendingQueueLength(
-            total: (pending?.total ?? playlist.total ?? 0) + trackCount,
+            total: baseTotal.flatMap { total in trackCount.map { total + $0 } },
             currentIndex: currentIndex,
-            requiresNewRevision: pending?.requiresNewRevision ?? false,
+            requiresNewRevision: pending?.requiresNewRevision ?? (trackCount == nil),
             revisionAtRequest: pending?.revisionAtRequest ?? playlistContentRevision,
+            replaceCommand: pending?.replaceCommand,
             expiresAt: expiresAt
         )
+    }
+
+    /// Takes a failed command's share back out of the anticipated count.
+    private func retractQueueLength(adding trackCount: Int?, placement: QueuePlacement, command: Int) {
+        guard var pending = pendingQueueLength else {
+            return
+        }
+
+        switch placement {
+        case .replace:
+            // A newer replace owns the count now.
+            if pending.replaceCommand == command {
+                pendingQueueLength = nil
+            }
+        case .now:
+            // It also moved where the count starts; the device's is safe.
+            pendingQueueLength = nil
+        case .next, .last:
+            let stillCounted = pending.replaceCommand.map { command > $0 } ?? true
+            guard stillCounted, let trackCount, let total = pending.total else {
+                return
+            }
+            pending.total = total - trackCount
+            pendingQueueLength = pending
+        }
     }
 
     private func reconcilePendingQueueLength() {
@@ -1185,7 +1222,7 @@ public final class Linn {
             return
         }
 
-        let landed = playlist.total == pending.total
+        let landed = (pending.total == nil || playlist.total == pending.total)
             && (!pending.requiresNewRevision || playlistContentRevision != pending.revisionAtRequest)
         if landed || Date() >= pending.expiresAt {
             pendingQueueLength = nil
