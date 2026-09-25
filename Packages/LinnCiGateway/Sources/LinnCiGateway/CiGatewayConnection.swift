@@ -532,6 +532,11 @@ actor CiGatewayConnection {
         }
 
         try await ensureConnected(preferredRoom: stream.preferredRoom, updateInterval: stream.updateInterval, subscribe: true)
+        // A drop handled while this was suspended tore the connection down
+        // without starting another loop, since this one was still running.
+        guard socket != nil, session != nil, subscription != nil else {
+            throw CiGateway.GatewayError.missingSession
+        }
         reconnectTask = nil
 
         if let current {
