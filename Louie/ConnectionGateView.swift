@@ -8,11 +8,11 @@
 //  the user decides, connects fail and this view keeps retrying, so a grant
 //  is picked up automatically and the app appears.
 //
-//  With a known address the gate is a quiet splash (wordmark + spinner);
-//  the detailed card with troubleshooting only appears when a connection
-//  attempt fails or takes suspiciously long. On success the splash wordmark
-//  flies into the Home header's wordmark (frame published via
-//  WordmarkFramePreferenceKey) before the overlay dissolves.
+//  With a known address the gate is a quiet splash — wordmark + spinner,
+//  crossfading into the loaded app on success. The detailed card
+//  (troubleshooting copy and actions) appears only when connecting exceeds
+//  a grace period; transient failures during the permission prompt stay
+//  silent while the retry loop works.
 //
 
 import Linn
@@ -25,33 +25,14 @@ struct ConnectionGateView: View {
     /// Detailed connecting card (error copy + actions) instead of the splash.
     @State private var isExpanded = false
     @State private var isShowingHelp = false
-    /// Live global frame of Home's wordmark, once the app has laid out beneath.
-    @State private var homeWordmarkFrame: CGRect?
-    /// Frame captured at flight start. The live frame drifts while the split
-    /// view settles its entrance layout; flying at a moving target redirects
-    /// mid-flight and lands beside the real wordmark.
-    @State private var flightTargetGlobal: CGRect?
-    /// Debounce for "the frame has stopped moving".
-    @State private var stabilizeTask: Task<Void, Never>?
-    /// Wordmark handoff animation is running (splash → Home position).
-    @State private var isFlying = false
-    /// Splash background, faded out separately after the wordmark lands.
-    @State private var backgroundOpacity = 1.0
     /// Overlay fully dismissed; the app stands alone.
     @State private var overlayDone = false
     @Environment(\.scenePhase) private var scenePhase
-
-    private let splashWordmarkWidth: CGFloat = 180
-    private let homeWordmarkWidth: CGFloat = 200
 
     var body: some View {
         ZStack {
             if let linn, hasConnected {
                 ContentView(linn: linn)
-                    .onPreferenceChange(WordmarkFramePreferenceKey.self) { frame in
-                        homeWordmarkFrame = frame
-                        scheduleHandoffWhenStable()
-                    }
             }
 
             if !overlayDone {
@@ -65,13 +46,20 @@ struct ConnectionGateView: View {
             }
         }
         .onChange(of: linn?.connectionState) { _, state in
-            if state == .connected, !hasConnected {
-                hasConnected = true
-                scheduleHandoffWhenStable()
+            guard state == .connected, !hasConnected else {
+                return
             }
-            if case .failed = state {
-                withAnimation(.snappy) {
-                    isExpanded = true
+            hasConnected = true
+            // Let the app render its first frame beneath the splash, then
+            // crossfade to reveal it.
+            Task {
+                do {
+                    try await Task.sleep(for: .milliseconds(200))
+                } catch {
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.45)) {
+                    overlayDone = true
                 }
             }
         }
@@ -91,11 +79,13 @@ struct ConnectionGateView: View {
             }
             linn.start()
 
-            // Escalate from splash to the detailed card if connecting takes
-            // suspiciously long (permission prompt pending, device booting).
+            // Escalate from splash to the detailed card only when connecting
+            // takes suspiciously long (permission prompt pending, device
+            // booting, wrong address). Transient failures stay silent — the
+            // retry loop below keeps working behind the splash.
             let escalation = Task {
                 do {
-                    try await Task.sleep(for: .seconds(5))
+                    try await Task.sleep(for: .seconds(6))
                 } catch {
                     return
                 }
@@ -114,7 +104,7 @@ struct ConnectionGateView: View {
                     try await Task.sleep(for: .seconds(3))
                 } catch {
                     // Cancelled — Change Address swapped `linn` out (or the
-                    // view is going away). A swallowed `try?` here would fall
+                    // view is going away). A swallowed `try?` would fall
                     // through once and restart the Linn we just stopped.
                     return
                 }
@@ -139,134 +129,46 @@ struct ConnectionGateView: View {
         linn?.stop()
         linn = nil
         isExpanded = false
-        stabilizeTask?.cancel()
-    }
-
-    /// Kick off the wordmark handoff once Home's wordmark frame has stopped
-    /// moving. Every preference change reschedules the debounce, so the task
-    /// only fires after 200ms of a stable layout — then the frame is captured
-    /// as a constant for the whole flight. Falls back to a plain fade when
-    /// the expanded card is showing or Home never reports a frame.
-    private func scheduleHandoffWhenStable() {
-        guard hasConnected, !isFlying, !overlayDone else {
-            return
-        }
-
-        if isExpanded {
-            withAnimation(.easeOut(duration: 0.3)) {
-                overlayDone = true
-            }
-            return
-        }
-
-        stabilizeTask?.cancel()
-        stabilizeTask = Task {
-            do {
-                try await Task.sleep(for: .milliseconds(200))
-            } catch {
-                return
-            }
-            guard !isFlying, !overlayDone else {
-                return
-            }
-            if let frame = homeWordmarkFrame {
-                beginFlight(to: frame)
-                return
-            }
-            // No frame yet — give Home a little longer; its first report
-            // reschedules this task anyway, so reaching the timeout means
-            // no frame is coming (different landing view, odd layout).
-            do {
-                try await Task.sleep(for: .milliseconds(700))
-            } catch {
-                return
-            }
-            if !isFlying, !overlayDone {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    overlayDone = true
-                }
-            }
-        }
-    }
-
-    private func beginFlight(to globalFrame: CGRect) {
-        flightTargetGlobal = globalFrame
-        withAnimation(.smooth(duration: 0.55)) {
-            isFlying = true
-        } completion: {
-            // Fade only the background: the landed wordmark sits pixel-exact
-            // on Home's, so the final overlay removal happens without any
-            // animation — no second wordmark, no early background reveal.
-            withAnimation(.easeOut(duration: 0.22)) {
-                backgroundOpacity = 0
-            } completion: {
-                overlayDone = true
-            }
-        }
     }
 
     // MARK: - Overlay
 
     private var gateOverlay: some View {
-        GeometryReader { proxy in
-            let localOrigin = proxy.frame(in: .global).origin
+        ZStack {
+            Color(white: 0.97)
+                .ignoresSafeArea()
 
-            ZStack {
-                Color(white: 0.97)
-                    .ignoresSafeArea()
-                    .opacity(backgroundOpacity)
-
-                if linn == nil {
-                    VStack(spacing: 28) {
-                        header
-                        addressCard
-                        helpLink
-                    }
-                    .padding(28)
-                    .frame(maxWidth: 440)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if isExpanded {
-                    VStack(spacing: 28) {
-                        header
-                        connectingCard
-                        helpLink
-                    }
-                    .padding(28)
-                    .frame(maxWidth: 440)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    // Splash: wordmark + spinner, nothing else. The wordmark
-                    // doubles as the handoff animation subject.
-                    let width = proxy.size.width
-                    let height = proxy.size.height
-                    let restingCenter = CGPoint(x: width / 2, y: height * 0.42)
-                    // Fly to the frame captured at flight start, never the
-                    // live one — the entrance layout can still be settling.
-                    let target = flightTargetGlobal.map { frame in
-                        CGRect(
-                            x: frame.minX - localOrigin.x,
-                            y: frame.minY - localOrigin.y,
-                            width: frame.width,
-                            height: frame.height
-                        )
-                    }
-                    let flying = isFlying && target != nil
-                    let wordmarkWidth = flying ? (target?.width ?? homeWordmarkWidth) : splashWordmarkWidth
-                    let center = flying
-                        ? CGPoint(x: target!.midX, y: target!.midY)
-                        : restingCenter
-
-                    WordmarkViewport(width: wordmarkWidth)
-                        .position(center)
+            if linn == nil {
+                VStack(spacing: 28) {
+                    header
+                    addressCard
+                    helpLink
+                }
+                .padding(28)
+                .frame(maxWidth: 440)
+            } else if isExpanded {
+                VStack(spacing: 28) {
+                    header
+                    connectingCard
+                    helpLink
+                }
+                .padding(28)
+                .frame(maxWidth: 440)
+            } else {
+                // Splash: wordmark + spinner, nothing else.
+                VStack(spacing: 36) {
+                    WordmarkViewport(width: 180)
+                        .frame(width: 152)
 
                     ProgressView()
                         .controlSize(.large)
-                        .position(x: width / 2, y: restingCenter.y + 90)
                         .opacity(hasConnected ? 0 : 1)
                         .animation(.easeOut(duration: 0.15), value: hasConnected)
                 }
+                .offset(y: -24)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Pieces

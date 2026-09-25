@@ -5,17 +5,6 @@
 
 import SwiftUI
 
-/// Global frame of the Home wordmark, published up the tree so the
-/// connection splash can fly its wordmark into the exact landing spot
-/// before dissolving (see ConnectionGateView).
-struct WordmarkFramePreferenceKey: PreferenceKey {
-    static nonisolated let defaultValue: CGRect? = nil
-
-    static nonisolated func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-        value = nextValue() ?? value
-    }
-}
-
 /// Cropped viewport over the current PDF asset.
 ///
 /// The source PDF contains extra whitespace below the letters. Until the asset is

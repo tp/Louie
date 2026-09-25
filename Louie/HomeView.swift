@@ -16,8 +16,6 @@ struct HomeView: View {
 
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    @State private var wordmarkGlobalFrame: CGRect?
-
     // iPad (regular size class) has a much smaller system bar than iPhone, so
     // the wordmark header doesn't need to reserve as much top padding.
     private var expandedHeight: CGFloat {
@@ -32,15 +30,9 @@ struct HomeView: View {
         ScrollView {
             HStack {
                 WordmarkViewport(width: 200)
-                    .onGeometryChange(for: CGRect.self) { proxy in
-                        proxy.frame(in: .global)
-                    } action: { frame in
-                        wordmarkGlobalFrame = frame
-                    }
 
                 Spacer()
             }
-            .preference(key: WordmarkFramePreferenceKey.self, value: wordmarkGlobalFrame)
             .visualEffect { effect, geometry in
                 let currentHeight = geometry.size.height
                 let scrollOffset = geometry.frame(in: .scrollView).minY
