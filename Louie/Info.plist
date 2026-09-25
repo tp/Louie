@@ -25,10 +25,6 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_louie._tcp</string>
-	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Louie connects to your Linn music system on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>

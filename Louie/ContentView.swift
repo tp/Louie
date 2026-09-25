@@ -72,7 +72,11 @@ private struct ContentViewBody: View {
         }
 
         .task {
-            linn.start()
+            // ConnectionGateView already started the connection; only start
+            // here when this view is used standalone (previews, tests).
+            if linn.connectionState == .idle {
+                linn.start()
+            }
         }
         .task {
             await voiceAgent.capture.prewarm()
