@@ -6,8 +6,13 @@
 //  by Linn's own connection state — no separate permission probe. On first
 //  launch the initial connect triggers the iOS local-network prompt; while
 //  the user decides, connects fail and this view keeps retrying, so a grant
-//  is picked up automatically and the app appears. The address (hostname
-//  preferred, IP works too) is stored locally via GatewaySettings.
+//  is picked up automatically and the app appears.
+//
+//  With a known address the gate is a quiet splash (wordmark + spinner);
+//  the detailed card with troubleshooting only appears when a connection
+//  attempt fails or takes suspiciously long. On success the splash wordmark
+//  flies into the Home header's wordmark (frame published via
+//  WordmarkFramePreferenceKey) before the overlay dissolves.
 //
 
 import Linn
@@ -17,17 +22,33 @@ struct ConnectionGateView: View {
     @State private var settings = GatewaySettings()
     @State private var linn: Linn?
     @State private var hasConnected = false
+    /// Detailed connecting card (error copy + actions) instead of the splash.
+    @State private var isExpanded = false
     @State private var isShowingHelp = false
+    /// Global frame of Home's wordmark, once the app has laid out beneath.
+    @State private var homeWordmarkFrame: CGRect?
+    /// Wordmark handoff animation is running (splash → Home position).
+    @State private var isFlying = false
+    /// Overlay fully dismissed; the app stands alone.
+    @State private var overlayDone = false
     @Environment(\.scenePhase) private var scenePhase
 
+    private let splashWordmarkWidth: CGFloat = 180
+    private let homeWordmarkWidth: CGFloat = 200
+
     var body: some View {
-        Group {
+        ZStack {
             if let linn, hasConnected {
                 ContentView(linn: linn)
-            } else {
-                onboarding
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(white: 0.97).ignoresSafeArea())
+                    .onPreferenceChange(WordmarkFramePreferenceKey.self) { frame in
+                        homeWordmarkFrame = frame
+                        attemptHandoff()
+                    }
+            }
+
+            if !overlayDone {
+                gateOverlay
+                    .transition(.opacity)
             }
         }
         .onAppear {
@@ -36,8 +57,14 @@ struct ConnectionGateView: View {
             }
         }
         .onChange(of: linn?.connectionState) { _, state in
-            if state == .connected {
+            if state == .connected, !hasConnected {
                 hasConnected = true
+                attemptHandoff()
+            }
+            if case .failed = state {
+                withAnimation(.snappy) {
+                    isExpanded = true
+                }
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -55,6 +82,25 @@ struct ConnectionGateView: View {
                 return
             }
             linn.start()
+
+            // Escalate from splash to the detailed card if connecting takes
+            // suspiciously long (permission prompt pending, device booting).
+            let escalation = Task {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch {
+                    return
+                }
+                if !hasConnected {
+                    withAnimation(.snappy) {
+                        isExpanded = true
+                    }
+                }
+            }
+            defer {
+                escalation.cancel()
+            }
+
             while !Task.isCancelled, !hasConnected {
                 do {
                     try await Task.sleep(for: .seconds(3))
@@ -84,25 +130,110 @@ struct ConnectionGateView: View {
     private func changeAddress() {
         linn?.stop()
         linn = nil
+        isExpanded = false
     }
 
-    // MARK: - Screens
-
-    private var onboarding: some View {
-        VStack(spacing: 28) {
-            header
-
-            if linn == nil {
-                addressCard
-            } else {
-                connectingCard
-            }
-
-            helpLink
+    /// Fly the splash wordmark into Home's wordmark, then dissolve the
+    /// overlay. Falls back to a plain fade when there is no target to fly to
+    /// (expanded card, or Home hasn't reported a frame in time).
+    private func attemptHandoff() {
+        guard hasConnected, !isFlying, !overlayDone else {
+            return
         }
-        .padding(28)
-        .frame(maxWidth: 440)
+
+        if isExpanded {
+            withAnimation(.easeOut(duration: 0.3)) {
+                overlayDone = true
+            }
+            return
+        }
+
+        guard homeWordmarkFrame != nil else {
+            Task {
+                do {
+                    try await Task.sleep(for: .milliseconds(800))
+                } catch {
+                    return
+                }
+                if !isFlying, !overlayDone {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        overlayDone = true
+                    }
+                }
+            }
+            return
+        }
+
+        withAnimation(.smooth(duration: 0.55)) {
+            isFlying = true
+        } completion: {
+            withAnimation(.easeOut(duration: 0.25)) {
+                overlayDone = true
+            }
+        }
     }
+
+    // MARK: - Overlay
+
+    private var gateOverlay: some View {
+        GeometryReader { proxy in
+            let localOrigin = proxy.frame(in: .global).origin
+
+            ZStack {
+                Color(white: 0.97)
+                    .ignoresSafeArea()
+
+                if linn == nil {
+                    VStack(spacing: 28) {
+                        header
+                        addressCard
+                        helpLink
+                    }
+                    .padding(28)
+                    .frame(maxWidth: 440)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if isExpanded {
+                    VStack(spacing: 28) {
+                        header
+                        connectingCard
+                        helpLink
+                    }
+                    .padding(28)
+                    .frame(maxWidth: 440)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Splash: wordmark + spinner, nothing else. The wordmark
+                    // doubles as the handoff animation subject.
+                    let width = proxy.size.width
+                    let height = proxy.size.height
+                    let restingCenter = CGPoint(x: width / 2, y: height * 0.42)
+                    let target = homeWordmarkFrame.map { frame in
+                        CGRect(
+                            x: frame.minX - localOrigin.x,
+                            y: frame.minY - localOrigin.y,
+                            width: frame.width,
+                            height: frame.height
+                        )
+                    }
+                    let flying = isFlying && target != nil
+                    let wordmarkWidth = flying ? (target?.width ?? homeWordmarkWidth) : splashWordmarkWidth
+                    let center = flying
+                        ? CGPoint(x: target!.midX, y: target!.midY)
+                        : restingCenter
+
+                    WordmarkViewport(width: wordmarkWidth)
+                        .position(center)
+
+                    ProgressView()
+                        .controlSize(.large)
+                        .position(x: width / 2, y: restingCenter.y + 90)
+                        .opacity(isFlying ? 0 : 1)
+                }
+            }
+        }
+    }
+
+    // MARK: - Pieces
 
     private var header: some View {
         VStack(spacing: 10) {
@@ -182,10 +313,10 @@ struct ConnectionGateView: View {
                 ProgressView()
                     .controlSize(.large)
 
-                Text("Connecting to \(displayAddress)…")
+                Text("Still connecting to \(displayAddress)…")
                     .font(.headline)
 
-                Text("If the system asks about finding devices on your local network, allow it — that's how Louie reaches your Linn.")
+                Text("If the system asks about finding devices on your local network, allow it — that's how Louie reaches your Linn. After enabling the CI Gateway, the device takes a few minutes to come up.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
