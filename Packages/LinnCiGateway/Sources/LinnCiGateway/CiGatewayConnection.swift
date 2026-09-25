@@ -699,7 +699,13 @@ actor CiGatewayConnection {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let timeoutTask = Task {
-                    try? await Task.sleep(for: .seconds(2))
+                    do {
+                        try await Task.sleep(for: .seconds(2))
+                    } catch {
+                        // Cancelled by completion — a swallowed `try?` would
+                        // run the timeout immediately instead of never.
+                        return
+                    }
                     self.pendingCommands.timeOut(tag: tag, requestPath: requestPath)
                 }
                 pendingCommands.add(
@@ -736,7 +742,12 @@ actor CiGatewayConnection {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let timeoutTask = Task {
-                    try? await Task.sleep(for: .seconds(5))
+                    do {
+                        try await Task.sleep(for: .seconds(5))
+                    } catch {
+                        // Cancelled by completion — see pendingCommands above.
+                        return
+                    }
                     self.pendingResponses.timeOut(tag: tag, requestPath: requestPath)
                 }
                 pendingResponses.add(

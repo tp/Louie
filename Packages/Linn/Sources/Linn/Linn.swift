@@ -104,13 +104,14 @@ public final class Linn {
     private var playlistSongsByIndex: [Int: Song] = [:]
     private var optimisticTransition: OptimisticTransition?
     private var optimisticPlayState: OptimisticPlayState?
+    private var optimisticVolume: OptimisticVolume?
+    private var optimisticMute: OptimisticMute?
     private var playlistSelectionQueue = PlaylistSelectionQueue()
     private var libraryContentRevision: Int?
     private var libraryPageCache: [LibraryCacheKey: LibraryPage] = [:]
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
 
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
-    @ObservationIgnored private var controlTask: Task<Void, Never>?
     @ObservationIgnored private var playlistSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var playlistSelectionTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
@@ -123,6 +124,16 @@ public final class Linn {
     private struct OptimisticPlayState {
         var targetState: PlayState
         var previousState: PlayState?
+        var expiresAt: Date
+    }
+
+    private struct OptimisticVolume {
+        var target: Int
+        var expiresAt: Date
+    }
+
+    private struct OptimisticMute {
+        var target: Bool
         var expiresAt: Date
     }
 
@@ -197,7 +208,6 @@ public final class Linn {
 
     deinit {
         updatesTask?.cancel()
-        controlTask?.cancel()
         playlistSelectionTask?.cancel()
         playlistSelectionTimeoutTask?.cancel()
         libraryTask?.cancel()
@@ -262,6 +272,12 @@ public final class Linn {
         updatesTask?.cancel()
         updatesTask = nil
         libraryTask?.cancel()
+        // A cancelled in-flight load would otherwise strand `.loading`, and the
+        // next `loadLibrary()` bails out on that state — the library would
+        // never load again without a manual refresh.
+        if library.availability == .loading {
+            library.availability = .unavailable
+        }
         guard ciGateway != nil else {
             return
         }
@@ -315,6 +331,12 @@ public final class Linn {
     public func setVolume(_ volume: Int) {
         let clampedVolume = max(0, min(maximumVolume, volume))
         self.volume = clampedVolume
+        // Hold the optimistic value briefly so the 1s status cadence doesn't
+        // snap a mid-drag knob back to a stale device reading.
+        optimisticVolume = OptimisticVolume(
+            target: clampedVolume,
+            expiresAt: Date().addingTimeInterval(2.5)
+        )
         performControl { ciGateway, room in
             try await ciGateway.setVolume(clampedVolume, room: room)
         }
@@ -322,6 +344,10 @@ public final class Linn {
 
     public func setMuted(_ isMuted: Bool) {
         self.isMuted = isMuted
+        optimisticMute = OptimisticMute(
+            target: isMuted,
+            expiresAt: Date().addingTimeInterval(2.5)
+        )
         performControl { ciGateway, room in
             try await ciGateway.setMuted(isMuted, room: room)
         }
@@ -358,6 +384,7 @@ public final class Linn {
 
             do {
                 let services = try await ciGateway.mediaServices(room: room)
+                try Task.checkCancellation()
                 guard let qobuzService = services.first(where: { $0.name.localizedCaseInsensitiveCompare("Qobuz") == .orderedSame }) else {
                     let availableServices = Self.availableMediaServicesDescription(services)
                     let message = "Qobuz media service is unavailable. Available media services: \(availableServices)."
@@ -380,6 +407,7 @@ public final class Linn {
                     rootPage: libraryRootPage,
                     gateway: ciGateway
                 )
+                try Task.checkCancellation()
                 library = Library(
                     availability: .available,
                     qobuzService: LibraryService(qobuzService),
@@ -388,6 +416,11 @@ public final class Linn {
                 )
             } catch is CancellationError {
             } catch {
+                // A cancelled task can also surface transport errors; don't
+                // let a stale load stomp the state a newer load owns.
+                guard !Task.isCancelled else {
+                    return
+                }
                 let message = String(describing: error)
                 Self.logger.error("Qobuz library load failed: \(message, privacy: .public)")
                 library.availability = .failed(message)
@@ -463,8 +496,7 @@ public final class Linn {
         }
 
         updateLibraryItem(id: item.id, isFavourite: isFavourite)
-        controlTask?.cancel()
-        controlTask = Task { [weak self, ciGateway] in
+        Task { [weak self, ciGateway] in
             do {
                 try await ciGateway.setMediaFavourite(mediaID: item.id, isFavourite: isFavourite)
             } catch is CancellationError {
@@ -775,8 +807,22 @@ public final class Linn {
 
         reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
         updatePlaylistSongs()
-        volume = update.roomState?.volume.map { min($0, maximumVolume) }
-        isMuted = update.roomState?.isMuted
+        let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
+        volume = reconcileOptimistic(
+            &optimisticVolume,
+            target: \.target,
+            expiresAt: \.expiresAt,
+            incoming: incomingVolume,
+            matches: { $0 == $1 }
+        ) ?? incomingVolume
+        let incomingMuted = update.roomState?.isMuted
+        isMuted = reconcileOptimistic(
+            &optimisticMute,
+            target: \.target,
+            expiresAt: \.expiresAt,
+            incoming: incomingMuted,
+            matches: { $0 == $1 }
+        ) ?? incomingMuted
     }
 
     private func selectQueueIndex(
@@ -843,7 +889,13 @@ public final class Linn {
 
         playlistSelectionTimeoutTask?.cancel()
         playlistSelectionTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(6))
+            do {
+                try await Task.sleep(for: .seconds(6))
+            } catch {
+                // Cancelled — the selection was confirmed or superseded. A
+                // swallowed `try?` here would run the timeout body immediately.
+                return
+            }
             self?.playlistSelectionTimedOut(job)
         }
 
@@ -973,9 +1025,24 @@ public final class Linn {
     }
 
     private func updatePlaylistSongs() {
+        // Content-based identity instead of the positional "playlist-<index>"
+        // ids the gateway mapping produces. Positional ids make SwiftUI treat
+        // a reorder as N in-place content swaps (wrong animations, broken
+        // drag-to-reorder). Duplicate tracks get an occurrence ordinal, so
+        // identity stays stable as long as their relative order holds.
+        // Duration is deliberately excluded: playlist items carry it but
+        // now-playing metadata doesn't, and the two sources must agree.
+        var occurrences: [String: Int] = [:]
         playlist.songs = playlistSongsByIndex
             .sorted { $0.key < $1.key }
-            .map(\.value)
+            .map { _, song in
+                var song = song
+                let base = "\(song.title)|\(song.artist ?? "")|\(song.album ?? "")"
+                let ordinal = occurrences[base, default: 0]
+                occurrences[base] = ordinal + 1
+                song.id = ordinal == 0 ? "song|\(base)" : "song|\(base)|\(ordinal)"
+                return song
+            }
     }
 
     private func performControl(
@@ -997,17 +1064,23 @@ public final class Linn {
             return
         }
 
-        controlTask?.cancel()
-        controlTask = Task { [ciGateway, room] in
+        // Commands run independently: play/pause, media selection, volume, and
+        // favourites must not cancel each other. (Rapid Enqueue-then-pause used
+        // to silently drop the enqueue.) Each command is short-lived — the
+        // gateway acks or times out within seconds.
+        Task { [weak self, ciGateway, room] in
             do {
                 try await operation(ciGateway, room)
             } catch is CancellationError {
             } catch {
+                guard let self else {
+                    return
+                }
                 if let optimisticState, self.optimisticPlayState?.targetState == optimisticState {
-                    playState = self.optimisticPlayState?.previousState
+                    self.playState = self.optimisticPlayState?.previousState
                     self.optimisticPlayState = nil
                 }
-                lastErrorMessage = String(describing: error)
+                self.lastErrorMessage = String(describing: error)
             }
         }
     }

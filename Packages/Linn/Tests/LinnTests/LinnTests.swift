@@ -621,6 +621,184 @@ func demoGatewayNextMarksPendingPlaylistItemBeforeObservedCurrentIndexChanges() 
     #expect(observed.playlist?.items.first(where: \.isCurrent)?.index == 1)
 }
 
+@Test
+@MainActor
+func stopDuringLibraryLoadDoesNotStrandLoadingState() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    await gateway.suspendMediaServices()
+    let linn = Linn(gateway: gateway)
+
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .loading
+    }
+
+    linn.stop()
+    #expect(linn.library.availability == .unavailable)
+
+    await gateway.resumeMediaServices()
+    linn.loadLibrary()
+    try await waitUntil {
+        linn.library.availability == .available
+    }
+}
+
+@Test
+@MainActor
+func rapidCommandsRunIndependentlyWithoutCancellingEachOther() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles))
+    try await waitUntil {
+        linn.currentSong?.title == "Zero"
+    }
+
+    let item = Linn.LibraryItem(id: "album-1", kind: "md.album.qobuz", title: "Album")
+    linn.play(item, placement: .last)
+    linn.pause()
+
+    try await waitUntil {
+        await gateway.selectedMediaItems().count == 1
+    }
+    try await waitUntil {
+        await gateway.pauseCallCount() == 1
+    }
+}
+
+@Test
+@MainActor
+func queueSongIdentityIsContentBasedAndStableAcrossSources() async throws {
+    func update(index: Int, volume: Int) -> CiGateway.NowPlaying {
+        let names = ["Same", "Same", "Other"]
+        var nowPlaying = CiGateway.NowPlaying(room: "Linn", session: "test-session")
+        nowPlaying.playback = CiGateway.NowPlaying.Playback(transportState: .play)
+        nowPlaying.queue = CiGateway.NowPlaying.Queue(index: index, length: 3)
+        nowPlaying.currentItem = CiGateway.NowPlaying.CurrentItem(
+            id: "media-\(index)",
+            kind: "md.track",
+            displayName: names[index],
+            track: CiGateway.NowPlaying.Track(title: names[index], album: "Album", artist: "Artist")
+        )
+        nowPlaying.playlist = CiGateway.NowPlaying.Playlist(
+            items: names.indices.map { i in
+                CiGateway.NowPlaying.PlaylistItem(
+                    index: i,
+                    displayName: names[i],
+                    album: "Album",
+                    artist: "Artist",
+                    duration: 200
+                )
+            },
+            total: 3,
+            contentRevision: 1
+        )
+        nowPlaying.roomState = CiGateway.NowPlaying.RoomState(volume: volume, isMuted: false)
+        return nowPlaying
+    }
+
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+
+    linn.start()
+    await gateway.send(update(index: 0, volume: 10))
+    try await waitUntil {
+        linn.playlist.songs.count == 3
+    }
+
+    let ids = linn.playlist.songs.map(\.id)
+    #expect(Set(ids).count == 3)
+    #expect(!ids.contains { $0.hasPrefix("playlist-") })
+
+    // The next update replaces the index-1 entry from now-playing metadata
+    // instead of the playlist payload; identity must not change with the source.
+    await gateway.send(update(index: 1, volume: 11))
+    try await waitUntil {
+        linn.volume == 11
+    }
+    #expect(linn.playlist.songs.map(\.id) == ids)
+}
+
+@Test
+@MainActor
+func optimisticVolumeHoldsAgainstStaleUpdates() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 10))
+    try await waitUntil {
+        linn.volume == 10
+    }
+
+    linn.setVolume(30)
+    #expect(linn.volume == 30)
+
+    // A stale reading from before the set must not snap the knob back.
+    await gateway.send(nowPlaying(index: 0, titles: titles, position: 2, volume: 10))
+    try await waitUntil {
+        linn.timeline?.position == 2
+    }
+    #expect(linn.volume == 30)
+
+    // The device confirms; the optimistic hold clears…
+    await gateway.send(nowPlaying(index: 0, titles: titles, position: 3, volume: 30))
+    try await waitUntil {
+        linn.timeline?.position == 3
+    }
+    #expect(linn.volume == 30)
+
+    // …and later readings apply again.
+    await gateway.send(nowPlaying(index: 0, titles: titles, position: 4, volume: 12))
+    try await waitUntil {
+        linn.volume == 12
+    }
+}
+
+@Test
+@MainActor
+func optimisticMuteHoldsAgainstStaleUpdates() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let titles = ["Zero", "One"]
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 10))
+    try await waitUntil {
+        linn.isMuted == false
+    }
+
+    linn.setMuted(true)
+    #expect(linn.isMuted == true)
+
+    var stale = nowPlaying(index: 0, titles: titles, position: 2, volume: 10)
+    stale.roomState = CiGateway.NowPlaying.RoomState(volume: 10, isMuted: false)
+    await gateway.send(stale)
+    try await waitUntil {
+        linn.timeline?.position == 2
+    }
+    #expect(linn.isMuted == true)
+
+    var confirmed = nowPlaying(index: 0, titles: titles, position: 3, volume: 10)
+    confirmed.roomState = CiGateway.NowPlaying.RoomState(volume: 10, isMuted: true)
+    await gateway.send(confirmed)
+    try await waitUntil {
+        linn.timeline?.position == 3
+    }
+    #expect(linn.isMuted == true)
+
+    var unmuted = nowPlaying(index: 0, titles: titles, position: 4, volume: 10)
+    unmuted.roomState = CiGateway.NowPlaying.RoomState(volume: 10, isMuted: false)
+    await gateway.send(unmuted)
+    try await waitUntil {
+        linn.isMuted == false
+    }
+}
+
 private actor TestGateway: LinnGateway {
     struct SelectedMediaItem: Sendable, Equatable {
         var mediaID: String
@@ -640,8 +818,12 @@ private actor TestGateway: LinnGateway {
     private var favourites: [FavouriteRequest] = []
     private var previousCalls = 0
     private var nextCalls = 0
+    private var playCalls = 0
+    private var pauseCalls = 0
     private var shouldSuspendSelections = false
     private var suspendedSelections: [CheckedContinuation<Void, Never>] = []
+    private var shouldSuspendMediaServices = false
+    private var suspendedMediaServices: [CheckedContinuation<Void, Never>] = []
     private var services: [CiGateway.MediaService] = []
     private var mediaPages: [String: CiGateway.MediaPage] = [:]
     private var browseCounts: [String: Int] = [:]
@@ -659,9 +841,13 @@ private actor TestGateway: LinnGateway {
         stream
     }
 
-    func play(room _: String) async throws {}
+    func play(room _: String) async throws {
+        playCalls += 1
+    }
 
-    func pause(room _: String) async throws {}
+    func pause(room _: String) async throws {
+        pauseCalls += 1
+    }
 
     func previous(room _: String) async throws {
         previousCalls += 1
@@ -685,7 +871,12 @@ private actor TestGateway: LinnGateway {
     func setMuted(_: Bool, room _: String, group _: Bool) async throws {}
 
     func mediaServices(room _: String) async throws -> [CiGateway.MediaService] {
-        services
+        if shouldSuspendMediaServices {
+            await withCheckedContinuation { continuation in
+                suspendedMediaServices.append(continuation)
+            }
+        }
+        return services
     }
 
     func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> CiGateway.MediaPage {
@@ -753,6 +944,27 @@ private actor TestGateway: LinnGateway {
 
     func nextCallCount() -> Int {
         nextCalls
+    }
+
+    func playCallCount() -> Int {
+        playCalls
+    }
+
+    func pauseCallCount() -> Int {
+        pauseCalls
+    }
+
+    func suspendMediaServices() {
+        shouldSuspendMediaServices = true
+    }
+
+    func resumeMediaServices() {
+        shouldSuspendMediaServices = false
+        let continuations = suspendedMediaServices
+        suspendedMediaServices.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 
     func suspendSelections() {
