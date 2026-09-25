@@ -30,7 +30,6 @@ public struct PlayQueue: View {
                                 isPending: song.queueIndex == linn.pendingQueueIndex,
                             )
                         }
-                        .id(queueRowID(for: song))
                         .buttonStyle(.plain)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
@@ -61,12 +60,14 @@ public struct PlayQueue: View {
         #endif
     }
 
+    // Rows are identified only by song id, as in the ForEach. A second,
+    // position-based `.id` collides with a replaced queue's outgoing rows
+    // mid-transition and leaves them on screen.
     private func scrollToSong(_ song: Linn.Song, with proxy: ScrollViewProxy) {
-        let id = queueRowID(for: song)
         Task { @MainActor in
             await Task.yield()
             withAnimation(.snappy(duration: 0.35)) {
-                proxy.scrollTo(id, anchor: .top)
+                proxy.scrollTo(song.id, anchor: currentRowAnchor)
             }
         }
     }
@@ -75,14 +76,14 @@ public struct PlayQueue: View {
         guard
             force || shouldScrollToCurrentOnOpen || shouldScrollToCurrentAfterSelection,
             let currentIndex = linn.playlist.currentIndex,
-            linn.playlist.songs.contains(where: { $0.queueIndex == currentIndex })
+            let currentSong = linn.playlist.songs.first(where: { $0.queueIndex == currentIndex })
         else {
             return
         }
 
         shouldScrollToCurrentOnOpen = false
         let scroll = {
-            proxy.scrollTo(currentIndex, anchor: .top)
+            proxy.scrollTo(currentSong.id, anchor: currentRowAnchor)
         }
 
         if animated {
@@ -92,8 +93,15 @@ public struct PlayQueue: View {
         }
     }
 
-    private func queueRowID(for song: Linn.Song) -> Int {
-        song.queueIndex ?? song.id.hashValue
+    /// macOS scrolls the list under its translucent title bar, and `.top`
+    /// lines the row up with the window edge behind it. A little lower keeps
+    /// it clear, with the previous song peeking in above.
+    private var currentRowAnchor: UnitPoint {
+        #if os(macOS)
+            UnitPoint(x: 0.5, y: 0.12)
+        #else
+            .top
+        #endif
     }
 }
 
