@@ -27,6 +27,11 @@ private struct ContentViewBody: View {
     @State private var heyLouie: HeyLouieWebSocketAgent
     @State private var voiceAgent: VoiceAgentController
     @State private var realtimeVoice: RealtimeVoiceController
+    // On-device Apple Intelligence ("siri mode"). Held alongside its
+    // controller so the debug view can read its `fake` state, mirroring
+    // `heyLouie` above.
+    @State private var appleAgent: AppleIntelligenceVoiceAgent
+    @State private var appleVoice: VoiceAgentController
 
     init(linn: Linn) {
         self.linn = linn
@@ -41,6 +46,18 @@ private struct ContentViewBody: View {
             synth: voice,
         ))
         _realtimeVoice = State(initialValue: RealtimeVoiceController(linn: linn))
+
+        // Siri mode reuses the same controller + Apple STT/TTS, swapping only
+        // the agent for the on-device Foundation Models one. Its own LiveVoice
+        // keeps AVAudioSession ownership separate from the legacy controller's.
+        let onDeviceAgent = AppleIntelligenceVoiceAgent(linn: linn)
+        _appleAgent = State(initialValue: onDeviceAgent)
+        let appleIO = LiveVoice()
+        _appleVoice = State(initialValue: VoiceAgentController(
+            agent: onDeviceAgent,
+            capture: appleIO,
+            synth: appleIO,
+        ))
     }
 
     @State private var selectedSection: AppSection? = .home
@@ -75,8 +92,16 @@ private struct ContentViewBody: View {
             linn.start()
         }
         .task {
-            if HeyLouieVoiceMode.current == .legacyPushToTalk {
+            switch HeyLouieVoiceMode.current {
+            case .legacyPushToTalk:
                 await voiceAgent.capture.prewarm()
+            case .onDeviceFoundationModels:
+                // Warm both the local STT and the on-device model off the
+                // critical path so the first turn isn't a cold start.
+                await appleVoice.capture.prewarm()
+                appleAgent.prewarm()
+            case .realtimeWebRTC:
+                break
             }
         }
         .onDisappear {
@@ -115,6 +140,8 @@ private struct ContentViewBody: View {
             voiceAgent.state
         case .realtimeWebRTC:
             realtimeVoice.state
+        case .onDeviceFoundationModels:
+            appleVoice.state
         }
     }
 
@@ -124,6 +151,8 @@ private struct ContentViewBody: View {
             voiceAgent.handle(event)
         case .realtimeWebRTC:
             realtimeVoice.handle(event)
+        case .onDeviceFoundationModels:
+            appleVoice.handle(event)
         }
     }
 
@@ -161,6 +190,8 @@ private struct ContentViewBody: View {
                 heyLouie.fake
             case .realtimeWebRTC:
                 realtimeVoice.fake
+            case .onDeviceFoundationModels:
+                appleAgent.fake
             }
         }
     #endif
