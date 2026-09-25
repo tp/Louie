@@ -6,8 +6,13 @@
 //  by Linn's own connection state — no separate permission probe. On first
 //  launch the initial connect triggers the iOS local-network prompt; while
 //  the user decides, connects fail and this view keeps retrying, so a grant
-//  is picked up automatically and the app appears. The address (hostname
-//  preferred, IP works too) is stored locally via GatewaySettings.
+//  is picked up automatically and the app appears.
+//
+//  With a known address the gate is a quiet splash — wordmark + spinner,
+//  crossfading into the loaded app on success. The detailed card
+//  (troubleshooting copy and actions) appears only when connecting exceeds
+//  a grace period; transient failures during the permission prompt stay
+//  silent while the retry loop works.
 //
 
 import Linn
@@ -17,17 +22,33 @@ struct ConnectionGateView: View {
     @State private var settings = GatewaySettings()
     @State private var linn: Linn?
     @State private var hasConnected = false
+    /// Detailed connecting card (error copy + actions) instead of the splash.
+    @State private var isExpanded = false
     @State private var isShowingHelp = false
+    /// Splash content (wordmark, card) faded out; backdrop still opaque.
+    @State private var splashFaded = false
+    /// Overlay fully dismissed; the app stands alone.
+    @State private var overlayDone = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
-            if let linn, hasConnected {
+            // ContentView mounts as soon as Linn exists, not on connect: the
+            // window chrome (titlebar, toolbar, sidebar toggle) belongs to
+            // its NavigationSplitView, and installing it later grows the safe
+            // area and pushes everything down mid-reveal. The splash is an
+            // overlay of ContentView — same geometry, drawn above it — so
+            // the crossfade only ever unveils content, never moves it.
+            if let linn {
                 ContentView(linn: linn)
+                    .overlay {
+                        if !overlayDone {
+                            gateOverlay
+                                .transition(.opacity)
+                        }
+                    }
             } else {
-                onboarding
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(white: 0.97).ignoresSafeArea())
+                gateOverlay
             }
         }
         .onAppear {
@@ -36,8 +57,31 @@ struct ConnectionGateView: View {
             }
         }
         .onChange(of: linn?.connectionState) { _, state in
-            if state == .connected {
-                hasConnected = true
+            guard state == .connected, !hasConnected else {
+                return
+            }
+            hasConnected = true
+            // Let the app render its first frame beneath the splash, then
+            // reveal it in two quick steps: the wordmark fades over the
+            // still-solid backdrop first, then the backdrop fades away — so
+            // the wordmark is never semi-transparent over app content.
+            Task {
+                do {
+                    try await Task.sleep(for: .milliseconds(200))
+                } catch {
+                    return
+                }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    splashFaded = true
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(180))
+                } catch {
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    overlayDone = true
+                }
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -55,12 +99,33 @@ struct ConnectionGateView: View {
                 return
             }
             linn.start()
+
+            // Escalate from splash to the detailed card only when connecting
+            // takes suspiciously long (permission prompt pending, device
+            // booting, wrong address). Transient failures stay silent — the
+            // retry loop below keeps working behind the splash.
+            let escalation = Task {
+                do {
+                    try await Task.sleep(for: .seconds(6))
+                } catch {
+                    return
+                }
+                if !hasConnected {
+                    withAnimation(.snappy) {
+                        isExpanded = true
+                    }
+                }
+            }
+            defer {
+                escalation.cancel()
+            }
+
             while !Task.isCancelled, !hasConnected {
                 do {
                     try await Task.sleep(for: .seconds(3))
                 } catch {
                     // Cancelled — Change Address swapped `linn` out (or the
-                    // view is going away). A swallowed `try?` here would fall
+                    // view is going away). A swallowed `try?` would fall
                     // through once and restart the Linn we just stopped.
                     return
                 }
@@ -84,25 +149,55 @@ struct ConnectionGateView: View {
     private func changeAddress() {
         linn?.stop()
         linn = nil
+        isExpanded = false
     }
 
-    // MARK: - Screens
+    // MARK: - Overlay
 
-    private var onboarding: some View {
-        VStack(spacing: 28) {
-            header
+    private var gateOverlay: some View {
+        ZStack {
+            Color(white: 0.97)
+                .ignoresSafeArea()
 
-            if linn == nil {
-                addressCard
-            } else {
-                connectingCard
+            Group {
+                if linn == nil {
+                    VStack(spacing: 28) {
+                        header
+                        addressCard
+                        helpLink
+                    }
+                    .padding(28)
+                    .frame(maxWidth: 440)
+                } else if isExpanded {
+                    VStack(spacing: 28) {
+                        header
+                        connectingCard
+                        helpLink
+                    }
+                    .padding(28)
+                    .frame(maxWidth: 440)
+                } else {
+                    // Splash: wordmark + spinner, nothing else.
+                    VStack(spacing: 36) {
+                        WordmarkViewport(width: 180)
+                            .frame(width: 152)
+
+                        ProgressView()
+                            .controlSize(.large)
+                            .opacity(hasConnected ? 0 : 1)
+                            .animation(.easeOut(duration: 0.15), value: hasConnected)
+                    }
+                    .offset(y: -24)
+                }
             }
-
-            helpLink
+            // Fades ahead of the backdrop during the reveal, so the wordmark
+            // (or card) is gone before any app content shows through.
+            .opacity(splashFaded ? 0 : 1)
         }
-        .padding(28)
-        .frame(maxWidth: 440)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    // MARK: - Pieces
 
     private var header: some View {
         VStack(spacing: 10) {
@@ -182,10 +277,10 @@ struct ConnectionGateView: View {
                 ProgressView()
                     .controlSize(.large)
 
-                Text("Connecting to \(displayAddress)…")
+                Text("Still connecting to \(displayAddress)…")
                     .font(.headline)
 
-                Text("If the system asks about finding devices on your local network, allow it — that's how Louie reaches your Linn.")
+                Text("If the system asks about finding devices on your local network, allow it — that's how Louie reaches your Linn. After enabling the CI Gateway, the device takes a few minutes to come up.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
