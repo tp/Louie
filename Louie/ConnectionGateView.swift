@@ -25,10 +25,18 @@ struct ConnectionGateView: View {
     /// Detailed connecting card (error copy + actions) instead of the splash.
     @State private var isExpanded = false
     @State private var isShowingHelp = false
-    /// Global frame of Home's wordmark, once the app has laid out beneath.
+    /// Live global frame of Home's wordmark, once the app has laid out beneath.
     @State private var homeWordmarkFrame: CGRect?
+    /// Frame captured at flight start. The live frame drifts while the split
+    /// view settles its entrance layout; flying at a moving target redirects
+    /// mid-flight and lands beside the real wordmark.
+    @State private var flightTargetGlobal: CGRect?
+    /// Debounce for "the frame has stopped moving".
+    @State private var stabilizeTask: Task<Void, Never>?
     /// Wordmark handoff animation is running (splash → Home position).
     @State private var isFlying = false
+    /// Splash background, faded out separately after the wordmark lands.
+    @State private var backgroundOpacity = 1.0
     /// Overlay fully dismissed; the app stands alone.
     @State private var overlayDone = false
     @Environment(\.scenePhase) private var scenePhase
@@ -42,7 +50,7 @@ struct ConnectionGateView: View {
                 ContentView(linn: linn)
                     .onPreferenceChange(WordmarkFramePreferenceKey.self) { frame in
                         homeWordmarkFrame = frame
-                        attemptHandoff()
+                        scheduleHandoffWhenStable()
                     }
             }
 
@@ -59,7 +67,7 @@ struct ConnectionGateView: View {
         .onChange(of: linn?.connectionState) { _, state in
             if state == .connected, !hasConnected {
                 hasConnected = true
-                attemptHandoff()
+                scheduleHandoffWhenStable()
             }
             if case .failed = state {
                 withAnimation(.snappy) {
@@ -131,12 +139,15 @@ struct ConnectionGateView: View {
         linn?.stop()
         linn = nil
         isExpanded = false
+        stabilizeTask?.cancel()
     }
 
-    /// Fly the splash wordmark into Home's wordmark, then dissolve the
-    /// overlay. Falls back to a plain fade when there is no target to fly to
-    /// (expanded card, or Home hasn't reported a frame in time).
-    private func attemptHandoff() {
+    /// Kick off the wordmark handoff once Home's wordmark frame has stopped
+    /// moving. Every preference change reschedules the debounce, so the task
+    /// only fires after 200ms of a stable layout — then the frame is captured
+    /// as a constant for the whole flight. Falls back to a plain fade when
+    /// the expanded card is showing or Home never reports a frame.
+    private func scheduleHandoffWhenStable() {
         guard hasConnected, !isFlying, !overlayDone else {
             return
         }
@@ -148,26 +159,47 @@ struct ConnectionGateView: View {
             return
         }
 
-        guard homeWordmarkFrame != nil else {
-            Task {
-                do {
-                    try await Task.sleep(for: .milliseconds(800))
-                } catch {
-                    return
-                }
-                if !isFlying, !overlayDone {
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        overlayDone = true
-                    }
+        stabilizeTask?.cancel()
+        stabilizeTask = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+            } catch {
+                return
+            }
+            guard !isFlying, !overlayDone else {
+                return
+            }
+            if let frame = homeWordmarkFrame {
+                beginFlight(to: frame)
+                return
+            }
+            // No frame yet — give Home a little longer; its first report
+            // reschedules this task anyway, so reaching the timeout means
+            // no frame is coming (different landing view, odd layout).
+            do {
+                try await Task.sleep(for: .milliseconds(700))
+            } catch {
+                return
+            }
+            if !isFlying, !overlayDone {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    overlayDone = true
                 }
             }
-            return
         }
+    }
 
+    private func beginFlight(to globalFrame: CGRect) {
+        flightTargetGlobal = globalFrame
         withAnimation(.smooth(duration: 0.55)) {
             isFlying = true
         } completion: {
-            withAnimation(.easeOut(duration: 0.25)) {
+            // Fade only the background: the landed wordmark sits pixel-exact
+            // on Home's, so the final overlay removal happens without any
+            // animation — no second wordmark, no early background reveal.
+            withAnimation(.easeOut(duration: 0.22)) {
+                backgroundOpacity = 0
+            } completion: {
                 overlayDone = true
             }
         }
@@ -182,6 +214,7 @@ struct ConnectionGateView: View {
             ZStack {
                 Color(white: 0.97)
                     .ignoresSafeArea()
+                    .opacity(backgroundOpacity)
 
                 if linn == nil {
                     VStack(spacing: 28) {
@@ -207,7 +240,9 @@ struct ConnectionGateView: View {
                     let width = proxy.size.width
                     let height = proxy.size.height
                     let restingCenter = CGPoint(x: width / 2, y: height * 0.42)
-                    let target = homeWordmarkFrame.map { frame in
+                    // Fly to the frame captured at flight start, never the
+                    // live one — the entrance layout can still be settling.
+                    let target = flightTargetGlobal.map { frame in
                         CGRect(
                             x: frame.minX - localOrigin.x,
                             y: frame.minY - localOrigin.y,
@@ -227,7 +262,8 @@ struct ConnectionGateView: View {
                     ProgressView()
                         .controlSize(.large)
                         .position(x: width / 2, y: restingCenter.y + 90)
-                        .opacity(isFlying ? 0 : 1)
+                        .opacity(hasConnected ? 0 : 1)
+                        .animation(.easeOut(duration: 0.15), value: hasConnected)
                 }
             }
         }
