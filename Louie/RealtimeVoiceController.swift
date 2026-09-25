@@ -3,6 +3,8 @@
 //  Louie
 //
 
+// iOS-only: drives the WebRTC realtime transport, which native macOS excludes.
+#if os(iOS)
 import Foundation
 import Linn
 import OSLog
@@ -303,3 +305,5 @@ final class RealtimeVoiceController {
         tx.finish(status: status)
     }
 }
+
+#endif

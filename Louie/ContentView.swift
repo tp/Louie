@@ -26,7 +26,10 @@ private struct ContentViewBody: View {
     // typed as `any VoiceAgent` and doesn't expose the fake state.
     @State private var heyLouie: HeyLouieWebSocketAgent
     @State private var voiceAgent: VoiceAgentController
-    @State private var realtimeVoice: RealtimeVoiceController
+    #if os(iOS)
+        // Realtime/WebRTC mode is iOS-only; native macOS excludes it.
+        @State private var realtimeVoice: RealtimeVoiceController
+    #endif
     // On-device Apple Intelligence ("siri mode"). Held alongside its
     // controller so the debug view can read its `fake` state, mirroring
     // `heyLouie` above.
@@ -45,7 +48,9 @@ private struct ContentViewBody: View {
             capture: voice,
             synth: voice,
         ))
-        _realtimeVoice = State(initialValue: RealtimeVoiceController(linn: linn))
+        #if os(iOS)
+            _realtimeVoice = State(initialValue: RealtimeVoiceController(linn: linn))
+        #endif
 
         // Siri mode reuses the same controller + Apple STT/TTS, swapping only
         // the agent for the on-device Foundation Models one. Its own LiveVoice
@@ -100,8 +105,10 @@ private struct ContentViewBody: View {
                 // critical path so the first turn isn't a cold start.
                 await appleVoice.capture.prewarm()
                 appleAgent.prewarm()
-            case .realtimeWebRTC:
-                break
+            #if os(iOS)
+                case .realtimeWebRTC:
+                    break
+            #endif
             }
         }
         .onDisappear {
@@ -138,8 +145,10 @@ private struct ContentViewBody: View {
         switch HeyLouieVoiceMode.current {
         case .legacyPushToTalk:
             voiceAgent.state
-        case .realtimeWebRTC:
-            realtimeVoice.state
+        #if os(iOS)
+            case .realtimeWebRTC:
+                realtimeVoice.state
+        #endif
         case .onDeviceFoundationModels:
             appleVoice.state
         }
@@ -149,8 +158,10 @@ private struct ContentViewBody: View {
         switch HeyLouieVoiceMode.current {
         case .legacyPushToTalk:
             voiceAgent.handle(event)
-        case .realtimeWebRTC:
-            realtimeVoice.handle(event)
+        #if os(iOS)
+            case .realtimeWebRTC:
+                realtimeVoice.handle(event)
+        #endif
         case .onDeviceFoundationModels:
             appleVoice.handle(event)
         }
@@ -188,8 +199,10 @@ private struct ContentViewBody: View {
             switch HeyLouieVoiceMode.current {
             case .legacyPushToTalk:
                 heyLouie.fake
-            case .realtimeWebRTC:
-                realtimeVoice.fake
+            #if os(iOS)
+                case .realtimeWebRTC:
+                    realtimeVoice.fake
+            #endif
             case .onDeviceFoundationModels:
                 appleAgent.fake
             }

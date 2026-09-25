@@ -3,6 +3,10 @@
 //  Louie
 //
 
+// Realtime/WebRTC voice is iOS-only. The stasel/WebRTC binary's macOS slice is
+// unusable for our pin and this transport leans on AVAudioSession (iOS-only), so
+// native macOS builds exclude realtime mode entirely — siri + legacy still work.
+#if os(iOS)
 @preconcurrency import AVFoundation
 import Foundation
 import OSLog
@@ -857,3 +861,5 @@ private actor RealtimeStartupAudioBackfillStore {
         return batches
     }
 }
+
+#endif
