@@ -32,7 +32,9 @@ struct LibraryItemDetailView: View {
         }
         .bottomPlayerBarClearance()
         .navigationTitle(route.title)
-        .navigationBarTitleDisplayMode(.inline)
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+        #endif
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button("Enqueue", systemImage: "text.badge.plus") {
