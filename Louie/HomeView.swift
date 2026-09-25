@@ -60,6 +60,11 @@ struct HomeView: View {
             .padding(.vertical, 24)
         }
         .bottomPlayerBarClearance()
+        #if os(macOS)
+            // The wordmark is the title here; without this, the window falls
+            // back to showing the app name in the toolbar right above it.
+            .toolbar(removing: .title)
+        #endif
     }
 
     private var nowPlaying: some View {
