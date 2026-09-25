@@ -244,7 +244,13 @@ private struct PlayerBarVolumeButton: View {
     private func scheduleVolumeUpdate(_ volume: Int) {
         volumeUpdateTask?.cancel()
         volumeUpdateTask = Task { [state] in
-            try? await Task.sleep(for: .milliseconds(180))
+            do {
+                try await Task.sleep(for: .milliseconds(180))
+            } catch {
+                // Superseded by a newer value — a swallowed `try?` here would
+                // send the stale volume immediately, defeating the debounce.
+                return
+            }
             await MainActor.run {
                 state.setVolume(volume)
             }
