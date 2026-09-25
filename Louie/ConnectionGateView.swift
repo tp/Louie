@@ -56,7 +56,14 @@ struct ConnectionGateView: View {
             }
             linn.start()
             while !Task.isCancelled, !hasConnected {
-                try? await Task.sleep(for: .seconds(3))
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    // Cancelled — Change Address swapped `linn` out (or the
+                    // view is going away). A swallowed `try?` here would fall
+                    // through once and restart the Linn we just stopped.
+                    return
+                }
                 if case .failed = linn.connectionState {
                     linn.start()
                 }
