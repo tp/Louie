@@ -9,7 +9,9 @@ import Linn
 import SwiftUI
 
 struct ContentView: View {
-    @State private var linn = Linn()
+    // Created by ConnectionGateView once the gateway address is known and
+    // local-network permission has been answered.
+    var linn: Linn
 
     var body: some View {
         ContentViewBody(linn: linn)

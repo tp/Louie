@@ -56,7 +56,7 @@ struct LouieApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ConnectionGateView()
         }
         .modelContainer(sharedModelContainer)
     }
