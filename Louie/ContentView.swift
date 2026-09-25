@@ -97,6 +97,11 @@ private struct ContentViewBody: View {
             }
             .padding(.leading, leadingInset)
             .padding(.horizontal)
+            #if os(macOS)
+                // iOS gets bottom spacing from the home-indicator safe area;
+                // macOS has none, so match the floating sidebar's inset.
+                .padding(.bottom, 8)
+            #endif
         }
     }
 
