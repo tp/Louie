@@ -48,7 +48,15 @@ public final class Linn {
     public private(set) var timeline: Timeline?
     public private(set) var lastErrorMessage: String?
     public private(set) var songTransitionDirection: SongTransitionDirection = .forward
-    public private(set) var pendingQueueIndex: Int?
+
+    /// Queue row the user tapped that the device hasn't switched to yet.
+    public var pendingQueueIndex: Int? {
+        if case let .queueItem(targetIndex) = pendingPlayback {
+            targetIndex
+        } else {
+            nil
+        }
+    }
 
     public var previousSongs: [Song] {
         guard let currentIndex = playlist.currentIndex else {
@@ -84,13 +92,19 @@ public final class Linn {
         return currentIndex + 1 < total
     }
 
-    /// Number of songs left after the observed or pending queue selection.
+    /// Number of songs left after the observed or pending queue selection,
+    /// including library additions the device hasn't reported yet.
     public var remainingQueueCount: Int {
+        let effectiveCurrentIndex = pendingQueueIndex ?? playlist.currentIndex
+        if let pendingQueueLength {
+            let currentIndex = pendingQueueLength.currentIndex ?? effectiveCurrentIndex ?? -1
+            return max(0, pendingQueueLength.total - currentIndex - 1)
+        }
+
         guard let total = playlist.total else {
             return upcomingSongs.count
         }
 
-        let effectiveCurrentIndex = pendingQueueIndex ?? playlist.currentIndex
         guard let effectiveCurrentIndex else {
             return total
         }
@@ -102,10 +116,22 @@ public final class Linn {
     private var configurationLoadAttempted = false
     private var playlistContentRevision: Int?
     private var playlistSongsByIndex: [Int: Song] = [:]
-    private var optimisticTransition: OptimisticTransition?
+    private var pendingPlayback: PendingPlayback?
+    private var isPreviewingMedia: Bool {
+        if case .media = pendingPlayback {
+            return true
+        }
+        return false
+    }
+
+    private var pendingQueueLength: PendingQueueLength?
     private var optimisticPlayState: OptimisticPlayState?
     private var optimisticVolume: OptimisticVolume?
     private var optimisticMute: OptimisticMute?
+    @ObservationIgnored private var mediaSelectionGeneration = 0
+    /// What the device itself last reported, regardless of any preview shown.
+    @ObservationIgnored private var reportedSong: Song?
+    @ObservationIgnored private var reportedTimeline: Timeline?
     private var playlistSelectionQueue = PlaylistSelectionQueue()
     private var libraryContentRevision: Int?
     private var libraryPageCache: [LibraryCacheKey: LibraryPage] = [:]
@@ -116,8 +142,43 @@ public final class Linn {
     @ObservationIgnored private var playlistSelectionTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
 
-    private struct OptimisticTransition {
-        var targetQueueIndex: Int
+    /// What the user asked to play that the device hasn't picked up yet.
+    /// Only one at a time: the latest request supersedes earlier ones.
+    private enum PendingPlayback {
+        /// Previous/next. Already shown as current; stale updates are ignored
+        /// until the device reaches the index.
+        case skip(targetIndex: Int, expiresAt: Date)
+        /// A tapped queue row. Marked pending in the queue, not shown as
+        /// current until the device confirms.
+        case queueItem(targetIndex: Int)
+        /// A library item started with play-now or replace. Shown as current
+        /// while the device swaps its queue.
+        case media(MediaSelection)
+    }
+
+    private struct MediaSelection {
+        var generation: Int
+        var preview: Song
+        /// Title the device reports once it plays the selection, when known.
+        /// Only needed when that's also the song being replaced.
+        var expectedTitle: String?
+        var replacedSong: Song?
+        var supersededTitles: [String]
+        var playlistRevision: Int?
+        var expiresAt: Date
+    }
+
+    /// Queue length the device will report once library items it was just
+    /// sent land, so the queue count responds right away.
+    private struct PendingQueueLength {
+        var total: Int
+        /// Where the new queue starts playing, for a replace or play-now.
+        /// Nil for additions, which count from wherever playback is.
+        var currentIndex: Int?
+        /// A replace can keep the old length; then only a new revision
+        /// tells the swapped queue apart from the old one.
+        var requiresNewRevision: Bool
+        var revisionAtRequest: Int?
         var expiresAt: Date
     }
 
@@ -481,7 +542,18 @@ public final class Linn {
             return
         }
 
-        performControl { ciGateway, room in
+        let startsPlaying = placement == .replace || placement == .now
+        let previewGeneration = startsPlaying ? previewMediaSelection(item) : nil
+        if let trackCount = queuedTrackCount(for: item) {
+            anticipateQueueLength(adding: trackCount, placement: placement)
+        }
+
+        performControl(onFailure: { [weak self] in
+            self?.pendingQueueLength = nil
+            if let previewGeneration {
+                self?.revertMediaSelectionPreview(generation: previewGeneration)
+            }
+        }) { ciGateway, room in
             try await ciGateway.selectMedia(
                 mediaID: item.id,
                 room: room,
@@ -791,21 +863,36 @@ public final class Linn {
             }
         }
 
+        var incomingCurrentSong = Song(update.currentItem)
+        if let incomingQueueIndex = update.queue?.index {
+            incomingCurrentSong?.queueIndex = incomingQueueIndex
+        }
+        reportedSong = incomingCurrentSong
+        reportedTimeline = Timeline(update.timeline)
+
         if !suppressNowPlayingFields {
-            updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
-            var incomingCurrentSong = Song(update.currentItem)
-            if let incomingQueueIndex = update.queue?.index {
-                incomingCurrentSong?.queueIndex = incomingQueueIndex
+            let wasPreviewingMedia = isPreviewingMedia
+            // The queue position follows the device either way; only the
+            // song shown as playing is held on the preview.
+            if shouldHoldMediaSelectionPreview(incoming: incomingCurrentSong) {
+                playlist.currentIndex = update.queue?.index
+            } else {
+                // The preview already moved forward; the new queue's index
+                // says nothing about direction relative to the old one.
+                if !wasPreviewingMedia {
+                    updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
+                }
+                currentSong = incomingCurrentSong
+                if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
+                    playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
+                }
+                playlist.currentIndex = update.queue?.index
+                timeline = reportedTimeline
             }
-            currentSong = incomingCurrentSong
-            if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
-                playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
-            }
-            playlist.currentIndex = update.queue?.index
-            timeline = Timeline(update.timeline)
         }
 
         reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
+        reconcilePendingQueueLength()
         updatePlaylistSongs()
         let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
         volume = reconcileOptimistic(
@@ -839,20 +926,16 @@ public final class Linn {
 
         switch kind {
         case .skip:
-            pendingQueueIndex = nil
             optimisticallySelectQueueIndex(targetQueueIndex, song: optimisticSong ?? playlistSongsByIndex[targetQueueIndex])
         case .queueItem:
-            pendingQueueIndex = targetQueueIndex
+            pendingPlayback = .queueItem(targetIndex: targetQueueIndex)
         }
         enqueuePlaylistSelection(PlaylistSelectionJob(targetIndex: targetQueueIndex, kind: kind))
     }
 
     private func optimisticallySelectQueueIndex(_ targetQueueIndex: Int, song: Song?) {
         updateSongTransitionDirection(incomingQueueIndex: targetQueueIndex)
-        optimisticTransition = OptimisticTransition(
-            targetQueueIndex: targetQueueIndex,
-            expiresAt: Date().addingTimeInterval(4)
-        )
+        pendingPlayback = .skip(targetIndex: targetQueueIndex, expiresAt: Date().addingTimeInterval(4))
 
         guard var selectedSong = song else {
             currentSong = nil
@@ -908,7 +991,7 @@ public final class Linn {
                 if failure.failed {
                     playlistSelectionTimeoutTask?.cancel()
                     lastErrorMessage = String(describing: error)
-                    reconcilePendingQueueSelection(failedJob: job, nextJob: failure.next)
+                    clearPendingQueueItem(failedJob: job)
                 }
                 if let nextJob = failure.next {
                     sendPlaylistSelection(nextJob)
@@ -922,14 +1005,17 @@ public final class Linn {
             return
         }
 
-        if pendingQueueIndex == incomingQueueIndex {
-            pendingQueueIndex = nil
+        // Reaching the tapped row confirms it — unless that row's own
+        // selection is still waiting to be sent, and the device is just on
+        // it from before.
+        if case .queueItem(targetIndex: incomingQueueIndex) = pendingPlayback,
+           playlistSelectionQueue.pending?.targetIndex != incomingQueueIndex {
+            pendingPlayback = nil
         }
 
         let confirmation = playlistSelectionQueue.confirm(targetIndex: incomingQueueIndex)
         if confirmation.confirmed {
             playlistSelectionTimeoutTask?.cancel()
-            reconcilePendingQueueSelection(confirmedQueueIndex: incomingQueueIndex, nextJob: confirmation.next)
         }
         if let nextJob = confirmation.next {
             sendPlaylistSelection(nextJob)
@@ -939,32 +1025,18 @@ public final class Linn {
     private func playlistSelectionTimedOut(_ job: PlaylistSelectionJob) {
         let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
         if failure.failed {
-            reconcilePendingQueueSelection(failedJob: job, nextJob: failure.next)
+            clearPendingQueueItem(failedJob: job)
         }
         if let nextJob = failure.next {
             sendPlaylistSelection(nextJob)
         }
     }
 
-    private func reconcilePendingQueueSelection(
-        confirmedQueueIndex: Int,
-        nextJob: PlaylistSelectionJob?
-    ) {
-        if let nextJob, nextJob.kind == .queueItem {
-            pendingQueueIndex = nextJob.targetIndex
-        } else if pendingQueueIndex == confirmedQueueIndex {
-            pendingQueueIndex = nil
-        }
-    }
-
-    private func reconcilePendingQueueSelection(
-        failedJob: PlaylistSelectionJob,
-        nextJob: PlaylistSelectionJob?
-    ) {
-        if let nextJob, nextJob.kind == .queueItem {
-            pendingQueueIndex = nextJob.targetIndex
-        } else if failedJob.kind == .queueItem, pendingQueueIndex == failedJob.targetIndex {
-            pendingQueueIndex = nil
+    /// A newer request already replaced `pendingPlayback`, so only a still
+    /// pending tap on the failed row is cleared.
+    private func clearPendingQueueItem(failedJob: PlaylistSelectionJob) {
+        if case .queueItem(targetIndex: failedJob.targetIndex) = pendingPlayback {
+            pendingPlayback = nil
         }
     }
 
@@ -976,14 +1048,216 @@ public final class Linn {
         songTransitionDirection = incomingQueueIndex > currentIndex ? .forward : .backward
     }
 
+    /// Shows `item` as the current song right away. Returns the selection's
+    /// generation, or nil when there's nothing meaningful to show.
+    private func previewMediaSelection(_ item: LibraryItem) -> Int? {
+        guard let preview = mediaSelectionPreview(for: item) else {
+            return nil
+        }
+
+        // Songs from requests this one supersedes can still reach the device
+        // (a skip already sent, an earlier start still loading); reporting
+        // them doesn't mean the selection is playing.
+        var supersededTitles: [String] = []
+        switch pendingPlayback {
+        case let .media(earlier):
+            supersededTitles = earlier.supersededTitles + [earlier.preview.title]
+            if let expectedTitle = earlier.expectedTitle {
+                supersededTitles.append(expectedTitle)
+            }
+        case .skip, .queueItem, nil:
+            break
+        }
+        let selectionTargets = [playlistSelectionQueue.inFlight, playlistSelectionQueue.pending]
+            .compactMap { $0?.targetIndex }
+        supersededTitles += selectionTargets.compactMap { playlistSongsByIndex[$0]?.title }
+        // A queued skip or row tap would otherwise be sent into the new queue.
+        playlistSelectionQueue.discardPending()
+
+        mediaSelectionGeneration += 1
+        pendingPlayback = .media(MediaSelection(
+            generation: mediaSelectionGeneration,
+            preview: preview.song,
+            expectedTitle: preview.expectedTitle,
+            replacedSong: reportedSong,
+            supersededTitles: supersededTitles,
+            playlistRevision: playlistContentRevision,
+            expiresAt: Date().addingTimeInterval(8)
+        ))
+        songTransitionDirection = .forward
+        currentSong = preview.song
+        timeline = nil
+        return mediaSelectionGeneration
+    }
+
+    private func mediaSelectionPreview(for item: LibraryItem) -> (song: Song, expectedTitle: String?)? {
+        // Hey Louie starts media by id alone.
+        guard !item.title.isEmpty else {
+            return nil
+        }
+
+        guard item.isContainer else {
+            return (Self.previewSong(item), item.title)
+        }
+
+        // An album or playlist starts at its first track. The detail screen
+        // has usually browsed it already; otherwise show the container itself
+        // until the device reports the track.
+        let firstTrack = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: "")]?
+            .items.first { !$0.isContainer && !$0.title.isEmpty }
+        if let firstTrack {
+            return (Self.previewSong(firstTrack, container: item), firstTrack.title)
+        }
+        return (Self.previewSong(item), nil)
+    }
+
+    private static func previewSong(_ item: LibraryItem, container: LibraryItem? = nil) -> Song {
+        let artists = item.artists.isEmpty ? container?.artists ?? [] : item.artists
+        return Song(
+            id: "preview|\(item.id)",
+            title: item.title,
+            artist: artists.isEmpty ? item.subtitle : artists.joined(separator: ", "),
+            album: item.album ?? container?.title,
+            duration: item.duration,
+            artworkURL: item.artworkURL ?? container?.artworkURL
+        )
+    }
+
+    /// Songs a library item adds to the queue, when that's known without
+    /// asking the device: one for a track, the track list of an album or
+    /// playlist that was browsed or reports its size.
+    private func queuedTrackCount(for item: LibraryItem) -> Int? {
+        if item.kind.contains("track") {
+            return 1
+        }
+        guard item.isContainer else {
+            return nil
+        }
+
+        if let page = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: "")],
+           !page.items.isEmpty,
+           page.items.allSatisfy({ !$0.isContainer }) {
+            return page.total ?? page.items.count
+        }
+        // Folder containers (e.g. favourite albums) count their albums, not tracks.
+        let isTrackList = !item.kind.contains("container")
+            && (item.kind.contains("album") || item.kind.contains("playlist"))
+        if isTrackList, let childCount = item.childCount, childCount > 0 {
+            return childCount
+        }
+        return nil
+    }
+
+    private func anticipateQueueLength(adding trackCount: Int, placement: QueuePlacement) {
+        let expiresAt = Date().addingTimeInterval(6)
+        guard placement != .replace else {
+            pendingQueueLength = PendingQueueLength(
+                total: trackCount,
+                currentIndex: 0,
+                requiresNewRevision: true,
+                revisionAtRequest: playlistContentRevision,
+                expiresAt: expiresAt
+            )
+            return
+        }
+
+        // Additions stack on anything still pending.
+        let pending = pendingQueueLength
+        var currentIndex = pending?.currentIndex
+        if placement == .now {
+            currentIndex = (currentIndex ?? pendingQueueIndex ?? playlist.currentIndex ?? -1) + 1
+        }
+        pendingQueueLength = PendingQueueLength(
+            total: (pending?.total ?? playlist.total ?? 0) + trackCount,
+            currentIndex: currentIndex,
+            requiresNewRevision: pending?.requiresNewRevision ?? false,
+            revisionAtRequest: pending?.revisionAtRequest ?? playlistContentRevision,
+            expiresAt: expiresAt
+        )
+    }
+
+    private func reconcilePendingQueueLength() {
+        guard let pending = pendingQueueLength else {
+            return
+        }
+
+        let landed = playlist.total == pending.total
+            && (!pending.requiresNewRevision || playlistContentRevision != pending.revisionAtRequest)
+        if landed || Date() >= pending.expiresAt {
+            pendingQueueLength = nil
+        }
+    }
+
+    private func revertMediaSelectionPreview(generation: Int) {
+        guard case let .media(selection) = pendingPlayback, selection.generation == generation else {
+            return
+        }
+
+        pendingPlayback = nil
+        songTransitionDirection = .backward
+        currentSong = reportedSong
+        timeline = reportedTimeline
+    }
+
+    /// Keeps the preview while the device reports nothing (loading) or a song
+    /// that isn't the selection yet. Until the queue revision changes, only
+    /// the expected track counts as playing; after it, any song that isn't
+    /// left over from before — or one the new queue confirms at its index,
+    /// which covers restarting what was already playing.
+    private func shouldHoldMediaSelectionPreview(incoming: Song?) -> Bool {
+        guard case let .media(selection) = pendingPlayback else {
+            return false
+        }
+
+        if Date() >= selection.expiresAt {
+            pendingPlayback = nil
+            return false
+        }
+
+        guard let incoming else {
+            return true
+        }
+
+        func sameTitle(_ title: String) -> Bool {
+            incoming.title.localizedCaseInsensitiveCompare(title) == .orderedSame
+        }
+
+        let isStale = selection.replacedSong.map { replaced in
+            incoming.title == replaced.title && incoming.artist == replaced.artist
+        } ?? false || selection.supersededTitles.contains(where: sameTitle)
+        let isExpected = selection.expectedTitle.map(sameTitle) ?? false
+
+        let released: Bool
+        if selection.playlistRevision == nil {
+            // No revisions from this gateway: the best signal is a new song.
+            released = !isStale
+        } else if playlistContentRevision == selection.playlistRevision {
+            released = isExpected && !isStale
+        } else {
+            let matchesNewQueue = incoming.queueIndex
+                .flatMap { playlistSongsByIndex[$0] }
+                .map { sameTitle($0.title) } ?? false
+            released = !isStale || isExpected || matchesNewQueue
+        }
+
+        if released {
+            pendingPlayback = nil
+        }
+        return !released
+    }
+
+    /// After previous/next, ignores stale updates until the device reaches
+    /// the target index or the skip expires.
     private func shouldSuppressNowPlayingFields(incomingQueueIndex: Int?) -> Bool {
-        reconcileOptimistic(
-            &optimisticTransition,
-            target: \.targetQueueIndex,
-            expiresAt: \.expiresAt,
-            incoming: incomingQueueIndex,
-            matches: { $0 == $1 }
-        ) != nil
+        guard case let .skip(targetIndex, expiresAt) = pendingPlayback else {
+            return false
+        }
+
+        if Date() >= expiresAt || incomingQueueIndex == targetIndex {
+            pendingPlayback = nil
+            return false
+        }
+        return true
     }
 
     private func reconciledPlayState(incoming: PlayState?) -> PlayState? {
@@ -996,7 +1270,7 @@ public final class Linn {
         ) ?? incoming
     }
 
-    /// Holds an optimistic value (queue transition or play-state) until either:
+    /// Holds an optimistic value (play state, volume, mute) until either:
     /// the device reports a matching state (clear, accept it), the optimistic
     /// expires (clear, accept whatever just arrived), or neither (keep holding).
     /// Returns the target value while holding, otherwise nil.
@@ -1047,6 +1321,7 @@ public final class Linn {
 
     private func performControl(
         optimisticState: PlayState? = nil,
+        onFailure: (@MainActor () -> Void)? = nil,
         operation: @escaping (any LinnGateway, String) async throws -> Void
     ) {
         let previousPlayState = playState
@@ -1080,6 +1355,7 @@ public final class Linn {
                     self.playState = self.optimisticPlayState?.previousState
                     self.optimisticPlayState = nil
                 }
+                onFailure?()
                 self.lastErrorMessage = String(describing: error)
             }
         }
