@@ -1222,6 +1222,31 @@ func replacingTheQueueCountsTheNewTrackListRightAway() async throws {
 
 @Test
 @MainActor
+func playingAnUnbrowsedAlbumCountsItsReportedTracks() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    let current = (0 ..< 50).map { "Song \($0)" }
+
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: current))
+    try await waitUntil {
+        linn.remainingQueueCount == 49
+    }
+
+    // Shape of a real Qobuz album from the gateway: its track count comes
+    // with the item, no browse needed.
+    let album = Linn.LibraryItem(
+        id: "qobuz-album-a-star-is-born",
+        kind: "md.album.qobuz",
+        title: "A Star Is Born Soundtrack",
+        childCount: 19
+    )
+    linn.play(album, placement: .replace)
+    #expect(linn.remainingQueueCount == 18)
+}
+
+@Test
+@MainActor
 func unknownSizeAdditionsAndFailuresLeaveTheCountToTheDevice() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
