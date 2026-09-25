@@ -46,6 +46,12 @@ struct PlaylistSelectionQueue: Sendable, Equatable {
         return (true, dequeuePending())
     }
 
+    /// Drops the follow-up that hasn't been sent yet; the in-flight one can't
+    /// be recalled.
+    mutating func discardPending() {
+        pending = nil
+    }
+
     private mutating func dequeuePending() -> PlaylistSelectionJob? {
         guard let pending else {
             return nil
