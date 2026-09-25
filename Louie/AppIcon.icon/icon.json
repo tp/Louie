@@ -1,0 +1,98 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-gray:1.00000,1.00000",
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.91508,0.90168,0.91635,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "display-p3:1.00000,0.94539,0.96466,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Louie Wordmark L 2.png",
+          "name" : "Louie Wordmark L 2",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              -26.5,
+              192
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.40000,0.40000,0.40000,1.00000",
+              "extended-gray:0.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 1.1884103861723379,
+                "y" : -0.26280534798426636
+              },
+              "stop" : {
+                "x" : 0.4453320647217278,
+                "y" : 0.6734173284425801
+              }
+            }
+          },
+          "glass" : true,
+          "hidden" : true,
+          "image-name" : "Louie Wordmark 3.png",
+          "name" : "Louie Wordmark 3",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              16.75,
+              81.50999999999999
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
