@@ -9,7 +9,9 @@ import Linn
 import SwiftUI
 
 struct ContentView: View {
-    @State private var linn = Linn()
+    // Created by ConnectionGateView once the gateway address is known and
+    // local-network permission has been answered.
+    var linn: Linn
 
     var body: some View {
         ContentViewBody(linn: linn)
@@ -70,7 +72,11 @@ private struct ContentViewBody: View {
         }
 
         .task {
-            linn.start()
+            // ConnectionGateView already started the connection; only start
+            // here when this view is used standalone (previews, tests).
+            if linn.connectionState == .idle {
+                linn.start()
+            }
         }
         .task {
             await voiceAgent.capture.prewarm()
