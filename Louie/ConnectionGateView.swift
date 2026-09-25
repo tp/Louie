@@ -52,6 +52,13 @@ struct ConnectionGateView: View {
             // the crossfade only ever unveils content, never moves it.
             if let linn {
                 ContentView(linn: linn)
+                    // A closed window releases its connection. This stays on
+                    // the branch, capturing this instance: the Group's
+                    // modifiers apply to each branch, and the address screen
+                    // disappearing as Linn is created would stop the new one.
+                    .onDisappear {
+                        linn.stop()
+                    }
                     .overlay {
                         if revealPhase.showsOverlay {
                             gateOverlay
@@ -144,11 +151,6 @@ struct ConnectionGateView: View {
                     linn.start()
                 }
             }
-        }
-        .onDisappear {
-            // A closed window must release its connection; the task above
-            // starts it again if this view comes back.
-            linn?.stop()
         }
         .sheet(isPresented: $isShowingHelp) {
             LinnAPIHelpView()
