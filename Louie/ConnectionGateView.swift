@@ -25,11 +25,22 @@ struct ConnectionGateView: View {
     /// Detailed connecting card (error copy + actions) instead of the splash.
     @State private var isExpanded = false
     @State private var isShowingHelp = false
-    /// Splash content (wordmark, card) faded out; backdrop still opaque.
-    @State private var splashFaded = false
-    /// Overlay fully dismissed; the app stands alone.
-    @State private var overlayDone = false
+    @State private var revealPhase: GateRevealPhase = .showingSplash
     @Environment(\.scenePhase) private var scenePhase
+
+    private enum GateRevealPhase {
+        case showingSplash
+        case hidingSplashContent
+        case done
+
+        var showsOverlay: Bool {
+            self != .done
+        }
+
+        var showsSplashContent: Bool {
+            self == .showingSplash
+        }
+    }
 
     var body: some View {
         Group {
@@ -42,7 +53,7 @@ struct ConnectionGateView: View {
             if let linn {
                 ContentView(linn: linn)
                     .overlay {
-                        if !overlayDone {
+                        if revealPhase.showsOverlay {
                             gateOverlay
                                 .transition(.opacity)
                         }
@@ -72,7 +83,7 @@ struct ConnectionGateView: View {
                     return
                 }
                 withAnimation(.easeOut(duration: 0.18)) {
-                    splashFaded = true
+                    revealPhase = .hidingSplashContent
                 }
                 do {
                     try await Task.sleep(for: .milliseconds(180))
@@ -80,7 +91,7 @@ struct ConnectionGateView: View {
                     return
                 }
                 withAnimation(.easeInOut(duration: 0.3)) {
-                    overlayDone = true
+                    revealPhase = .done
                 }
             }
         }
@@ -150,6 +161,7 @@ struct ConnectionGateView: View {
         linn?.stop()
         linn = nil
         isExpanded = false
+        revealPhase = .showingSplash
     }
 
     // MARK: - Overlay
@@ -192,7 +204,7 @@ struct ConnectionGateView: View {
             }
             // Fades ahead of the backdrop during the reveal, so the wordmark
             // (or card) is gone before any app content shows through.
-            .opacity(splashFaded ? 0 : 1)
+            .opacity(revealPhase.showsSplashContent ? 1 : 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -220,10 +232,10 @@ struct ConnectionGateView: View {
                 TextField("Address, e.g. 192.168.1.50", text: $settings.host)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
-                    #if os(iOS)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                    #endif
+                #if os(iOS)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                #endif
                     .padding(14)
 
                 Divider()
@@ -232,9 +244,9 @@ struct ConnectionGateView: View {
                     TextField("Port", value: $settings.port, format: .number.grouping(.never))
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
-                        #if os(iOS)
-                            .keyboardType(.numberPad)
-                        #endif
+                    #if os(iOS)
+                        .keyboardType(.numberPad)
+                    #endif
                 }
                 .padding(14)
             }
