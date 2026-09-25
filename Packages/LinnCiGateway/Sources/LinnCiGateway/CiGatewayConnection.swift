@@ -107,13 +107,26 @@ actor CiGatewayConnection {
     private var reconnectTask: Task<Void, Never>?
     private var isStarting = false
 
-    private var streamID: UUID?
-    private var continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation?
+    private struct NowPlayingStream {
+        var continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
+        var preferredRoom: String?
+        var updateInterval: Int
+    }
+
+    private struct NowPlayingSubscription {
+        var room: String
+        var updateInterval: Int
+        var sending: Task<Void, Error>
+    }
+
+    /// Every attached stream receives every update, and each only ever
+    /// removes itself. A restart attaches the new stream while the old one's
+    /// attach may still be running, in either order, so no stream may take
+    /// over or reset another's state.
+    private var nowPlayingStreams: [UUID: NowPlayingStream] = [:]
+    private var latestNowPlayingStreamID: UUID?
     private var current: CiGateway.NowPlaying?
-    private var streamPreferredRoom: String?
-    private var streamUpdateInterval: Int?
-    private var subscribedRoom: String?
-    private var subscriptionUpdateInterval: Int?
+    private var subscription: NowPlayingSubscription?
 
     private var pendingCommands = PendingRegistry<Void>(logLabel: "command", failureMessage: "Gateway command failed")
     private var pendingResponses = PendingRegistry<Data>(logLabel: "response", failureMessage: "Gateway request failed")
@@ -273,13 +286,13 @@ actor CiGatewayConnection {
         socket = nil
         session = nil
         resolvedRoom = nil
-        subscribedRoom = nil
-        subscriptionUpdateInterval = nil
-        continuation?.finish()
-        continuation = nil
-        streamID = nil
-        streamPreferredRoom = nil
-        streamUpdateInterval = nil
+        subscription?.sending.cancel()
+        subscription = nil
+        for stream in nowPlayingStreams.values {
+            stream.continuation.finish()
+        }
+        nowPlayingStreams = [:]
+        latestNowPlayingStreamID = nil
         pendingCommands.finishAll(throwing: CancellationError())
         pendingResponses.finishAll(throwing: CancellationError())
         finishQueuedCoalescedCommands(throwing: CancellationError())
@@ -295,14 +308,16 @@ actor CiGatewayConnection {
             return
         }
 
-        streamID = id
-        self.continuation = continuation
-        streamPreferredRoom = preferredRoom
-        streamUpdateInterval = updateInterval
+        nowPlayingStreams[id] = NowPlayingStream(
+            continuation: continuation,
+            preferredRoom: preferredRoom,
+            updateInterval: updateInterval
+        )
+        latestNowPlayingStreamID = id
 
         do {
             try await ensureConnected(preferredRoom: preferredRoom, updateInterval: updateInterval, subscribe: true)
-            if let current {
+            if nowPlayingStreams[id] != nil, let current {
                 continuation.yield(current)
             }
         } catch {
@@ -311,31 +326,24 @@ actor CiGatewayConnection {
     }
 
     private func detachNowPlayingStream(id: UUID) {
-        guard streamID == id else {
-            return
+        nowPlayingStreams[id] = nil
+        if nowPlayingStreams.isEmpty {
+            reconnectTask?.cancel()
+            reconnectTask = nil
         }
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        continuation = nil
-        streamID = nil
-        streamPreferredRoom = nil
-        streamUpdateInterval = nil
     }
 
-    private func finishNowPlayingStream(id: UUID?, throwing error: Error? = nil) {
-        guard id == nil || streamID == id else {
+    private func finishNowPlayingStream(id: UUID, throwing error: Error) {
+        guard let stream = nowPlayingStreams.removeValue(forKey: id) else {
             return
         }
+        stream.continuation.finish(throwing: error)
+    }
 
-        if let error {
-            continuation?.finish(throwing: error)
-        } else {
-            continuation?.finish()
+    private func yieldToNowPlayingStreams(_ nowPlaying: CiGateway.NowPlaying) {
+        for stream in nowPlayingStreams.values {
+            stream.continuation.yield(nowPlaying)
         }
-        continuation = nil
-        streamID = nil
-        streamPreferredRoom = nil
-        streamUpdateInterval = nil
     }
 
     private func ensureConnected(
@@ -414,17 +422,29 @@ actor CiGatewayConnection {
             throw CiGateway.GatewayError.noRoomsAvailable
         }
 
-        if subscribedRoom == room, subscriptionUpdateInterval == updateInterval {
+        // One subscription per connection, shared by concurrent attaches. The
+        // sends run in their own task: they belong to the connection, so a
+        // stream cancelled mid-subscribe must not abort them for the others.
+        if let subscription, subscription.room == room, subscription.updateInterval == updateInterval {
+            try await subscription.sending.value
             return
         }
 
-        for subscription in CiGateway.nowPlayingSubscriptions {
-            try await subscription.send(room: room, session: session, updateInterval: updateInterval, on: socket)
+        let sending = Task {
+            for nowPlayingSubscription in CiGateway.nowPlayingSubscriptions {
+                try await nowPlayingSubscription.send(room: room, session: session, updateInterval: updateInterval, on: socket)
+            }
+            CiGateway.logger.info("Subscribed to now-playing updates for \(room, privacy: .public)")
         }
-
-        subscribedRoom = room
-        subscriptionUpdateInterval = updateInterval
-        CiGateway.logger.info("Subscribed to now-playing updates for \(room, privacy: .public)")
+        subscription = NowPlayingSubscription(room: room, updateInterval: updateInterval, sending: sending)
+        do {
+            try await sending.value
+        } catch {
+            if subscription?.sending == sending {
+                subscription = nil
+            }
+            throw error
+        }
     }
 
     private func handleMessage(_ message: String) {
@@ -449,7 +469,7 @@ actor CiGatewayConnection {
             }
             current?.merge(update)
             if let current {
-                continuation?.yield(current)
+                yieldToNowPlayingStreams(current)
             }
         } catch {
             CiGateway.logger.warning("Failed to handle gateway websocket message: \(String(describing: error), privacy: .public)")
@@ -467,7 +487,7 @@ actor CiGatewayConnection {
         pendingResponses.finishAll(throwing: error)
         finishQueuedCoalescedCommands(throwing: error)
 
-        if continuation != nil {
+        if !nowPlayingStreams.isEmpty {
             startReconnectLoop()
         }
     }
@@ -478,8 +498,8 @@ actor CiGatewayConnection {
         socket = nil
         session = nil
         resolvedRoom = nil
-        subscribedRoom = nil
-        subscriptionUpdateInterval = nil
+        subscription?.sending.cancel()
+        subscription = nil
     }
 
     private func startReconnectLoop() {
@@ -505,16 +525,17 @@ actor CiGatewayConnection {
     }
 
     private func reconnectNowPlayingStream() async throws {
-        guard let continuation, let updateInterval = streamUpdateInterval else {
+        let stream = latestNowPlayingStreamID.flatMap { nowPlayingStreams[$0] } ?? nowPlayingStreams.values.first
+        guard let stream else {
             reconnectTask = nil
             return
         }
 
-        try await ensureConnected(preferredRoom: streamPreferredRoom, updateInterval: updateInterval, subscribe: true)
+        try await ensureConnected(preferredRoom: stream.preferredRoom, updateInterval: stream.updateInterval, subscribe: true)
         reconnectTask = nil
 
         if let current {
-            continuation.yield(current)
+            yieldToNowPlayingStreams(current)
         }
         CiGateway.logger.info("Gateway websocket reconnected")
     }

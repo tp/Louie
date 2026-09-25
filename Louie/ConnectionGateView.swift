@@ -145,6 +145,11 @@ struct ConnectionGateView: View {
                 }
             }
         }
+        .onDisappear {
+            // A closed window must release its connection; the task above
+            // starts it again if this view comes back.
+            linn?.stop()
+        }
         .sheet(isPresented: $isShowingHelp) {
             LinnAPIHelpView()
         }
