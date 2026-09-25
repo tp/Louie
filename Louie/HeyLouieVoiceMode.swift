@@ -8,7 +8,10 @@ enum HeyLouieVoiceMode {
     /// invocations) → Apple TTS. `VoiceAgentController` + `HeyLouieWebSocketAgent`.
     case legacyPushToTalk
     /// OpenAI realtime speech-to-speech over WebRTC. `RealtimeVoiceController`.
+    /// iOS-only — WebRTC + AVAudioSession aren't available on native macOS.
+    #if os(iOS)
     case realtimeWebRTC
+    #endif
     /// On-device Apple Intelligence ("siri mode"). Apple STT → local
     /// `FoundationModels` `LanguageModelSession` with Swift tools → Apple TTS.
     /// `VoiceAgentController` + `AppleIntelligenceVoiceAgent`.

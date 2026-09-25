@@ -30,13 +30,19 @@ struct LibraryBrowser: View {
         .scrollEdgeEffectStyle(.soft, for: .top)
         .contentMargins(.vertical, 16, for: .scrollContent)
         .bottomPlayerBarClearance()
-        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
+        #if os(iOS)
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
+        #else
+            .searchable(text: $searchText)
+        #endif
         .searchFocused($searchFocused)
         .refreshable {
             linn.refreshLibrary()
         }
         .navigationTitle("Library")
-        .navigationBarTitleDisplayMode(.large)
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.large)
+        #endif
     }
 
     @ViewBuilder
