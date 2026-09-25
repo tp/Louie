@@ -56,7 +56,9 @@ public struct PlayQueue: View {
             }
         }
         .navigationTitle("Queue")
-        .navigationBarTitleDisplayMode(.large)
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.large)
+        #endif
     }
 
     private func scrollToSong(_ song: Linn.Song, with proxy: ScrollViewProxy) {

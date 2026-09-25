@@ -273,19 +273,22 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         hasAudibleAudioFired = false
         teardownEngine()
 
-        // Activate audio session.
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .measurement,
-                options: [.duckOthers, .defaultToSpeaker],
-            )
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            throw VoiceCaptureError.audioEngine(error.localizedDescription)
-        }
-        log.event("session_active")
+        // Activate audio session. iOS-only: macOS has no AVAudioSession; the
+        // AVAudioEngine input tap works without one.
+        #if os(iOS)
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: .measurement,
+                    options: [.duckOthers, .defaultToSpeaker],
+                )
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+            } catch {
+                throw VoiceCaptureError.audioEngine(error.localizedDescription)
+            }
+            log.event("session_active")
+        #endif
 
         // Wire the input stream into the analyzer.
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
@@ -384,7 +387,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         } catch {
             inputNode.removeTap(onBus: 0)
             teardownEngine()
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            #if os(iOS)
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            #endif
             throw VoiceCaptureError.audioEngine(error.localizedDescription)
         }
         audioEngine = engine
@@ -428,7 +433,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             // Cancel path — clean up and rethrow.
             teardownEngine()
             activePipeline = nil
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            #if os(iOS)
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            #endif
             throw error
         }
         log.event("end_signal", detail: "\(reason)")
@@ -465,7 +472,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
             onEvent(.speechEnded)
         }
 
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        #if os(iOS)
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
         audioEngine = nil
         // The analyzer is dead after finalize; ensure the next turn rebuilds.
         activePipeline = nil
@@ -515,15 +524,20 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         // a pending `await speak` doesn't leak.
         resumeSpeechContinuation()
 
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #if os(iOS)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
     }
 
     // MARK: VoiceSynthesizer
 
     func speak(_ text: String) async {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-        try? session.setActive(true, options: .notifyOthersOnDeactivation)
+        // iOS-only: macOS AVSpeechSynthesizer plays without an audio session.
+        #if os(iOS)
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try? session.setActive(true, options: .notifyOthersOnDeactivation)
+        #endif
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = Self.bestVoice(forBaseLanguage: "en")
@@ -815,16 +829,23 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
         return output
     }
 
-    // Picks the highest-quality installed voice for the locale. Premium and
-    // enhanced variants only show up here once the user has downloaded them
-    // under Settings → Accessibility → Spoken Content (or via Siri Voice),
-    // so on a fresh device this falls back to the compact default.
+    // Reliability over raw quality. `speechVoices()` lists premium/enhanced
+    // voices even when their data isn't downloaded on this device; selecting
+    // an undownloaded voice makes the synthesizer emit an empty buffer and no
+    // audio (logged as "Invalid maui voice identifier …" +
+    // "mBuffers[0].mDataByteSize (0) should be non-zero"). That's been seen
+    // under "Designed for iPad" on Mac, where premium "Zoe" is listed but
+    // unusable, so picking by quality silently breaks TTS.
+    //
+    // `AVSpeechSynthesisVoice(language:)` instead returns the system default
+    // voice for the language, which is guaranteed installed and already
+    // reflects an enhanced default if the user selected one under Settings →
+    // Accessibility → Spoken Content. If a specific quality voice exists we
+    // only take it when it's actually the user's default, which that API
+    // already accounts for.
     private static func bestVoice(forBaseLanguage languageCode: String) -> AVSpeechSynthesisVoice? {
-        let candidates = AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language == languageCode || $0.language.hasPrefix("\(languageCode)-") }
-        return candidates.first(where: { $0.quality == .premium })
-            ?? candidates.first(where: { $0.quality == .enhanced })
-            ?? AVSpeechSynthesisVoice(language: "en-US")
+        AVSpeechSynthesisVoice(language: "\(languageCode)-US")
+            ?? AVSpeechSynthesisVoice(language: languageCode)
     }
 }
 
