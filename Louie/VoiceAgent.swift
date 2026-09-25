@@ -28,6 +28,9 @@ import SwiftUI
 /// - `failed` is a client-side capture or recognition failure.
 enum VoiceAgentState: Equatable {
     case idle
+    case connecting
+    case listening
+    case speaking
     case recording
     case thinking
     case runningLocalTool(LocalToolActivity)
@@ -203,7 +206,7 @@ final class VoiceAgentController {
                 // startRecording returns shortly with the partial transcript.
                 voiceLog.event("manual_stop")
                 capture.stopRecording()
-            case .thinking, .runningLocalTool, .askingUser:
+            case .connecting, .listening, .speaking, .thinking, .runningLocalTool, .askingUser:
                 // Tap-to-cancel while the agent is busy.
                 cancelEverything()
                 state = .idle
@@ -469,6 +472,12 @@ private struct VoiceAgentStatusBanner: View {
         switch state {
         case .idle, .askingUser:
             nil
+        case .connecting:
+            Line(text: "Connecting…", tint: .primary)
+        case .listening:
+            Line(text: "I'm ready. Start talking.", tint: .primary)
+        case .speaking:
+            Line(text: "Speaking…", tint: .primary)
         case .recording:
             Line(text: "Listening…", tint: .primary)
         case .thinking:
@@ -517,13 +526,13 @@ private struct VoiceAgentButton: View {
                 .font(.title2)
                 .foregroundStyle(.primary)
                 .transition(.scale.combined(with: .opacity))
-        case .recording:
+        case .recording, .listening:
             Image(systemName: "waveform")
                 .font(.title2)
                 .foregroundStyle(.red)
                 .symbolEffect(.variableColor.iterative, options: .repeating)
                 .transition(.scale.combined(with: .opacity))
-        case .thinking, .runningLocalTool, .askingUser:
+        case .connecting, .speaking, .thinking, .runningLocalTool, .askingUser:
             Image(systemName: "waveform")
                 .font(.title2)
                 .foregroundStyle(.secondary)
@@ -535,11 +544,11 @@ private struct VoiceAgentButton: View {
     @ViewBuilder
     private var ringOverlay: some View {
         switch state {
-        case .recording:
+        case .recording, .listening:
             Circle()
                 .strokeBorder(.red.opacity(0.6), lineWidth: 2)
                 .transition(.opacity)
-        case .thinking, .runningLocalTool, .askingUser:
+        case .connecting, .speaking, .thinking, .runningLocalTool, .askingUser:
             LoadingRing()
                 .transition(.opacity)
         case .idle, .showingResponse, .failed:
@@ -551,6 +560,12 @@ private struct VoiceAgentButton: View {
         switch state {
         case .idle, .showingResponse, .failed:
             "Tap to talk"
+        case .connecting:
+            "Connecting, tap to cancel"
+        case .listening:
+            "Listening, tap to hang up"
+        case .speaking:
+            "Speaking, tap to hang up"
         case .recording:
             "Listening, tap to send now"
         case .thinking:
@@ -566,6 +581,10 @@ private struct VoiceAgentButton: View {
         switch state {
         case .idle, .showingResponse, .failed:
             "Tap to start. The system listens until you stop speaking."
+        case .connecting:
+            "Tap to cancel the connection."
+        case .listening, .speaking:
+            "Tap to end the voice session."
         case .recording:
             "Tap to stop listening immediately."
         case .thinking, .runningLocalTool, .askingUser:
