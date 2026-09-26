@@ -71,18 +71,11 @@ private struct ContentViewBody: View {
             }
         }
 
-        .task {
-            // ConnectionGateView already started the connection; only start
-            // here when this view is used standalone (previews, tests).
-            if linn.connectionState == .idle {
-                linn.start()
-            }
-        }
+        // Don't start or stop Linn here; ConnectionGateView owns that. This
+        // view mounts under the splash while the gate is starting, and a
+        // second start races the first.
         .task {
             await voiceAgent.capture.prewarm()
-        }
-        .onDisappear {
-            linn.stop()
         }
         .environment(\.bottomContentClearance, playBarHeight)
         .safeAreaInset(edge: .bottom) {
@@ -185,6 +178,12 @@ private extension View {
 
         var body: some View {
             ContentViewBody(linn: linn)
+                .task {
+                    linn.start()
+                }
+                .onDisappear {
+                    linn.stop()
+                }
         }
     }
 
