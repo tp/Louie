@@ -503,7 +503,7 @@ extension CiGateway {
     struct Subscription: Sendable {
         let tag: String
         let requestPath: String
-        private let _send: @Sendable (_ room: String, _ session: String, _ updateInterval: Int, _ socket: URLSessionWebSocketTask) async throws -> Void
+        private let _send: @Sendable (_ room: String, _ session: String, _ updateInterval: Int, _ socket: any GatewaySocket) async throws -> Void
         private let _decode: @Sendable (_ data: Data, _ decoder: JSONDecoder) throws -> NowPlayingUpdate?
 
         init<Request: Encodable & Sendable, Response: Decodable & Sendable>(
@@ -524,7 +524,7 @@ extension CiGateway {
             }
         }
 
-        func send(room: String, session: String, updateInterval: Int, on socket: URLSessionWebSocketTask) async throws {
+        func send(room: String, session: String, updateInterval: Int, on socket: any GatewaySocket) async throws {
             try await _send(room, session, updateInterval, socket)
             CiGateway.logger.debug("Sent \(self.requestPath, privacy: .public) subscription for \(room, privacy: .public)")
         }
@@ -596,7 +596,7 @@ extension CiGateway {
         ),
     ]
 
-    static func createSession(on socket: URLSessionWebSocketTask, timeout: Int, userAgent: String) async throws -> String {
+    static func createSession(on socket: any GatewaySocket, timeout: Int, userAgent: String, timing: GatewayTiming = GatewayTiming()) async throws -> String {
         try await send(
             WebSocketRequest(
                 requestPath: "/session/create",
@@ -606,7 +606,7 @@ extension CiGateway {
         )
 
         while !Task.isCancelled {
-            let message = try await receiveText(from: socket, timeout: .milliseconds(timeout), context: "session create")
+            let message = try await receiveText(from: socket, timeout: .milliseconds(timeout), context: "session create", timing: timing)
             let envelope = try JSONDecoder().decode(GatewayEnvelope.self, from: Data(message.utf8))
             guard envelope.requestPath == "/session/create" else {
                 continue
@@ -626,7 +626,8 @@ extension CiGateway {
         preferredRoom: String?,
         session: String,
         timeout: Int,
-        on socket: URLSessionWebSocketTask
+        on socket: any GatewaySocket,
+        timing: GatewayTiming = GatewayTiming()
     ) async throws -> String {
         logger.info("Requesting Linn V2 topology status")
         try await send(
@@ -636,7 +637,7 @@ extension CiGateway {
         )
 
         while !Task.isCancelled {
-            let message = try await receiveText(from: socket, timeout: .milliseconds(timeout), context: "house topology")
+            let message = try await receiveText(from: socket, timeout: .milliseconds(timeout), context: "house topology", timing: timing)
             let envelope = try JSONDecoder().decode(GatewayEnvelope.self, from: Data(message.utf8))
             guard envelope.requestPath == "/V2/topology/status" else {
                 continue
@@ -669,11 +670,11 @@ extension CiGateway {
         throw GatewayError.noRoomsAvailable
     }
 
-    static func send<T: Encodable>(_ value: T, requestPath: String, on socket: URLSessionWebSocketTask) async throws {
+    static func send<T: Encodable>(_ value: T, requestPath: String, on socket: any GatewaySocket) async throws {
         try await send(WebSocketRequest(requestPath: requestPath, body: value), on: socket)
     }
 
-    static func send<T: Encodable>(_ value: T, on socket: URLSessionWebSocketTask) async throws {
+    static func send<T: Encodable>(_ value: T, on socket: any GatewaySocket) async throws {
         let data = try JSONEncoder().encode(value)
         let text = String(decoding: data, as: UTF8.self)
         if !isNoisyPayload(text) {
@@ -682,7 +683,7 @@ extension CiGateway {
         try await socket.send(.string(text))
     }
 
-    static func receiveText(from socket: URLSessionWebSocketTask) async throws -> String {
+    static func receiveText(from socket: any GatewaySocket) async throws -> String {
         switch try await socket.receive() {
         case let .string(text):
             if !isNoisyPayload(text) {
@@ -703,25 +704,28 @@ extension CiGateway {
     }
 
     static func receiveText(
-        from socket: URLSessionWebSocketTask,
+        from socket: any GatewaySocket,
         timeout: Duration,
-        context: String
+        context: String,
+        timing: GatewayTiming = GatewayTiming()
     ) async throws -> String {
-        try await withThrowingTaskGroup(of: String.self) { group in
+        try await withThrowingTaskGroup(of: String?.self) { group in
+            defer { group.cancelAll() }
             group.addTask {
                 try await receiveText(from: socket)
             }
 
             group.addTask {
-                try await Task.sleep(for: timeout)
+                try await timing.sleep(timeout)
+                return nil
+            }
+
+            guard let text = try await group.next() ?? nil else {
+                // Unblock the receive before the group waits for its children.
+                socket.cancel(with: .goingAway, reason: nil)
                 throw GatewayError.timedOut(context)
             }
 
-            guard let text = try await group.next() else {
-                throw GatewayError.timedOut(context)
-            }
-
-            group.cancelAll()
             return text
         }
     }
