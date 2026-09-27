@@ -375,26 +375,28 @@ actor CiGatewayConnection {
 
         let webSocketURL = webSocketURL
         let socket = urlSession.webSocketTask(with: webSocketURL)
+        var didConnect = false
+        defer {
+            if !didConnect {
+                socket.cancel(with: .goingAway, reason: nil)
+            }
+        }
         CiGateway.logger.info("Opening websocket \(webSocketURL.absoluteString, privacy: .public)")
         socket.resume()
 
-        do {
-            CiGateway.logger.info("Creating gateway session")
-            let session = try await CiGateway.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent)
-            CiGateway.logger.info("Gateway session created \(session, privacy: .public)")
+        CiGateway.logger.info("Creating gateway session")
+        let session = try await CiGateway.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent)
+        CiGateway.logger.info("Gateway session created \(session, privacy: .public)")
 
-            let room = try await CiGateway.resolveRoom(preferredRoom: preferredRoom, session: session, timeout: sessionTimeout, on: socket)
-            CiGateway.logger.info("Using Linn room \(room, privacy: .public)")
+        let room = try await CiGateway.resolveRoom(preferredRoom: preferredRoom, session: session, timeout: sessionTimeout, on: socket)
+        CiGateway.logger.info("Using Linn room \(room, privacy: .public)")
 
-            self.socket = socket
-            self.session = session
-            resolvedRoom = room
-            current = CiGateway.NowPlaying(room: room, session: session)
-            startReceiveLoop(socket: socket)
-        } catch {
-            socket.cancel(with: .goingAway, reason: nil)
-            throw error
-        }
+        self.socket = socket
+        self.session = session
+        resolvedRoom = room
+        current = CiGateway.NowPlaying(room: room, session: session)
+        startReceiveLoop(socket: socket)
+        didConnect = true
     }
 
     private func startReceiveLoop(socket: URLSessionWebSocketTask) {
@@ -585,13 +587,10 @@ actor CiGatewayConnection {
         }
 
         coalescingInFlight.insert(lane)
-        do {
-            try await send(command)
+        defer {
             finishCoalescedLane(lane)
-        } catch {
-            finishCoalescedLane(lane)
-            throw error
         }
+        try await send(command)
     }
 
     private func send(_ command: CoalescedCommand) async throws {
@@ -632,13 +631,14 @@ actor CiGatewayConnection {
     }
 
     private func runQueuedCoalescedCommand(_ queued: QueuedCoalescedCommand, lane: CoalescingLane) async {
+        defer {
+            finishCoalescedLane(lane)
+        }
         do {
             try await send(queued.command)
             queued.continuation.resume()
-            finishCoalescedLane(lane)
         } catch {
             queued.continuation.resume(throwing: error)
-            finishCoalescedLane(lane)
         }
     }
 
