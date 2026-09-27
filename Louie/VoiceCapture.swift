@@ -351,45 +351,57 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
 
         let pumpContinuation = continuation
         let target = analyzerFormat
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { buffer, _ in
-            if let converter {
-                if let converted = Self.convert(buffer, with: converter, to: target) {
-                    pumpContinuation.yield(AnalyzerInput(buffer: converted))
-                }
-            } else {
-                pumpContinuation.yield(AnalyzerInput(buffer: buffer))
-            }
-            // Fire mic_hot on first buffer (back on main actor).
-            Task { @MainActor [weak self] in
-                guard let self, !self.hasFiredMicHot else { return }
-                hasFiredMicHot = true
-                log.event("first_buffer")
-                onEvent(.micHot)
-            }
-            // RMS-based VAD: every audible buffer drives `speechStarted`
-            // + (re)arms the silence timer. Independent of how sparsely
-            // the transcriber emits results, so the timer only fires
-            // after true trailing silence.
-            let rms = Self.computeRMS(buffer)
-            let isAudible = rms > Self.audibleThreshold
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if rms > audioWindowMaxRMS { audioWindowMaxRMS = rms }
-                if isAudible {
-                    markAudible(rms: rms, onEvent: onEvent)
-                }
-            }
-        }
-
-        engine.prepare()
+        let audibleThreshold = Self.audibleThreshold
+        var tapInstalled = false
         do {
+            try inputNode.installAudioTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] readOnlyBuffer, _ in
+                // The converter and SpeechAnalyzer input still take mutable PCM buffers.
+                let buffer = AVAudioPCMBuffer(copying: readOnlyBuffer)
+                if let converter {
+                    if let converted = Self.convert(buffer, with: converter, to: target) {
+                        pumpContinuation.yield(AnalyzerInput(buffer: converted))
+                    }
+                } else {
+                    pumpContinuation.yield(AnalyzerInput(buffer: buffer))
+                }
+                // Fire mic_hot on first buffer (back on main actor).
+                Task { @MainActor [weak self] in
+                    guard let self, !self.hasFiredMicHot else { return }
+                    hasFiredMicHot = true
+                    log.event("first_buffer")
+                    onEvent(.micHot)
+                }
+                // RMS-based VAD: every audible buffer drives `speechStarted`
+                // + (re)arms the silence timer. Independent of how sparsely
+                // the transcriber emits results, so the timer only fires
+                // after true trailing silence.
+                let rms = Self.computeRMS(buffer)
+                let isAudible = rms > audibleThreshold
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if rms > audioWindowMaxRMS { audioWindowMaxRMS = rms }
+                    if isAudible {
+                        markAudible(rms: rms, onEvent: onEvent)
+                    }
+                }
+            }
+            tapInstalled = true
+            engine.prepare()
             try engine.start()
         } catch {
-            inputNode.removeTap(onBus: 0)
+            if tapInstalled {
+                inputNode.removeTap(onBus: 0)
+            }
             teardownEngine()
+            transcriberTask?.cancel()
+            transcriberTask = nil
+            analyzerTask?.cancel()
+            analyzerTask = nil
+            activePipeline = nil
             #if os(iOS)
                 try? session.setActive(false, options: .notifyOthersOnDeactivation)
             #endif
+            await pipeline.cancel()
             throw VoiceCaptureError.audioEngine(error.localizedDescription)
         }
         audioEngine = engine
@@ -774,7 +786,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
 
         let speechStatus: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation {
             continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
+            // Speech can invoke this callback off the main queue. Keep it
+            // nonisolated; resuming the continuation returns us to MainActor.
+            SFSpeechRecognizer.requestAuthorization { @Sendable status in
                 continuation.resume(returning: status)
             }
         }
@@ -787,7 +801,7 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
     /// silence, ~0.05+ for normal speech at typical mic distance.
     /// Returns 0 for non-float buffers — shouldn't occur for
     /// AVAudioEngine input nodes on iOS, which deliver float32.
-    private static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+    nonisolated private static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
         let frameLength = Int(buffer.frameLength)
         guard frameLength > 0, let channelData = buffer.floatChannelData else {
             return 0
@@ -803,7 +817,7 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
 
     /// Convert a buffer between formats using a long-lived AVAudioConverter.
     /// Nil-returns on conversion failure; the buffer is dropped silently.
-    private static func convert(
+    nonisolated private static func convert(
         _ buffer: AVAudioPCMBuffer,
         with converter: AVAudioConverter,
         to target: AVAudioFormat,
