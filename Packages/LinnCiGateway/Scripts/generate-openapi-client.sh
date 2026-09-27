@@ -42,6 +42,7 @@ yq -i '.paths = (.paths | pick([
     "/V2/transport/pause",
     "/V2/transport/skip_track",
     "/V2/seek/status",
+    "/V2/seek/set_position",
     "/V2/metadata/status",
     "/V2/volume/status",
     "/V2/volume/set_vol",

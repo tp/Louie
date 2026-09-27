@@ -232,6 +232,33 @@ paths:
             $ref: '#/definitions/V2SeekStatusResponse'
         default:
           $ref: '#/responses/default'
+  /V2/seek/set_position:
+    post:
+      summary: Skip to absolute position in currently playing item
+      description: |
+        Skips to absolute position in the currently playing item if relevant to active source
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - $ref: '#/definitions/ParamRoom'
+              - type: object
+                properties:
+                  position:
+                    description: If specified, absolute position to change to
+                    type: integer
+                    format: int32
+      tags:
+        - API V2
+      responses:
+        '200':
+          $ref: '#/responses/success_room'
+        default:
+          $ref: '#/responses/default'
   /V2/metadata/status:
     get:
       summary: Query metadata status of room
