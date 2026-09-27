@@ -786,7 +786,9 @@ final class LiveVoice: NSObject, VoiceCapture, VoiceSynthesizer, AVSpeechSynthes
 
         let speechStatus: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation {
             continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
+            // Speech can invoke this callback off the main queue. Keep it
+            // nonisolated; resuming the continuation returns us to MainActor.
+            SFSpeechRecognizer.requestAuthorization { @Sendable status in
                 continuation.resume(returning: status)
             }
         }
