@@ -174,7 +174,8 @@ extension CiGateway.NowPlaying.Timeline {
         self.init(
             position: seek.elapsed,
             duration: seek.duration,
-            seekableRange: seekableRange
+            seekableRange: seekableRange,
+            isSeekable: seek.seekable
         )
     }
 
@@ -182,8 +183,15 @@ extension CiGateway.NowPlaying.Timeline {
         if let position = update.position {
             self.position = position
         }
-        if update.seekableRange != nil {
-            seekableRange = update.seekableRange
+        if let duration = update.duration {
+            self.duration = duration
+        }
+        if let isSeekable = update.isSeekable {
+            self.isSeekable = isSeekable
+            seekableRange = isSeekable ? update.seekableRange : nil
+        }
+        if isSeekable == true, let duration = update.duration {
+            seekableRange?.upperBound = duration
         }
     }
 }

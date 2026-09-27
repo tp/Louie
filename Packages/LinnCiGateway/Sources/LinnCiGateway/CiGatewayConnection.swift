@@ -174,6 +174,12 @@ actor CiGatewayConnection {
         try await sendPlayStateCommand(room: room, action: .play)
     }
 
+    func seek(to position: Int, room: String) async throws {
+        try await sendCommand(room: room, requestPath: "/V2/seek/set_position") { session, tag in
+            V2SeekSetPositionPostRequest(tag: tag, session: session, room: room, position: position)
+        }
+    }
+
     func pause(room: String) async throws {
         try await sendPlayStateCommand(room: room, action: .pause)
     }

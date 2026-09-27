@@ -8,7 +8,7 @@ public extension Linn {
         case failed(String)
     }
 
-    enum PlayState: Sendable, Equatable {
+    enum PlayState: Sendable, Equatable, Codable {
         case stopped
         case playing
         case paused
@@ -21,7 +21,7 @@ public extension Linn {
         case backward
     }
 
-    struct Song: Sendable, Equatable, Identifiable {
+    struct Song: Sendable, Equatable, Identifiable, Codable {
         public var id: String
         public var title: String
         public var artist: String?
@@ -49,15 +49,31 @@ public extension Linn {
         }
     }
 
-    struct Timeline: Sendable, Equatable {
+    enum SeekError: Error, Sendable {
+        case unavailable
+        case invalidPosition
+    }
+
+    struct Timeline: Sendable, Equatable, Codable {
         public var position: Int?
         public var duration: Int?
         public var progress: Double?
+        public var seekableRange: ClosedRange<Int>?
 
-        public init(position: Int? = nil, duration: Int? = nil, progress: Double? = nil) {
+        public init(position: Int? = nil, duration: Int? = nil, progress: Double? = nil, seekableRange: ClosedRange<Int>? = nil) {
             self.position = position
             self.duration = duration
             self.progress = progress
+            self.seekableRange = seekableRange
+        }
+
+        public func seekPosition(for position: TimeInterval) throws -> Int {
+            guard position.isFinite else { throw SeekError.invalidPosition }
+            guard let seekableRange else { throw SeekError.unavailable }
+            let lower = max(0, seekableRange.lowerBound)
+            let upper = min(Int(Int32.max), seekableRange.upperBound)
+            guard lower <= upper else { throw SeekError.unavailable }
+            return Int(min(Double(upper), max(Double(lower), position)).rounded(.down))
         }
     }
 

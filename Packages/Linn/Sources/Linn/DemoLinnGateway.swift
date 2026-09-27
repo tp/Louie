@@ -162,6 +162,11 @@
             yieldSnapshot()
         }
 
+        public func seek(to position: Int, room _: String) async throws {
+            self.position = position
+            yieldSnapshot()
+        }
+
         public func pause(room _: String) async throws {
             try await Task.sleep(for: .milliseconds(150))
             transportState = .pause

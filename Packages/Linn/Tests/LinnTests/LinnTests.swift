@@ -1352,6 +1352,11 @@ private actor TestGateway: LinnGateway {
     private var nextCalls = 0
     private var playCalls = 0
     private var pauseCalls = 0
+    private(set) var seekPositions: [Int] = []
+
+    func seek(to position: Int, room _: String) async throws {
+        seekPositions.append(position)
+    }
     private var shouldSuspendSelections = false
     private var suspendedSelections: [CheckedContinuation<Void, Never>] = []
     private var shouldFailMediaSelections = false
@@ -1856,4 +1861,25 @@ private func waitUntil(
     }
 
     #expect(await condition())
+}
+
+@Test @MainActor
+func seekForwardsClampedSecondsAndRejectsRadio() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    defer { linn.stop() }
+    linn.start()
+    var update = nowPlaying(index: 0, titles: ["Song"], position: 5, volume: 10)
+    update.timeline = .init(position: 5, duration: 180, seekableRange: .init(lowerBound: 10, upperBound: 150))
+    await gateway.send(update)
+    try await waitUntil { linn.timeline?.seekableRange == 10...150 }
+    try await linn.seek(to: 45.8)
+    try await linn.seek(to: 500)
+    #expect(await gateway.seekPositions == [45, 150])
+
+    update.timeline = .init(position: 6, isSeekable: false)
+    await gateway.send(update)
+    try await waitUntil { linn.timeline?.position == 6 }
+    await #expect(throws: Linn.SeekError.unavailable) { try await linn.seek(to: 10) }
+    #expect(await gateway.seekPositions == [45, 150])
 }

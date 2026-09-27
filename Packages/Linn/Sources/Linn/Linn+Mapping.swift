@@ -93,7 +93,12 @@ public extension Linn.Timeline {
         self.init(
             position: timeline.position,
             duration: timeline.duration,
-            progress: timeline.progress
+            progress: timeline.progress,
+            seekableRange: timeline.seekableRange.flatMap { range in
+                let lower = max(0, range.lowerBound ?? 0)
+                guard let upper = range.upperBound ?? timeline.duration, upper > lower else { return nil }
+                return lower...upper
+            }
         )
     }
 }
