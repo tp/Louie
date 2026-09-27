@@ -98,14 +98,21 @@ actor CiGatewayConnection {
     private let webSocketURL: URL
     private let userAgent: String
     private let sessionTimeout: Int
-    private let urlSession: URLSession
+    private let makeSocket: @Sendable (URL) -> any GatewaySocket
+    private let timing: GatewayTiming
 
-    private var socket: URLSessionWebSocketTask?
+    private var socket: (any GatewaySocket)?
     private var session: String?
     private var resolvedRoom: String?
     private var receiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
-    private var isStarting = false
+    private struct Opening {
+        var id: UUID
+        var socket: any GatewaySocket
+        var task: Task<Void, Error>
+    }
+
+    private var opening: Opening?
 
     private struct NowPlayingStream {
         var continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
@@ -140,10 +147,26 @@ actor CiGatewayConnection {
         sessionTimeout: Int,
         urlSession: URLSession
     ) {
+        self.init(
+            webSocketURL: webSocketURL,
+            userAgent: userAgent,
+            sessionTimeout: sessionTimeout,
+            makeSocket: { urlSession.webSocketTask(with: $0) }
+        )
+    }
+
+    init(
+        webSocketURL: URL,
+        userAgent: String,
+        sessionTimeout: Int,
+        timing: GatewayTiming = GatewayTiming(),
+        makeSocket: @escaping @Sendable (URL) -> any GatewaySocket
+    ) {
         self.webSocketURL = webSocketURL
         self.userAgent = userAgent
         self.sessionTimeout = sessionTimeout
-        self.urlSession = urlSession
+        self.timing = timing
+        self.makeSocket = makeSocket
     }
 
     nonisolated func nowPlayingEvents(
@@ -278,6 +301,9 @@ actor CiGatewayConnection {
     }
 
     func close() {
+        opening?.task.cancel()
+        opening?.socket.cancel(with: .goingAway, reason: nil)
+        opening = nil
         receiveTask?.cancel()
         receiveTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
@@ -286,6 +312,7 @@ actor CiGatewayConnection {
         socket = nil
         session = nil
         resolvedRoom = nil
+        current = nil
         subscription?.sending.cancel()
         subscription = nil
         for stream in nowPlayingStreams.values {
@@ -351,15 +378,26 @@ actor CiGatewayConnection {
         updateInterval: Int?,
         subscribe: Bool
     ) async throws {
-        while isStarting {
-            try await Task.sleep(for: .milliseconds(50))
-            if socket != nil, session != nil {
-                break
-            }
-        }
-
+        try Task.checkCancellation()
         if socket == nil || session == nil {
-            try await openConnection(preferredRoom: preferredRoom)
+            let attempt: Opening
+            if let opening {
+                attempt = opening
+            } else {
+                let id = UUID()
+                let socket = makeSocket(webSocketURL)
+                let task = Task {
+                    try await self.openConnection(socket: socket, id: id, preferredRoom: preferredRoom)
+                }
+                attempt = Opening(id: id, socket: socket, task: task)
+                opening = attempt
+            }
+            // One caller's cancellation must not cancel the shared attempt.
+            try await attempt.task.value
+            try Task.checkCancellation()
+            guard socket != nil, session != nil else {
+                throw CiGateway.GatewayError.missingSession
+            }
         }
 
         if subscribe, let updateInterval {
@@ -367,14 +405,14 @@ actor CiGatewayConnection {
         }
     }
 
-    private func openConnection(preferredRoom: String?) async throws {
-        isStarting = true
+    private func openConnection(socket: any GatewaySocket, id: UUID, preferredRoom: String?) async throws {
         defer {
-            isStarting = false
+            if opening?.id == id {
+                opening = nil
+            }
         }
 
         let webSocketURL = webSocketURL
-        let socket = urlSession.webSocketTask(with: webSocketURL)
         var didConnect = false
         defer {
             if !didConnect {
@@ -385,21 +423,29 @@ actor CiGatewayConnection {
         socket.resume()
 
         CiGateway.logger.info("Creating gateway session")
-        let session = try await CiGateway.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent)
+        let session = try await CiGateway.createSession(on: socket, timeout: sessionTimeout, userAgent: userAgent, timing: timing)
         CiGateway.logger.info("Gateway session created \(session, privacy: .public)")
 
-        let room = try await CiGateway.resolveRoom(preferredRoom: preferredRoom, session: session, timeout: sessionTimeout, on: socket)
+        let room = try await CiGateway.resolveRoom(preferredRoom: preferredRoom, session: session, timeout: sessionTimeout, on: socket, timing: timing)
         CiGateway.logger.info("Using Linn room \(room, privacy: .public)")
 
+        try Task.checkCancellation()
+        guard opening?.id == id else { throw CancellationError() }
         self.socket = socket
         self.session = session
         resolvedRoom = room
-        current = CiGateway.NowPlaying(room: room, session: session)
+        if current?.room == room {
+            // Keep the last snapshot visible until the renewed subscriptions
+            // fill it in. A different room must start with an empty snapshot.
+            current?.context = .init(room: room, session: session)
+        } else {
+            current = CiGateway.NowPlaying(room: room, session: session)
+        }
         startReceiveLoop(socket: socket)
         didConnect = true
     }
 
-    private func startReceiveLoop(socket: URLSessionWebSocketTask) {
+    private func startReceiveLoop(socket: any GatewaySocket) {
         receiveTask?.cancel()
         receiveTask = Task {
             do {
@@ -478,7 +524,7 @@ actor CiGatewayConnection {
         }
     }
 
-    private func handleReceiveFailure(_ error: Error, from failedSocket: URLSessionWebSocketTask) {
+    private func handleReceiveFailure(_ error: Error, from failedSocket: any GatewaySocket) {
         guard socket === failedSocket else {
             return
         }
@@ -510,17 +556,17 @@ actor CiGatewayConnection {
         }
 
         reconnectTask = Task {
-            var delay = Duration.milliseconds(500)
+            var delay = timing.reconnectDelay
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: delay)
+                    try await timing.sleep(delay)
                     try await self.reconnectNowPlayingStream()
                     return
                 } catch is CancellationError {
                     return
                 } catch {
                     CiGateway.logger.warning("Gateway websocket reconnect failed: \(String(describing: error), privacy: .public)")
-                    delay = min(delay * 2, .seconds(10))
+                    delay = min(delay * 2, timing.maximumReconnectDelay)
                 }
             }
         }
@@ -720,13 +766,13 @@ actor CiGatewayConnection {
         _ command: Command,
         requestPath: String,
         tag: String,
-        socket: URLSessionWebSocketTask
+        socket: any GatewaySocket
     ) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let timeoutTask = Task {
                     do {
-                        try await Task.sleep(for: .seconds(2))
+                        try await timing.sleep(timing.commandTimeout)
                     } catch {
                         // Cancelled by completion — a swallowed `try?` would
                         // run the timeout immediately instead of never.
@@ -763,13 +809,13 @@ actor CiGatewayConnection {
         _ command: Command,
         requestPath: String,
         tag: String,
-        socket: URLSessionWebSocketTask
+        socket: any GatewaySocket
     ) async throws -> Data {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let timeoutTask = Task {
                     do {
-                        try await Task.sleep(for: .seconds(5))
+                        try await timing.sleep(timing.responseTimeout)
                     } catch {
                         // Cancelled by completion — see pendingCommands above.
                         return
