@@ -154,11 +154,13 @@ public final class CiGateway: Sendable {
             public var position: Int?
             public var duration: Int?
             public var seekableRange: SeekableRange?
+            public var isSeekable: Bool?
 
-            public init(position: Int? = nil, duration: Int? = nil, seekableRange: SeekableRange? = nil) {
+            public init(position: Int? = nil, duration: Int? = nil, seekableRange: SeekableRange? = nil, isSeekable: Bool? = nil) {
                 self.position = position
                 self.duration = duration
                 self.seekableRange = seekableRange
+                self.isSeekable = isSeekable ?? (seekableRange == nil ? nil : true)
             }
 
             public var progress: Double? {
@@ -379,6 +381,11 @@ public final class CiGateway: Sendable {
 
     public func play(room: String) async throws {
         try await connection.play(room: room)
+    }
+
+    /// Seek to an absolute whole-second position in the current item.
+    public func seek(to position: Int, room: String) async throws {
+        try await connection.seek(to: max(0, min(Int(Int32.max), position)), room: room)
     }
 
     public func pause(room: String) async throws {

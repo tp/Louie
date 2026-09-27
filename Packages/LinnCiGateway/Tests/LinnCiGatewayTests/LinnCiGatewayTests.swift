@@ -110,3 +110,34 @@ func encodesMediaSelectAndFavouriteRequests() throws {
     #expect(favouriteJSON.contains("\"favourite\":true"))
     #expect(favouriteJSON.contains("\"media_id\":\"album-1\""))
 }
+
+@Test
+func encodesSeekCommandInGatewaySeconds() throws {
+    let request = V2SeekSetPositionPostRequest(tag: "seek-1", session: "s.01", room: "Linn", position: 45)
+    let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+    #expect(json["position"] as? Int == 45)
+    #expect(json["room"] as? String == "Linn")
+    #expect(json["session"] as? String == "s.01")
+    #expect(json["tag"] as? String == "seek-1")
+}
+
+@Test
+func seekUpdatesRefreshDurationAndClearDisabledSeeking() throws {
+    var timeline = try #require(CiGateway.NowPlaying.Timeline(response: .init(data: .init(seekable: true, elapsed: 10, duration: 200))))
+    let positionOnly = try #require(CiGateway.NowPlaying.Timeline(response: .init(data: .init(elapsed: 11))))
+    timeline.mergePosition(positionOnly)
+    #expect(timeline.seekableRange?.upperBound == 200)
+    #expect(timeline.position == 11)
+
+    let newTrack = try #require(CiGateway.NowPlaying.Timeline(response: .init(data: .init(seekable: true, elapsed: 0, duration: 300))))
+    timeline.mergePosition(newTrack)
+    #expect(timeline.duration == 300)
+    #expect(timeline.seekableRange?.upperBound == 300)
+
+    let radio = try #require(CiGateway.NowPlaying.Timeline(response: .init(data: .init(seekable: false))))
+    timeline.mergePosition(radio)
+    #expect(timeline.seekableRange == nil)
+    #expect(timeline.isSeekable == false)
+    timeline.mergePosition(positionOnly)
+    #expect(timeline.seekableRange == nil)
+}
