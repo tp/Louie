@@ -70,3 +70,28 @@ jobs:
             -skipPackagePluginValidation \
             test \
             | xcbeautify --renderer github-actions
+
+  macos:
+    name: macOS app
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: "27.0"
+
+      - name: Build Louie (macOS)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Louie.xcodeproj \
+            -scheme Louie \
+            -destination 'generic/platform=macOS' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            build \
+            | xcbeautify --renderer github-actions
