@@ -352,9 +352,9 @@ fn validated_seek_position(snapshot: &pb::StateSnapshot, mut position: i32) -> R
 fn media_page(response: Value) -> Result<pb::MediaPage, Status> {
     let page = websocket::decode_media_page(response)
         .map_err(|error| Status::internal(format!("invalid Linn media response: {error}")))?;
-    let data = page
-        .data
-        .ok_or_else(|| Status::internal("Linn media response has no data"))?;
+    let Some(data) = page.data else {
+        return Ok(pb::MediaPage::default());
+    };
     let children: Vec<_> = data
         .children
         .unwrap_or_default()

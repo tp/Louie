@@ -8,7 +8,7 @@ use linn_ci_gateway::{models, websocket};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::optimism::Optimism;
 use crate::pb::{
@@ -274,6 +274,7 @@ async fn run_connection(
                 };
                 if let Some(tag) = header.tag.as_deref()
                     && let Some(waiter) = pending.remove(tag) {
+                    debug!(tag, reply = %text, "Linn tagged reply");
                     let result = if let Some(code) = header.error_code {
                         Err(tonic::Status::failed_precondition(format!("Linn error {code}: {}", header.message.as_deref().unwrap_or("request failed"))))
                     } else { Ok(envelope.clone()) };
@@ -581,13 +582,14 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
                 timeline.is_seekable = Some(seekable);
                 timeline.seek_lower_bound_seconds = seekable.then_some(0);
                 timeline.seek_upper_bound_seconds = if seekable {
-                    timeline.duration_seconds
+                    timeline.duration_seconds.filter(|duration| *duration > 0)
                 } else {
                     None
                 };
             }
             if timeline.is_seekable == Some(true) {
-                timeline.seek_upper_bound_seconds = timeline.duration_seconds;
+                timeline.seek_upper_bound_seconds =
+                    timeline.duration_seconds.filter(|duration| *duration > 0);
             }
             true
         }

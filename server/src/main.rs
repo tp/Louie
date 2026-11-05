@@ -9,16 +9,22 @@ pub mod pb {
 use std::{env, net::SocketAddr};
 
 use pb::linn_server::LinnServer;
+use sentry::integrations::tracing::{ErrorLayer, LogLayer};
 use tonic::transport::Server;
 use tracing::info;
+use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    let _sentry_guard = sentry::init(());
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "louie_server=info".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(LogLayer::new().with_filter(LevelFilter::WARN))
+        .with(ErrorLayer::new().with_filter(LevelFilter::ERROR))
         .init();
 
     let gateway_url =

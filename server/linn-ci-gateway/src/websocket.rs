@@ -12,6 +12,7 @@ use crate::models;
 pub struct Envelope {
     pub request_path: Option<String>,
     pub tag: Option<String>,
+    #[serde(alias = "code")]
     pub error_code: Option<i32>,
     pub message: Option<String>,
 }
@@ -133,6 +134,12 @@ mod tests {
         let envelope: Envelope = decode(&json!({"tag": "control-1"})).unwrap();
         assert_eq!(envelope.tag.as_deref(), Some("control-1"));
         assert_eq!(envelope.request_path, None);
+    }
+
+    #[test]
+    fn gateway_error_accepts_vendor_code_name() {
+        let envelope: Envelope = decode(&json!({"tag": "control-1", "code": 400})).unwrap();
+        assert_eq!(envelope.error_code, Some(400));
     }
 
     #[test]

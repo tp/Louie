@@ -52,6 +52,9 @@ in `server/deploy/server.env.example`. The user unit is
 `server/deploy/louie.service`. User lingering is enabled on the Pi so the
 service starts at boot. To inspect it on the Pi:
 
+Set `SENTRY_DSN` in `server.env` to send server warnings, errors, and panics
+to Sentry. The server runs normally without a DSN.
+
 ```sh
 systemctl --user status louie.service
 journalctl --user -u louie.service -f
