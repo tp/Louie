@@ -24,6 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Linn room is empty".into());
     }
     if connection != ConnectionStatus::Connected {
+        if probe_ack {
+            return Err(format!(
+                "Linn gateway is not connected: {:?}",
+                snapshot.connection_error
+            )
+            .into());
+        }
         eprintln!(
             "warning: Linn gateway is not connected: {:?}",
             snapshot.connection_error

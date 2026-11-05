@@ -63,10 +63,13 @@ ssh "${ssh_options[@]}" "$pi" '
 
 if ! ssh "${ssh_options[@]}" "$pi" '
   set -eu
-  set -a
-  . ~/.config/louie/server.env
-  set +a
-  bind=${LOUIE_GRPC_BIND:?LOUIE_GRPC_BIND is required}
+  bind=$(sed -n "s/^LOUIE_GRPC_BIND=//p" ~/.config/louie/server.env | tail -n 1)
+  bind=${bind#\"}
+  bind=${bind%\"}
+  if test -z "$bind"; then
+    echo "LOUIE_GRPC_BIND is required" >&2
+    exit 1
+  fi
   host=${bind%:*}
   port=${bind##*:}
   case "$host" in
@@ -74,7 +77,7 @@ if ! ssh "${ssh_options[@]}" "$pi" '
   esac
   endpoint="http://$host:$port"
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if ~/.local/bin/check_linn "$endpoint"; then
+    if ~/.local/bin/check_linn "$endpoint" --probe-ack; then
       exit 0
     fi
     sleep 1
