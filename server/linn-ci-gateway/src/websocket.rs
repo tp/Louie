@@ -41,6 +41,7 @@ pub fn encode_request(path: &str, value: Value) -> Result<Value, serde_json::Err
         "/V2/volume/set_vol" => round_trip::<models::V2VolumeSetVolPostRequest>(value)?,
         "/V2/volume/set_mute" => round_trip::<models::V2VolumeSetMutePostRequest>(value)?,
         "/V2/services/search" => round_trip::<models::V2ServicesSearchGetRequest>(value)?,
+        "/V2/services/status" => round_trip::<models::V2ServicesStatusGetRequest>(value)?,
         "/V2/media/browse" => round_trip::<models::V2MediaBrowseGetRequest>(value)?,
         "/V2/media/select" => round_trip::<models::V2MediaSelectPostRequest>(value)?,
         "/V2/media/favourite" => round_trip::<models::V2MediaFavouritePostRequest>(value)?,
@@ -67,15 +68,17 @@ pub fn decode_playlist_item(
 pub fn decode_media_page(
     mut value: Value,
 ) -> Result<models::MediaBrowseResponse, serde_json::Error> {
-    // The gateway may include null alphabet offsets. The Rust generator
-    // ignores x-nullable on array items; this optional index is unused here.
-    if value
-        .pointer("/data/alpha")
-        .and_then(Value::as_array)
-        .is_some_and(|alpha| alpha.iter().any(Value::is_null))
-        && let Some(data) = value.get_mut("data").and_then(Value::as_object_mut)
+    // Keep known offsets and represent missing letters with -1, matching the
+    // generated integer array without discarding the entire alphabet index.
+    if let Some(alpha) = value
+        .pointer_mut("/data/alpha")
+        .and_then(Value::as_array_mut)
     {
-        data.remove("alpha");
+        for offset in alpha {
+            if offset.is_null() {
+                *offset = Value::from(-1);
+            }
+        }
     }
     if let Some(children) = value
         .pointer_mut("/data/children")
@@ -148,6 +151,6 @@ mod tests {
             "data": {"alpha": [0, null, 4], "children": []}
         }))
         .unwrap();
-        assert_eq!(page.data.unwrap().alpha, None);
+        assert_eq!(page.data.unwrap().alpha, Some(vec![0, -1, 4]));
     }
 }

@@ -63,6 +63,7 @@ message PendingState {
   bool queue_index = 6;
   bool queue_total = 7;
   bool current_item = 8;
+  bool transport = 9;
 }
 
 message NowPlayingState {

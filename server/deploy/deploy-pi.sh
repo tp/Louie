@@ -40,6 +40,22 @@ if [[ "$local_sha" != "$remote_sha" ]]; then
   exit 1
 fi
 
+# If the running version was connected, the replacement must reconnect too.
+was_connected="$(ssh "${ssh_options[@]}" "$pi" '
+  bind=$(sed -n "s/^[[:space:]]*LOUIE_GRPC_BIND[[:space:]]*=[[:space:]]*//p" ~/.config/louie/server.env | tail -n 1 | tr -d "\"\047")
+  bind=${bind:-127.0.0.1:50051}
+  host=${bind%:*}
+  port=${bind##*:}
+  case "$host" in
+    0.0.0.0|"[::]"|"[::0]") host=127.0.0.1 ;;
+  esac
+  if ~/.local/bin/check_linn "http://$host:$port" 2>/dev/null | grep -q "connection=Connected"; then
+    echo yes
+  else
+    echo no
+  fi
+')"
+
 ssh "${ssh_options[@]}" "$pi" '
   set -eu
   if test -f ~/.local/bin/louie-server; then
@@ -63,9 +79,8 @@ ssh "${ssh_options[@]}" "$pi" '
 
 if ! ssh "${ssh_options[@]}" "$pi" '
   set -eu
-  bind=$(sed -n "s/^LOUIE_GRPC_BIND=//p" ~/.config/louie/server.env | tail -n 1)
-  bind=${bind#\"}
-  bind=${bind%\"}
+  expect_connected='"$was_connected"'
+  bind=$(sed -n "s/^[[:space:]]*LOUIE_GRPC_BIND[[:space:]]*=[[:space:]]*//p" ~/.config/louie/server.env | tail -n 1 | tr -d "\"\047")
   bind=${bind:-127.0.0.1:50051}
   host=${bind%:*}
   port=${bind##*:}
@@ -73,8 +88,13 @@ if ! ssh "${ssh_options[@]}" "$pi" '
     0.0.0.0|"[::]"|"[::0]") host=127.0.0.1 ;;
   esac
   endpoint="http://$host:$port"
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if ~/.local/bin/check_linn "$endpoint"; then
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if test "$expect_connected" = yes; then
+      check_args=--require-connected
+    else
+      check_args=
+    fi
+    if ~/.local/bin/check_linn "$endpoint" ${check_args:+$check_args}; then
       exit 0
     fi
     sleep 1

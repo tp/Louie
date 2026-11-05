@@ -3,13 +3,15 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ORIGINAL_SPEC_PATH="$repo_root/server/linn-ci-gateway/openapi.original.yaml"
-SPEC_PATH="$repo_root/server/linn-ci-gateway/openapi.yaml"
+OUTPUT_SPEC_PATH="$repo_root/server/linn-ci-gateway/openapi.yaml"
 
-if ! command -v yq >/dev/null 2>&1; then
-  echo "yq is required to normalize the Linn gateway OpenAPI spec" >&2
+if ! command -v yq >/dev/null 2>&1 || ! yq --version | grep -Eq 'mikefarah/yq.*version v4\.'; then
+  echo "mikefarah yq v4 is required to normalize the Linn gateway OpenAPI spec" >&2
   exit 1
 fi
 
+SPEC_PATH="$(mktemp "${TMPDIR:-/tmp}/linn-openapi.XXXXXX.yaml")"
+trap 'rm -f "$SPEC_PATH"' EXIT
 cp "${ORIGINAL_SPEC_PATH}" "${SPEC_PATH}"
 
 # Keep only the websocket paths the package wraps. The generated HTTP API
@@ -43,11 +45,11 @@ yq -i '.definitions.StandbyStateEnum.enum = ["OFF", "MIXED", "ON"]' "${SPEC_PATH
 
 # The live gateway sends track artists as an array of strings, even though the
 # published schema currently says the field is a single string.
-yq -i '(.definitions[]?.properties.artist | select(.type == "string")) = {
+yq -i 'with(.definitions[] | select(.properties.artist.type == "string"); .properties.artist = {
     "type": "array",
     "items": {"type": "string"},
     "description": "Artist name"
-}' "${SPEC_PATH}"
+})' "${SPEC_PATH}"
 
 # Playlist children are returned as an object keyed by playlist index, not as a
 # literal "index" property.
@@ -149,8 +151,9 @@ yq -i '.definitions.V2ServicesStatusGetRequest = {
     "$ref": "#/definitions/V2ServicesStatusGetRequest"
 }' "${SPEC_PATH}"
 
-# The gateway may put null in individual alphabet offsets, and revisions can
-# exceed a signed 32-bit integer over the life of a library.
-yq -i '.definitions.MediaBrowseData.properties.alpha.items."x-nullable" = true |
-    (.definitions[]?.properties.content_revision | select(.type == "integer")).format = "int64"' "${SPEC_PATH}"
+# Revisions can exceed a signed 32-bit integer over the life of a library.
+# Null alphabet offsets are normalized at the handwritten WebSocket boundary;
+# neither pinned generator supports nullable array elements here.
+yq -i 'with(.definitions[] | select(.properties.content_revision.type == "integer"); .properties.content_revision.format = "int64")' "${SPEC_PATH}"
 
+mv "$SPEC_PATH" "$OUTPUT_SPEC_PATH"

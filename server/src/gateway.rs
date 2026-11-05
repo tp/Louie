@@ -20,6 +20,27 @@ use crate::pb::{
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+#[derive(Clone, Copy)]
+struct PublishedAnchor {
+    timeline: Option<crate::pb::Timeline>,
+    transport_state: Option<i32>,
+}
+
+impl PublishedAnchor {
+    fn from_snapshot(snapshot: &StateSnapshot) -> Self {
+        Self {
+            timeline: snapshot
+                .now_playing
+                .as_ref()
+                .and_then(|state| state.timeline),
+            transport_state: snapshot
+                .now_playing
+                .as_ref()
+                .and_then(|state| state.transport_state),
+        }
+    }
+}
+
 struct GatewayRequest {
     path: &'static str,
     body: Value,
@@ -106,7 +127,9 @@ impl Gateway {
         first_track: Option<crate::pb::MediaItem>,
     ) -> Result<Value, tonic::Status> {
         if self.state.borrow().connection_status != ConnectionStatus::Connected as i32 {
-            return Err(tonic::Status::unavailable("Linn gateway is disconnected"));
+            return Err(tonic::Status::failed_precondition(
+                "Linn gateway is disconnected",
+            ));
         }
         let (reply, result) = oneshot::channel();
         let (started, ready) = oneshot::channel();
@@ -150,7 +173,6 @@ async fn run_gateway(
     let mut observed = state.borrow().clone();
     loop {
         observed.connection_status = ConnectionStatus::Connecting as i32;
-        observed.connection_error = None;
         state.send_replace(observed.clone());
         let result = run_connection(
             &url,
@@ -161,18 +183,23 @@ async fn run_gateway(
             &mut observed,
         )
         .await;
-        if state.borrow().connection_status == ConnectionStatus::Connected as i32 {
+        let was_connected = state.borrow().connection_status == ConnectionStatus::Connected as i32;
+        if was_connected {
             delay = Duration::from_millis(500);
         }
         let message = result.err().unwrap_or_else(|| "connection closed".into());
-        warn!("Linn gateway disconnected: {message}");
+        if was_connected {
+            warn!("Linn gateway disconnected: {message}");
+        } else {
+            info!("Linn gateway still unavailable: {message}");
+        }
         observed.connection_status = ConnectionStatus::Disconnected as i32;
         observed.connection_error = Some(message);
         observed.pending = Some(PendingState::default());
         observed.published_at = Some(now());
         state.send_replace(observed.clone());
         while let Ok(request) = rx.try_recv() {
-            let _ = request.reply.send(Err(tonic::Status::unavailable(
+            let _ = request.reply.send(Err(tonic::Status::failed_precondition(
                 "Linn gateway is disconnected",
             )));
         }
@@ -295,6 +322,9 @@ async fn run_connection(
                     let result = if let Some(code) = header.error_code {
                         Err(tonic::Status::failed_precondition(format!("Linn error {code}: {}", header.message.as_deref().unwrap_or("request failed"))))
                     } else { Ok(envelope.clone()) };
+                    if result.is_ok() {
+                        optimism.acknowledged(tag);
+                    }
                     if result.is_err() && optimism.fail(tag) {
                         state.send_replace(optimism.snapshot(observed));
                     }
@@ -314,8 +344,8 @@ async fn run_connection(
                     }
                     continue;
                 }
-                let published = state.borrow().clone();
-                let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope, &published));
+                let published_anchor = PublishedAnchor::from_snapshot(&state.borrow());
+                let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope, published_anchor, optimism.timeline_is_pending()));
                 let settled = optimism.reconcile(observed);
                 if changed || settled {
                     state.send_replace(optimism.snapshot(observed));
@@ -332,7 +362,7 @@ async fn run_connection(
                     let step = request.body["step"].as_i64().unwrap_or(0) as i32;
                     if shuffle {
                         request.path = "/V2/transport/skip_track";
-                        request.body = json!({"room": observed.room, "skip_track": step});
+                        request.body = json!({"room": observed.room, "skip_track": step, "shuffle": true});
                     } else {
                     let effective = optimism.snapshot(observed);
                     let playlist = effective.now_playing.and_then(|state| state.playlist);
@@ -367,19 +397,26 @@ async fn run_connection(
                 if request.path == "/V2/playlist/select"
                     && let Some(key) = key
                     && let Some(index) = request.body.get("index").and_then(Value::as_i64)
-                    && pending.values().any(|waiter| waiter.coalesce_key == Some(key) && waiter.target_index == i32::try_from(index).ok()) {
+                    && let Some(in_flight_tag) = pending.iter().find_map(|(tag, waiter)|
+                        (waiter.coalesce_key == Some(key) && waiter.target_index == i32::try_from(index).ok()).then(|| tag.clone())) {
                     if let Some(old) = deferred.remove(&key) {
                         if optimism.fail(&old.tag) {
                             state.send_replace(optimism.snapshot(observed));
                         }
                         let _ = old.request.reply.send(Ok(Value::Null));
                     }
+                    if optimism.apply(&in_flight_tag, request.path, &request.body,
+                        request.preview.clone(), request.first_track.clone(), observed) {
+                        state.send_replace(optimism.snapshot(observed));
+                    }
                     let _ = request.reply.send(Ok(Value::Null));
                     continue;
                 }
                 if request.path == "/V2/services/search" && search_in_flight {
-                    while let Some(old) = search_queue.pop_front() {
-                        let _ = old.request.reply.send(Err(tonic::Status::cancelled("superseded by a newer search")));
+                    search_queue.retain(|old| !old.request.reply.is_closed());
+                    if search_queue.len() >= 16 {
+                        let _ = request.reply.send(Err(tonic::Status::resource_exhausted("search queue is full")));
+                        continue;
                     }
                     search_queue.push_back(TaggedRequest { tag, request });
                     continue;
@@ -395,15 +432,13 @@ async fn run_connection(
                         };
                         let _ = old.request.reply.send(result);
                     }
-                    let effective = optimism.snapshot(observed);
-                    if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), &effective) {
+                    if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
                         state.send_replace(optimism.snapshot(observed));
                     }
                     deferred.insert(key, TaggedRequest { tag, request });
                     continue;
                 }
-                let effective = optimism.snapshot(observed);
-                if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), &effective) {
+                if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
                     state.send_replace(optimism.snapshot(observed));
                 }
                 let search = request.path == "/V2/services/search";
@@ -613,13 +648,15 @@ fn apply_update(
     snapshot: &mut StateSnapshot,
     path: &str,
     value: &Value,
-    published: &StateSnapshot,
+    published: PublishedAnchor,
+    timeline_predicted: bool,
 ) -> bool {
     let room = snapshot.room.clone();
     let Some(now_playing) = snapshot.now_playing.as_mut() else {
         return false;
     };
-    let previous = now_playing.clone();
+    let before_timeline = now_playing.timeline;
+    let previous = (path != "/V2/seek/status").then(|| now_playing.clone());
     let changed = match path {
         "/V2/transport/status" => {
             let response = match websocket::decode::<models::V2TransportStatusResponse>(value) {
@@ -778,42 +815,48 @@ fn apply_update(
     };
     let meaningful = changed
         && if path == "/V2/seek/status" {
-            let before = previous.timeline.as_ref();
+            let before = before_timeline.as_ref();
             let after = now_playing.timeline.as_ref();
             match (before, after) {
                 (Some(before), Some(after)) => {
-                    let published_timeline = published
-                        .now_playing
-                        .as_ref()
-                        .and_then(|state| state.timeline.as_ref());
-                    let expected = published_timeline.and_then(|timeline| {
-                        let position = timeline.position_seconds?;
-                        let seconds = if published.now_playing.as_ref().is_some_and(|state| {
-                            state.transport_state == Some(TransportState::Playing as i32)
-                        }) {
-                            timeline
-                                .position_sampled_at
-                                .as_ref()
-                                .map(|sample| now().seconds.saturating_sub(sample.seconds).max(0))
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        Some(position.saturating_add(i32::try_from(seconds).unwrap_or(i32::MAX)))
-                    });
-                    before.duration_seconds != after.duration_seconds
-                        || before.is_seekable != after.is_seekable
-                        || before.seek_upper_bound_seconds != after.seek_upper_bound_seconds
-                        || expected
-                            .zip(after.position_seconds)
-                            .is_none_or(|(expected, actual)| {
-                                (i64::from(expected) - i64::from(actual)).abs() > 2
-                            })
+                    if timeline_predicted {
+                        before.duration_seconds != after.duration_seconds
+                            || before.is_seekable != after.is_seekable
+                            || before.seek_upper_bound_seconds != after.seek_upper_bound_seconds
+                    } else {
+                        let expected = published.timeline.as_ref().and_then(|timeline| {
+                            let position = timeline.position_seconds?;
+                            let seconds = if published.transport_state
+                                == Some(TransportState::Playing as i32)
+                            {
+                                timeline
+                                    .position_sampled_at
+                                    .as_ref()
+                                    .map(|sample| {
+                                        now().seconds.saturating_sub(sample.seconds).max(0)
+                                    })
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            Some(
+                                position.saturating_add(i32::try_from(seconds).unwrap_or(i32::MAX)),
+                            )
+                        });
+                        before.duration_seconds != after.duration_seconds
+                            || before.is_seekable != after.is_seekable
+                            || before.seek_upper_bound_seconds != after.seek_upper_bound_seconds
+                            || expected.zip(after.position_seconds).is_none_or(
+                                |(expected, actual)| {
+                                    (i64::from(expected) - i64::from(actual)).abs() > 2
+                                },
+                            )
+                    }
                 }
                 _ => before != after,
             }
         } else {
-            *now_playing != previous
+            previous.is_some_and(|previous| *now_playing != previous)
         };
     if meaningful {
         snapshot.published_at = Some(now());
@@ -875,12 +918,13 @@ mod tests {
             }),
             ..Default::default()
         };
-        let published = observed.clone();
+        let published = PublishedAnchor::from_snapshot(&observed);
         assert!(apply_update(
             &mut observed,
             "/V2/seek/status",
             &json!({"data": {"elapsed": 10}}),
-            &published,
+            published,
+            false,
         ));
         assert_eq!(
             observed
@@ -891,6 +935,41 @@ mod tests {
                 .position_seconds,
             Some(10)
         );
+    }
+
+    #[test]
+    fn pending_timeline_hides_seek_ticks_without_rebroadcasting() {
+        let mut observed = StateSnapshot {
+            now_playing: Some(NowPlayingState {
+                timeline: Some(crate::pb::Timeline {
+                    position_seconds: Some(10),
+                    duration_seconds: Some(180),
+                    is_seekable: Some(true),
+                    seek_upper_bound_seconds: Some(180),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let published = PublishedAnchor {
+            timeline: None,
+            transport_state: None,
+        };
+        assert!(!apply_update(
+            &mut observed,
+            "/V2/seek/status",
+            &json!({"data":{"elapsed":11}}),
+            published,
+            true
+        ));
+        assert!(apply_update(
+            &mut observed,
+            "/V2/seek/status",
+            &json!({"data":{"duration":190}}),
+            published,
+            true
+        ));
     }
     use tokio_tungstenite::accept_async;
 
@@ -1213,12 +1292,10 @@ mod tests {
                 .is_err()
         );
         release_tx.send(()).unwrap();
+        assert_eq!(searches.recv().await.as_deref(), Some("second"));
         assert_eq!(searches.recv().await.as_deref(), Some("third"));
         first.await.unwrap().unwrap();
-        assert_eq!(
-            second.await.unwrap().unwrap_err().code(),
-            tonic::Code::Cancelled
-        );
+        second.await.unwrap().unwrap();
         third.await.unwrap().unwrap();
         server.abort();
     }

@@ -38,15 +38,15 @@ pub struct ItemMetaData {
     /// List of action ids of actions that are valid for this item's class but which this particular item does not currently support (e.g. can't favourite a curerntly favourited item).
     #[serde(rename = "disabledActions", skip_serializing_if = "Option::is_none")]
     pub disabled_actions: Option<Vec<String>>,
-    /// Artist name
-    #[serde(rename = "artist", skip_serializing_if = "Option::is_none")]
-    pub artist: Option<Vec<String>>,
     /// Track title
     #[serde(rename = "title", skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Album name
     #[serde(rename = "album", skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
+    /// Artist name
+    #[serde(rename = "artist", skip_serializing_if = "Option::is_none")]
+    pub artist: Option<Vec<String>>,
     /// Duration of the item in seconds. 0 if unknown
     #[serde(rename = "duration", skip_serializing_if = "Option::is_none")]
     pub duration: Option<i32>,
@@ -79,9 +79,9 @@ impl ItemMetaData {
             name: None,
             art_uri: None,
             disabled_actions: None,
-            artist: None,
             title: None,
             album: None,
+            artist: None,
             duration: None,
             contained_classes: None,
             count: None,

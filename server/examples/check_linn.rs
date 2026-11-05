@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Linn room is empty".into());
     }
     if connection != ConnectionStatus::Connected {
-        if probe_ack {
+        if probe_ack || env::args().any(|arg| arg == "--require-connected") {
             return Err(format!(
                 "Linn gateway is not connected: {:?}",
                 snapshot.connection_error
@@ -60,26 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("WatchState delivered initial snapshot");
     if probe_ack {
-        let volume = snapshot
-            .now_playing
-            .as_ref()
-            .and_then(|state| state.room_volume.as_ref())
-            .and_then(|volume| volume.volume)
-            .ok_or("cannot probe a command without an observed room volume")?;
-        if volume > 70 {
-            return Err(
-                "observed volume exceeds 70; refusing to change it for the ack probe".into(),
-            );
-        }
-        tokio::time::timeout(
-            Duration::from_secs(6),
-            client.set_volume(pb::SetVolumeRequest {
-                volume,
-                scope: pb::VolumeScope::Room as i32,
-            }),
-        )
-        .await??;
-        println!("SetVolume acknowledged at unchanged volume {volume}");
+        tokio::time::timeout(Duration::from_secs(6), client.list_media_services(())).await??;
+        println!("ListMediaServices acknowledged");
     }
     Ok(())
 }

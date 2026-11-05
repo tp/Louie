@@ -16,7 +16,9 @@ use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _sentry_guard = sentry::init(());
+    let mut sentry_options = sentry::ClientOptions::default();
+    sentry_options.release = sentry::release_name!();
+    let _sentry_guard = sentry::init(sentry_options);
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
