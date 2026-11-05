@@ -8,6 +8,11 @@ import SwiftProtobuf
 actor PiLinnGateway: LinnGateway {
     private typealias Transport = HTTP2ClientTransport.TransportServices
     private typealias Client = Louie_Linn_V1_Linn.Client<Transport>
+    private static let commandOptions: CallOptions = {
+        var options = CallOptions.defaults
+        options.timeout = .seconds(8)
+        return options
+    }()
 
     private let serverURL: URL
     private var grpcClient: GRPCClient<Transport>?
@@ -28,7 +33,12 @@ actor PiLinnGateway: LinnGateway {
         guard serverURL.scheme == "http", let host = serverURL.host(), let port = serverURL.port else {
             throw PiLinnError.invalidServerURL
         }
-        let transport = try Transport(target: .dns(host: host, port: port), transportSecurity: .plaintext)
+        let config = Transport.Config.defaults { config in
+            config.connection.keepalive = .init(time: .seconds(20), timeout: .seconds(10), allowWithoutCalls: false)
+            config.backoff.max = .seconds(8)
+            config.resolverBackoff.max = .seconds(8)
+        }
+        let transport = try Transport(target: .dns(host: host, port: port), transportSecurity: .plaintext, config: config)
         let grpcClient = GRPCClient(transport: transport)
         self.grpcClient = grpcClient
         connectionTask = Task {
@@ -38,82 +48,93 @@ actor PiLinnGateway: LinnGateway {
     }
 
     func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error> {
+        // The server currently owns one Linn room and controls its update rate.
         AsyncThrowingStream { continuation in
             let task = Task {
-                do {
-                    let client = try service()
-                    try await client.watchState(Google_Protobuf_Empty()) { response in
-                        for try await snapshot in response.messages {
-                            switch snapshot.connectionStatus {
-                            case .connecting, .unspecified:
-                                continue
-                            case .disconnected:
-                                throw PiLinnError.gatewayDisconnected(
-                                    snapshot.hasConnectionError ? snapshot.connectionError : nil
-                                )
-                            case .connected:
-                                break
-                            default:
-                                continue
+                var retrySeconds = 1
+                while !Task.isCancelled {
+                    do {
+                        let client = try service()
+                        try await client.watchState(Google_Protobuf_Empty()) { response in
+                            for try await snapshot in response.messages {
+                                guard !Task.isCancelled else { break }
+                                switch snapshot.connectionStatus {
+                                case .connected:
+                                    continuation.yield(PiLinnMapping.nowPlaying(snapshot))
+                                case .connecting, .disconnected, .unspecified:
+                                    // Linn can drop while the home server stays available.
+                                    // Keep the stream alive for its next connected snapshot.
+                                    continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
+                                default:
+                                    continue
+                                }
                             }
-                            continuation.yield(PiLinnMapping.nowPlaying(snapshot))
                         }
+                        retrySeconds = 1
+                    } catch is CancellationError {
+                        break
+                    } catch let error as PiLinnError {
+                        continuation.finish(throwing: error)
+                        return
+                    } catch {
+                        // A Pi restart or network transition closes WatchState. Resume
+                        // from its next complete snapshot on the same gRPC client.
+                        guard !Task.isCancelled else { break }
+                        var update = CiGateway.NowPlaying(room: room ?? "Linn", session: "")
+                        update.connectionStatus = .connecting
+                        continuation.yield(update)
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                    do {
+                        try await Task.sleep(for: .seconds(retrySeconds))
+                    } catch {
+                        break
+                    }
+                    retrySeconds = min(retrySeconds * 2, 8)
                 }
+                continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
     func play(room: String) async throws {
-        _ = try await service().play(Google_Protobuf_Empty())
+        _ = try await remapCancellation { try await service().play(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }
 
     func pause(room: String) async throws {
-        _ = try await service().pause(Google_Protobuf_Empty())
+        _ = try await remapCancellation { try await service().pause(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }
 
     func previous(room: String) async throws {
-        _ = try await service().previous(Google_Protobuf_Empty())
+        _ = try await remapCancellation { try await service().previous(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }
 
     func next(room: String) async throws {
-        _ = try await service().next(Google_Protobuf_Empty())
+        _ = try await remapCancellation { try await service().next(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }
 
     func selectPlaylistItem(at index: Int, room: String) async throws {
         var request = Louie_Linn_V1_SelectPlaylistItemRequest()
         request.index = Int32(clamping: index)
-        _ = try await service().selectPlaylistItem(request)
+        _ = try await remapCancellation { try await service().selectPlaylistItem(request, options: Self.commandOptions) }
     }
 
     func setVolume(_ volume: Int, room: String, group: Bool) async throws {
         var request = Louie_Linn_V1_SetVolumeRequest()
         request.volume = Int32(clamping: volume)
         request.scope = group ? .group : .room
-        do {
-            _ = try await service().setVolume(request)
-        } catch let error as RPCError where error.code == .cancelled {
-            throw CancellationError()
-        }
+        _ = try await remapCancellation { try await service().setVolume(request, options: Self.commandOptions) }
     }
 
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws {
         var request = Louie_Linn_V1_SetMutedRequest()
         request.isMuted = isMuted
         request.scope = group ? .group : .room
-        do {
-            _ = try await service().setMuted(request)
-        } catch let error as RPCError where error.code == .cancelled {
-            throw CancellationError()
-        }
+        _ = try await remapCancellation { try await service().setMuted(request, options: Self.commandOptions) }
     }
 
     func mediaServices(room: String) async throws -> [CiGateway.MediaService] {
-        let response = try await service().listMediaServices(Google_Protobuf_Empty())
+        let response = try await remapCancellation { try await service().listMediaServices(Google_Protobuf_Empty(), options: Self.commandOptions) }
         return response.services.map { CiGateway.MediaService(id: $0.id, name: $0.name) }
     }
 
@@ -123,7 +144,7 @@ actor PiLinnGateway: LinnGateway {
         request.index = Int32(clamping: index)
         request.count = Int32(clamping: count)
         request.browseType = browseType
-        return PiLinnMapping.mediaPage(try await service().browseMedia(request))
+        return PiLinnMapping.mediaPage(try await remapCancellation { try await service().browseMedia(request, options: Self.commandOptions) })
     }
 
     func searchMedia(serviceID: String, query: String, type: CiGateway.MediaSearchType, index: Int, count: Int) async throws -> CiGateway.MediaPage {
@@ -140,7 +161,7 @@ actor PiLinnGateway: LinnGateway {
         }
         request.index = Int32(clamping: index)
         request.count = Int32(clamping: count)
-        return PiLinnMapping.mediaPage(try await service().searchMedia(request))
+        return PiLinnMapping.mediaPage(try await remapCancellation { try await service().searchMedia(request, options: Self.commandOptions) })
     }
 
     func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
@@ -159,14 +180,22 @@ actor PiLinnGateway: LinnGateway {
         if let preview {
             request.preview = PiLinnMapping.preview(preview)
         }
-        _ = try await service().selectMedia(request)
+        _ = try await remapCancellation { try await service().selectMedia(request, options: Self.commandOptions) }
     }
 
     func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws {
         var request = Louie_Linn_V1_SetMediaFavouriteRequest()
         request.mediaID = mediaID
         request.isFavourite = isFavourite
-        _ = try await service().setMediaFavourite(request)
+        _ = try await remapCancellation { try await service().setMediaFavourite(request, options: Self.commandOptions) }
+    }
+
+    private func remapCancellation<Value>(_ operation: () async throws -> Value) async throws -> Value {
+        do {
+            return try await operation()
+        } catch let error as RPCError where error.code == .cancelled {
+            throw CancellationError()
+        }
     }
 }
 
@@ -183,8 +212,23 @@ private enum PiLinnError: Error, LocalizedError {
 }
 
 enum PiLinnMapping {
+    static func connectionUpdate(_ snapshot: Louie_Linn_V1_StateSnapshot) -> CiGateway.NowPlaying {
+        var update = CiGateway.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
+        update.connectionStatus = snapshot.connectionStatus == .disconnected ? .disconnected : .connecting
+        return update
+    }
+
     static func nowPlaying(_ snapshot: Louie_Linn_V1_StateSnapshot) -> CiGateway.NowPlaying {
         var result = CiGateway.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
+        if snapshot.hasPending {
+            result.pending = .init(
+                playback: snapshot.pending.playback,
+                queue: snapshot.pending.queue,
+                timeline: snapshot.pending.timeline,
+                volume: snapshot.pending.volume,
+                mute: snapshot.pending.mute
+            )
+        }
         guard snapshot.hasNowPlaying else { return result }
         let state = snapshot.nowPlaying
         if state.hasTransportState {

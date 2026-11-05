@@ -320,12 +320,21 @@ public final class Linn {
             guard let self else {
                 return
             }
+            var loadLibraryOnConnection = ciGateway is PiLinnGateway
 
             do {
                 let updates = await ciGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
                 for try await update in updates {
+                    guard update.connectionStatus == .connected else {
+                        connectionState = .connecting
+                        continue
+                    }
                     apply(update)
                     connectionState = .connected
+                    if loadLibraryOnConnection {
+                        loadLibraryOnConnection = false
+                        loadLibrary()
+                    }
                 }
             } catch is CancellationError {
                 Self.logger.info("Linn now-playing update task cancelled")
@@ -338,7 +347,9 @@ public final class Linn {
             }
         }
 
-        loadLibrary()
+        if !(ciGateway is PiLinnGateway) {
+            loadLibrary()
+        }
     }
 
     public func stop() {
@@ -571,7 +582,7 @@ public final class Linn {
                 mediaID: item.id,
                 room: room,
                 queue: CiGateway.QueuePlacement(placement),
-                preview: CiGateway.MediaItem(
+                preview: item.title.isEmpty ? nil : CiGateway.MediaItem(
                     id: item.id,
                     kind: item.kind,
                     title: item.title,
@@ -873,9 +884,11 @@ public final class Linn {
     }
 
     private func apply(_ update: CiGateway.NowPlaying) {
-        let suppressNowPlayingFields = shouldSuppressNowPlayingFields(incomingQueueIndex: update.queue?.index)
+        let suppressNowPlayingFields = shouldSuppressNowPlayingFields(
+            incomingQueueIndex: update.pending.queue ? nil : update.queue?.index
+        )
 
-        playState = reconciledPlayState(incoming: PlayState(update.playback))
+        playState = reconciledPlayState(incoming: PlayState(update.playback), confirmed: !update.pending.playback)
         playlist.total = update.queue?.length ?? playlist.total
         if let playlist = update.playlist {
             if let contentRevision = playlist.contentRevision, contentRevision != playlistContentRevision {
@@ -892,14 +905,18 @@ public final class Linn {
         if let incomingQueueIndex = update.queue?.index {
             incomingCurrentSong?.queueIndex = incomingQueueIndex
         }
-        reportedSong = incomingCurrentSong
-        reportedTimeline = Timeline(update.timeline)
+        if !update.pending.queue {
+            reportedSong = incomingCurrentSong
+        }
+        if !update.pending.timeline {
+            reportedTimeline = Timeline(update.timeline)
+        }
 
         if !suppressNowPlayingFields {
             let wasPreviewingMedia = isPreviewingMedia
             // The queue position follows the device either way; only the
             // song shown as playing is held on the preview.
-            if shouldHoldMediaSelectionPreview(incoming: incomingCurrentSong) {
+            if (update.pending.queue && isPreviewingMedia) || shouldHoldMediaSelectionPreview(incoming: incomingCurrentSong) {
                 playlist.currentIndex = update.queue?.index
             } else {
                 // The preview already moved forward; the new queue's index
@@ -916,8 +933,12 @@ public final class Linn {
             }
         }
 
-        reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
-        reconcilePendingQueueLength()
+        if !update.pending.queue {
+            reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
+        }
+        if !update.pending.queue {
+            reconcilePendingQueueLength()
+        }
         updatePlaylistSongs()
         let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
         volume = reconcileOptimistic(
@@ -925,6 +946,7 @@ public final class Linn {
             target: \.target,
             expiresAt: \.expiresAt,
             incoming: incomingVolume,
+            confirmed: !update.pending.volume,
             matches: { $0 == $1 }
         ) ?? incomingVolume
         let incomingMuted = update.roomState?.isMuted
@@ -933,6 +955,7 @@ public final class Linn {
             target: \.target,
             expiresAt: \.expiresAt,
             incoming: incomingMuted,
+            confirmed: !update.pending.mute,
             matches: { $0 == $1 }
         ) ?? incomingMuted
     }
@@ -1318,12 +1341,13 @@ public final class Linn {
         return true
     }
 
-    private func reconciledPlayState(incoming: PlayState?) -> PlayState? {
+    private func reconciledPlayState(incoming: PlayState?, confirmed: Bool) -> PlayState? {
         reconcileOptimistic(
             &optimisticPlayState,
             target: \.targetState,
             expiresAt: \.expiresAt,
             incoming: incoming,
+            confirmed: confirmed,
             matches: { $0 == $1 }
         ) ?? incoming
     }
@@ -1337,6 +1361,7 @@ public final class Linn {
         target: (State) -> Target,
         expiresAt: (State) -> Date,
         incoming: Incoming,
+        confirmed: Bool = true,
         matches: (Incoming, Target) -> Bool
     ) -> Target? {
         guard let current = state else {
@@ -1348,7 +1373,7 @@ public final class Linn {
             return nil
         }
 
-        if matches(incoming, target(current)) {
+        if confirmed && matches(incoming, target(current)) {
             state = nil
             return nil
         }

@@ -3,6 +3,30 @@ import OSLog
 
 public final class CiGateway: Sendable {
     public struct NowPlaying: Sendable, Equatable {
+        public enum ConnectionStatus: Sendable, Equatable {
+            case connected
+            case connecting
+            case disconnected
+        }
+
+        public var connectionStatus = ConnectionStatus.connected
+        public struct Pending: Sendable, Equatable {
+            public var playback = false
+            public var queue = false
+            public var timeline = false
+            public var volume = false
+            public var mute = false
+
+            public init(playback: Bool = false, queue: Bool = false, timeline: Bool = false, volume: Bool = false, mute: Bool = false) {
+                self.playback = playback
+                self.queue = queue
+                self.timeline = timeline
+                self.volume = volume
+                self.mute = mute
+            }
+        }
+
+        public var pending = Pending()
         public var context: Context
         public var playback: Playback?
         public var queue: Queue?

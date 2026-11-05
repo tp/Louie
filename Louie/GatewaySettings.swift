@@ -46,11 +46,11 @@ final class GatewaySettings {
     /// The stored address wins over the developer `LOUIE_SERVER_URL` fallback.
     var configuration: Linn.Configuration? {
         let trimmedHost = host.trimmingCharacters(in: .whitespaces)
-        if !trimmedHost.isEmpty,
-           let url = URL(string: "http://\(trimmedHost):\(port)"),
-           url.host() != nil {
-            return Linn.Configuration(serverURL: url)
+        guard !trimmedHost.isEmpty, (1 ... 65_535).contains(port),
+              let url = URL(string: "http://\(trimmedHost):\(port)"),
+              url.host()?.lowercased() == trimmedHost.lowercased() else {
+            return nil
         }
-        return try? Linn.Configuration.local()
+        return Linn.Configuration(serverURL: url)
     }
 }

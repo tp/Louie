@@ -49,3 +49,17 @@ import Testing
     #expect(libraryItem.isContainer)
     #expect(libraryItem.title == "My Qobuz")
 }
+
+@Test func piSnapshotCarriesServerPredictionsWithoutCallingThemObserved() {
+    var snapshot = Louie_Linn_V1_StateSnapshot()
+    snapshot.room = "Linn"
+    var pending = Louie_Linn_V1_PendingState()
+    pending.queue = true
+    pending.volume = true
+    snapshot.pending = pending
+
+    let update = PiLinnMapping.nowPlaying(snapshot)
+    #expect(update.pending.queue)
+    #expect(update.pending.volume)
+    #expect(!update.pending.playback)
+}

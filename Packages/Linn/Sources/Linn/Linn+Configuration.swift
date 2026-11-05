@@ -16,7 +16,9 @@ public extension Linn {
             let values = try DotEnv.load(fileURL: fileURL, currentDirectoryURL: currentDirectoryURL)
             let urlString = environment["LOUIE_SERVER_URL"] ?? values["LOUIE_SERVER_URL"]
                 ?? "http://louie-pi.local:50051"
-            guard let url = URL(string: urlString), url.host() != nil, url.port != nil else {
+            guard let url = URL(string: urlString), url.scheme == "http",
+                  let host = url.host(), !host.isEmpty,
+                  let port = url.port, (1 ... 65_535).contains(port) else {
                 throw ConfigurationError.invalidURL(urlString)
             }
 

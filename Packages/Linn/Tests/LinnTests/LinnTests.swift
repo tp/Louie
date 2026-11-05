@@ -5,6 +5,26 @@ import Testing
 
 @Test
 @MainActor
+func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+
+    await gateway.send(nowPlaying(index: 0, titles: ["First"], volume: 10))
+    try await waitUntil { linn.connectionState == .connected }
+
+    var disconnected = CiGateway.NowPlaying(room: "Linn", session: "")
+    disconnected.connectionStatus = .disconnected
+    await gateway.send(disconnected)
+    try await waitUntil { linn.connectionState == .connecting }
+    #expect(linn.currentSong?.title == "First")
+
+    await gateway.send(nowPlaying(index: 0, titles: ["Second"], volume: 12))
+    try await waitUntil { linn.connectionState == .connected && linn.currentSong?.title == "Second" }
+}
+
+@Test
+@MainActor
 func nextUsesForwardDirectionAndSuppressesStaleNowPlayingFields() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
