@@ -296,6 +296,13 @@ struct ConnectionGateView: View {
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
 
+                if let diagnosticMessage {
+                    Text("Details: \(diagnosticMessage)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+
                 Text(failureHelp)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -321,11 +328,13 @@ struct ConnectionGateView: View {
                     .buttonStyle(.borderedProminent)
 
                     #if os(iOS)
+                    if case .serverUnreachable = linn?.connectionState {
                         Button("Open Settings") {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
                             }
                         }
+                    }
                     #endif
                 }
 
@@ -356,8 +365,8 @@ struct ConnectionGateView: View {
         switch linn?.connectionState {
         case .serverUnreachable:
             return "The home server isn't answering."
-        case let .linnUnavailable(message):
-            return message ?? "The home server is running but Linn isn't connected."
+        case .linnUnavailable:
+            return "The home server is running but Linn isn't connected."
         case let .failed(message):
             return message
         default:
@@ -365,9 +374,19 @@ struct ConnectionGateView: View {
         }
     }
 
+    private var diagnosticMessage: String? {
+        if case let .linnUnavailable(message) = linn?.connectionState {
+            return message
+        }
+        return nil
+    }
+
     private var failureTitle: String {
         if case .linnUnavailable = linn?.connectionState {
             return "Linn isn't connected"
+        }
+        if case .failed = linn?.connectionState {
+            return "Connection failed"
         }
         return "Can't reach \(displayAddress) yet"
     }
@@ -375,6 +394,9 @@ struct ConnectionGateView: View {
     private var failureHelp: String {
         if case .linnUnavailable = linn?.connectionState {
             return "Check that the Linn DSM and its CI Gateway are running. Louie Home Server will reconnect automatically."
+        }
+        if case .failed = linn?.connectionState {
+            return "Check that Louie Home Server is up to date, then try again."
         }
         return "If asked about local network access, allow it. Check the address and that louie.service is running on your home server."
     }

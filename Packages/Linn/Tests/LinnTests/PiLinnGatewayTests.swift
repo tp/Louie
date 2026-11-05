@@ -2,6 +2,11 @@ import GRPCCore
 import Testing
 @testable import Linn
 
+@Test func ipv6HomeServerAuthorityUsesBrackets() {
+    #expect(PiLinnGateway.ipv6Authority(host: "fd00::1", port: 50051) == "[fd00::1]:50051")
+    #expect(PiLinnGateway.ipv6Authority(host: "louie-pi.local", port: 50051) == nil)
+}
+
 @Test func rpcCodesDriveFriendlyMessagesWithoutLosingTheirIdentity() {
     let unreachable = PiLinnRPCError(code: .unavailable, message: "transport closed")
     #expect(unreachable.code == .unavailable)
@@ -66,6 +71,18 @@ import Testing
     #expect(libraryItem.containedKinds == ["md.album.qobuz"])
     #expect(libraryItem.isContainer)
     #expect(libraryItem.title == "My Qobuz")
+}
+
+@Test func favouriteActionRequiresKnownFavouriteState() {
+    var item = Louie_Linn_V1_MediaItem()
+    item.id = "album"
+    item.canFavourite = true
+    var page = Louie_Linn_V1_MediaPage()
+    page.children = [item]
+
+    #expect(!PiLinnMapping.mediaPage(page).items[0].canFavourite)
+    page.children[0].isFavourite = false
+    #expect(PiLinnMapping.mediaPage(page).items[0].canFavourite)
 }
 
 @Test func piSnapshotCarriesServerPredictionsWithoutCallingThemObserved() {

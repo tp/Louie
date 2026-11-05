@@ -178,8 +178,8 @@ struct HomeView: View {
             "Waiting for gateway"
         case .serverUnreachable:
             "Can't reach Louie Home Server"
-        case let .linnUnavailable(message):
-            message ?? "Louie Home Server is reconnecting to Linn"
+        case .linnUnavailable:
+            "Louie Home Server is reconnecting to Linn"
         case .connected:
             "No now playing info"
         case let .failed(message):

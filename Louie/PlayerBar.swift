@@ -177,8 +177,8 @@ public struct PlayerBar: View {
             return "Waiting for gateway"
         case .serverUnreachable:
             return "Can't reach Louie Home Server"
-        case let .linnUnavailable(message):
-            return message ?? "Louie Home Server is reconnecting to Linn"
+        case .linnUnavailable:
+            return "Louie Home Server is reconnecting to Linn"
         case .connected:
             return "No now playing info"
         case let .failed(message):

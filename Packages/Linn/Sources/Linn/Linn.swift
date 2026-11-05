@@ -599,24 +599,17 @@ public final class Linn {
 
     private func mediaSelectionServerPreview(for item: LibraryItem) -> LibraryItem? {
         guard !item.title.isEmpty else { return nil }
-        var selected: LibraryItem
+        var preview = item
         if item.isContainer {
-            guard let firstTrack = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: "")]?
-                .items.first(where: { !$0.isContainer && !$0.title.isEmpty }) else {
-                return nil
-            }
-            selected = firstTrack
-        } else {
-            selected = item
+            // Preserve the container type for the server's queue count logic.
+            // The server can use its first-track cache for the song preview.
+            preview.childCount = queuedTrackCount(for: item)
         }
-        selected.album = selected.album ?? (item.isContainer ? item.title : nil)
-        selected.artworkURL = selected.artworkURL ?? item.artworkURL
-        selected.childCount = item.isContainer ? item.childCount : selected.childCount
-        return selected
+        return preview
     }
 
     public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {
-        guard item.canFavourite, let linnGateway else {
+        guard item.canFavourite, item.isFavourite != nil, let linnGateway else {
             return
         }
 
@@ -627,7 +620,7 @@ public final class Linn {
             } catch is CancellationError {
             } catch {
                 self?.updateLibraryItem(id: item.id, isFavourite: item.isFavourite)
-                self?.lastErrorMessage = String(describing: error)
+                self?.lastErrorMessage = error.localizedDescription
             }
         }
     }
@@ -1064,7 +1057,7 @@ public final class Linn {
                 let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
                 if failure.failed {
                     playlistSelectionTimeoutTask?.cancel()
-                    lastErrorMessage = String(describing: error)
+                    lastErrorMessage = error.localizedDescription
                     clearPendingQueueItem(failedJob: job)
                 }
                 if let nextJob = failure.next {
@@ -1465,7 +1458,7 @@ public final class Linn {
                     self.optimisticPlayState = nil
                 }
                 onFailure?()
-                self.lastErrorMessage = String(describing: error)
+                self.lastErrorMessage = error.localizedDescription
             }
         }
     }

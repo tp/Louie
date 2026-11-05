@@ -951,6 +951,14 @@ func startingABrowsedAlbumShowsItsFirstTrack() async throws {
     linn.play(other, placement: .now)
     #expect(linn.currentSong?.title == "Album Y")
     #expect(linn.currentSong?.artist == "Someone")
+
+    try await waitUntil { await gateway.selectedMediaPreviews().count == 2 }
+    let previews = await gateway.selectedMediaPreviews()
+    #expect(previews[0]?.id == "album-x")
+    #expect(previews[0]?.kind == "md.album.qobuz")
+    #expect(previews[0]?.childCount == 2)
+    #expect(previews[1]?.id == "album-y")
+    #expect(previews[1]?.childCount == nil)
 }
 
 @Test
@@ -1387,6 +1395,7 @@ private actor TestGateway: LinnGateway {
     private let continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
     private var selectedIndexes: [Int] = []
     private var selectedMedia: [SelectedMediaItem] = []
+    private var mediaPreviews: [Linn.LibraryItem?] = []
     private var favourites: [FavouriteRequest] = []
     private var previousCalls = 0
     private var nextCalls = 0
@@ -1487,6 +1496,11 @@ private actor TestGateway: LinnGateway {
         }
     }
 
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws {
+        mediaPreviews.append(preview)
+        try await selectMedia(mediaID: mediaID, room: room, queue: queue)
+    }
+
     func failMediaSelections(for mediaIDs: Set<String>) {
         failingMediaIDs.formUnion(mediaIDs)
     }
@@ -1513,6 +1527,10 @@ private actor TestGateway: LinnGateway {
 
     func selectedMediaItems() -> [SelectedMediaItem] {
         selectedMedia
+    }
+
+    func selectedMediaPreviews() -> [Linn.LibraryItem?] {
+        mediaPreviews
     }
 
     func favouriteRequests() -> [FavouriteRequest] {

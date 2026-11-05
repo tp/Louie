@@ -54,6 +54,19 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Check generated Linn gRPC client
+        run: |
+          protoc_dir="$RUNNER_TEMP/protoc-32.1"
+          protoc_zip="$RUNNER_TEMP/protoc-32.1.zip"
+          curl --fail --location --silent --show-error \
+            https://github.com/protocolbuffers/protobuf/releases/download/v32.1/protoc-32.1-osx-universal_binary.zip \
+            --output "$protoc_zip"
+          echo "95a1e03847cf7057b2db1b68fb92685c3cd9d14e777a879475663adc13989cd7  $protoc_zip" \
+            | shasum -a 256 --check
+          unzip -q "$protoc_zip" -d "$protoc_dir"
+          PATH="$protoc_dir/bin:$PATH" bash Packages/Linn/generate-proto.sh
+          git diff --exit-code -- Packages/Linn/Sources/Linn/Generated
+
       - name: Build & test Linn
         working-directory: Packages/Linn
         run: swift test --parallel

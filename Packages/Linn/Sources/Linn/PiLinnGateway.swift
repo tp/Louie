@@ -36,6 +36,7 @@ actor PiLinnGateway: LinnGateway {
             config.connection.keepalive = .init(time: .seconds(20), timeout: .seconds(10), allowWithoutCalls: true)
             config.backoff.max = .seconds(5)
             config.resolverBackoff.max = .seconds(5)
+            config.http2.authority = Self.ipv6Authority(host: host, port: port)
         }
         let transport = try Transport(target: .dns(host: host, port: port), transportSecurity: .plaintext, config: config)
         let grpcClient = GRPCClient(transport: transport)
@@ -44,6 +45,10 @@ actor PiLinnGateway: LinnGateway {
             try? await grpcClient.runConnections()
         }
         return Client(wrapping: grpcClient)
+    }
+
+    static func ipv6Authority(host: String, port: Int) -> String? {
+        host.contains(":") ? "[\(host)]:\(port)" : nil
     }
 
     func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
@@ -56,27 +61,19 @@ actor PiLinnGateway: LinnGateway {
                         let client = try service()
                         let receivedSnapshot = try await client.watchState(Google_Protobuf_Empty()) { response in
                             var receivedSnapshot = false
-                            do {
-                                for try await snapshot in response.messages {
-                                    guard !Task.isCancelled else { break }
-                                    receivedSnapshot = true
-                                    switch snapshot.connectionStatus {
-                                    case .connected:
-                                        continuation.yield(PiLinnMapping.nowPlaying(snapshot))
-                                    case .connecting, .disconnected, .unspecified:
-                                        // Linn can drop while the home server stays available.
-                                        // Keep the stream alive for its next connected snapshot.
-                                        continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
-                                    default:
-                                        continue
-                                    }
+                            for try await snapshot in response.messages {
+                                guard !Task.isCancelled else { break }
+                                receivedSnapshot = true
+                                switch snapshot.connectionStatus {
+                                case .connected:
+                                    continuation.yield(PiLinnMapping.nowPlaying(snapshot))
+                                case .connecting, .disconnected, .unspecified:
+                                    // Linn can drop while the home server stays available.
+                                    // Keep the stream alive for its next connected snapshot.
+                                    continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
+                                default:
+                                    continue
                                 }
-                            } catch is CancellationError {
-                                throw CancellationError()
-                            } catch let error as RPCError where error.code == .cancelled && Task.isCancelled {
-                                throw CancellationError()
-                            } catch {
-                                // A new WatchState starts with a full snapshot.
                             }
                             return receivedSnapshot
                         }
@@ -90,6 +87,17 @@ actor PiLinnGateway: LinnGateway {
                     } catch let error as PiLinnError {
                         continuation.finish(throwing: error)
                         return
+                    } catch let error as RPCError {
+                        guard !Task.isCancelled else { break }
+                        switch error.code {
+                        case .unavailable, .deadlineExceeded:
+                            var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
+                            update.connectionStatus = .serverUnreachable
+                            continuation.yield(update)
+                        default:
+                            continuation.finish(throwing: PiLinnRPCError(code: error.code, message: error.message))
+                            return
+                        }
                     } catch {
                         // A Pi restart or network transition closes WatchState. Resume
                         // from its next complete snapshot on the same gRPC client.
@@ -241,6 +249,9 @@ struct PiLinnRPCError: Error, LocalizedError {
                 : message.isEmpty ? "Linn can't perform this action right now." : message
         case .invalidArgument: "This request isn't valid."
         case .unauthenticated, .permissionDenied: "Louie Home Server rejected access."
+        case .unimplemented: "Louie Home Server needs an update."
+        case .resourceExhausted: "Louie Home Server is busy. Try again."
+        case .internalError: "Louie Home Server had an internal error."
         case .cancelled: "The request was cancelled."
         default: "Louie Home Server request failed (\(code))."
         }
@@ -378,7 +389,7 @@ enum PiLinnMapping {
             containedKinds: item.containedClasses,
             childCount: item.hasChildCount ? Int(item.childCount) : nil,
             isFavourite: item.hasIsFavourite ? item.isFavourite : nil,
-            canFavourite: item.canFavourite
+            canFavourite: item.canFavourite && item.hasIsFavourite
         )
     }
 
