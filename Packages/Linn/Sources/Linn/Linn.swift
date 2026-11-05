@@ -116,7 +116,7 @@ public final class Linn {
         return max(0, total - effectiveCurrentIndex - 1)
     }
 
-    private var ciGateway: (any LinnGateway)?
+    private var linnGateway: (any LinnGateway)?
     private var configurationLoadAttempted = false
     private var playlistContentRevision: Int?
     private var playlistSongsByIndex: [Int: Song] = [:]
@@ -221,7 +221,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = PiLinnGateway(serverURL: configuration.serverURL)
+        linnGateway = PiLinnGateway(serverURL: configuration.serverURL)
         configurationLoadAttempted = true
     }
 
@@ -232,7 +232,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = gateway
+        linnGateway = gateway
         configurationLoadAttempted = true
     }
 
@@ -242,7 +242,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = nil
+        linnGateway = nil
     }
 
     #if DEBUG
@@ -272,7 +272,7 @@ public final class Linn {
             self.timeline = timeline
             self.songTransitionDirection = songTransitionDirection
             self.lastErrorMessage = lastErrorMessage
-            ciGateway = nil
+            linnGateway = nil
             configurationLoadAttempted = true
             setQueueAvailability(hasPrevious: hasPrevious, hasNext: hasNext)
         }
@@ -286,12 +286,12 @@ public final class Linn {
     }
 
     public func start() {
-        if ciGateway == nil, !configurationLoadAttempted {
+        if linnGateway == nil, !configurationLoadAttempted {
             configurationLoadAttempted = true
             do {
                 let configuration = try Configuration.local()
                 Self.logger.info("Loaded Louie server URL \(configuration.serverURL.absoluteString, privacy: .public)")
-                ciGateway = PiLinnGateway(serverURL: configuration.serverURL)
+                linnGateway = PiLinnGateway(serverURL: configuration.serverURL)
             } catch {
                 let message = error.localizedDescription
                 Self.logger.error("Failed to load Linn configuration: \(message, privacy: .public)")
@@ -301,7 +301,7 @@ public final class Linn {
             }
         }
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             if case .failed = connectionState {
                 return
             }
@@ -319,10 +319,10 @@ public final class Linn {
             guard let self else {
                 return
             }
-            var loadLibraryOnConnection = ciGateway is PiLinnGateway
+            var loadLibraryOnConnection = linnGateway is PiLinnGateway
 
             do {
-                let updates = await ciGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
+                let updates = await linnGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
                 for try await update in updates {
                     guard update.connectionStatus == .connected else {
                         switch update.connectionStatus {
@@ -356,7 +356,7 @@ public final class Linn {
             }
         }
 
-        if !(ciGateway is PiLinnGateway) {
+        if !(linnGateway is PiLinnGateway) {
             loadLibrary()
         }
     }
@@ -371,21 +371,21 @@ public final class Linn {
         if library.availability == .loading {
             library.availability = .unavailable
         }
-        guard ciGateway != nil else {
+        guard linnGateway != nil else {
             return
         }
         connectionState = .idle
     }
 
     public func play() {
-        performControl(optimisticState: .playing) { ciGateway, room in
-            try await ciGateway.play(room: room)
+        performControl(optimisticState: .playing) { linnGateway, room in
+            try await linnGateway.play(room: room)
         }
     }
 
     public func pause() {
-        performControl(optimisticState: .paused) { ciGateway, room in
-            try await ciGateway.pause(room: room)
+        performControl(optimisticState: .paused) { linnGateway, room in
+            try await linnGateway.pause(room: room)
         }
     }
 
@@ -430,8 +430,8 @@ public final class Linn {
             target: clampedVolume,
             expiresAt: Date().addingTimeInterval(2.5)
         )
-        performControl { ciGateway, room in
-            try await ciGateway.setVolume(clampedVolume, room: room, group: false)
+        performControl { linnGateway, room in
+            try await linnGateway.setVolume(clampedVolume, room: room, group: false)
         }
     }
 
@@ -441,8 +441,8 @@ public final class Linn {
             target: isMuted,
             expiresAt: Date().addingTimeInterval(2.5)
         )
-        performControl { ciGateway, room in
-            try await ciGateway.setMuted(isMuted, room: room, group: false)
+        performControl { linnGateway, room in
+            try await linnGateway.setMuted(isMuted, room: room, group: false)
         }
     }
 
@@ -462,7 +462,7 @@ public final class Linn {
 
         libraryTask?.cancel()
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             library = Library(availability: .unavailable)
             libraryContentRevision = nil
             libraryPageCache = [:]
@@ -470,13 +470,13 @@ public final class Linn {
         }
 
         library.availability = .loading
-        libraryTask = Task { [weak self, ciGateway, room] in
+        libraryTask = Task { [weak self, linnGateway, room] in
             guard let self else {
                 return
             }
 
             do {
-                let services = try await ciGateway.mediaServices(room: room)
+                let services = try await linnGateway.mediaServices(room: room)
                 try Task.checkCancellation()
                 guard let qobuzService = services.first(where: { $0.name.localizedCaseInsensitiveCompare("Qobuz") == .orderedSame }) else {
                     let availableServices = Self.availableMediaServicesDescription(services)
@@ -486,7 +486,7 @@ public final class Linn {
                     return
                 }
 
-                let rootPage = try await ciGateway.browseMedia(
+                let rootPage = try await linnGateway.browseMedia(
                     mediaID: qobuzService.id,
                     index: 0,
                     count: 50,
@@ -498,7 +498,7 @@ public final class Linn {
 
                 let sections = await buildLibrarySections(
                     rootPage: libraryRootPage,
-                    gateway: ciGateway
+                    gateway: linnGateway
                 )
                 try Task.checkCancellation()
                 library = Library(
@@ -532,11 +532,11 @@ public final class Linn {
             return cached
         }
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             throw LibraryError.unavailable
         }
 
-        let page = try await ciGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
+        let page = try await linnGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
         let libraryPage = page
         reconcileLibraryRevision(libraryPage.contentRevision)
         if index == 0 {
@@ -555,11 +555,11 @@ public final class Linn {
         guard !trimmedQuery.isEmpty else {
             return LibraryPage(id: "search", index: index)
         }
-        guard let ciGateway, let serviceID = library.qobuzService?.id else {
+        guard let linnGateway, let serviceID = library.qobuzService?.id else {
             throw LibraryError.unavailable
         }
 
-        let page = try await ciGateway.searchMedia(
+        let page = try await linnGateway.searchMedia(
             serviceID: serviceID,
             query: trimmedQuery,
             type: type,
@@ -570,7 +570,7 @@ public final class Linn {
     }
 
     public func play(_ item: LibraryItem, placement: QueuePlacement = .replace) {
-        guard ciGateway != nil else {
+        guard linnGateway != nil else {
             return
         }
 
@@ -587,8 +587,8 @@ public final class Linn {
             if let previewGeneration {
                 self?.revertMediaSelectionPreview(generation: previewGeneration)
             }
-        }) { ciGateway, room in
-            try await ciGateway.selectMedia(
+        }) { linnGateway, room in
+            try await linnGateway.selectMedia(
                 mediaID: item.id,
                 room: room,
                 queue: placement,
@@ -616,14 +616,14 @@ public final class Linn {
     }
 
     public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {
-        guard item.canFavourite, let ciGateway else {
+        guard item.canFavourite, let linnGateway else {
             return
         }
 
         updateLibraryItem(id: item.id, isFavourite: isFavourite)
-        Task { [weak self, ciGateway] in
+        Task { [weak self, linnGateway] in
             do {
-                try await ciGateway.setMediaFavourite(mediaID: item.id, isFavourite: isFavourite)
+                try await linnGateway.setMediaFavourite(mediaID: item.id, isFavourite: isFavourite)
             } catch is CancellationError {
             } catch {
                 self?.updateLibraryItem(id: item.id, isFavourite: item.isFavourite)
@@ -1030,7 +1030,7 @@ public final class Linn {
     private func enqueuePlaylistSelection(_ job: PlaylistSelectionJob) {
         lastErrorMessage = nil
 
-        guard ciGateway != nil else {
+        guard linnGateway != nil else {
             return
         }
 
@@ -1040,7 +1040,7 @@ public final class Linn {
     }
 
     private func sendPlaylistSelection(_ job: PlaylistSelectionJob) {
-        guard let ciGateway else {
+        guard let linnGateway else {
             return
         }
 
@@ -1056,9 +1056,9 @@ public final class Linn {
             self?.playlistSelectionTimedOut(job)
         }
 
-        playlistSelectionTask = Task { [ciGateway, room] in
+        playlistSelectionTask = Task { [linnGateway, room] in
             do {
-                try await ciGateway.selectPlaylistItem(at: job.targetIndex, room: room)
+                try await linnGateway.selectPlaylistItem(at: job.targetIndex, room: room)
             } catch is CancellationError {
             } catch {
                 let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
@@ -1444,7 +1444,7 @@ public final class Linn {
         }
         lastErrorMessage = nil
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             return
         }
 
@@ -1452,9 +1452,9 @@ public final class Linn {
         // favourites must not cancel each other. (Rapid Enqueue-then-pause used
         // to silently drop the enqueue.) Each command is short-lived — the
         // gateway acks or times out within seconds.
-        Task { [weak self, ciGateway, room] in
+        Task { [weak self, linnGateway, room] in
             do {
-                try await operation(ciGateway, room)
+                try await operation(linnGateway, room)
             } catch is CancellationError {
             } catch {
                 guard let self else {
