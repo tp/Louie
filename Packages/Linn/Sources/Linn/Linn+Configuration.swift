@@ -17,7 +17,7 @@ public extension Linn {
             let urlString = environment["LOUIE_SERVER_URL"] ?? values["LOUIE_SERVER_URL"]
                 ?? "http://louie-pi.local:50051"
             guard let url = URL(string: urlString), url.scheme == "http",
-                  let host = url.host(), !host.isEmpty,
+                  let host = url.host(), !host.isEmpty, !host.contains(":"),
                   let port = url.port, (1 ... 65_535).contains(port) else {
                 throw ConfigurationError.invalidURL(urlString)
             }

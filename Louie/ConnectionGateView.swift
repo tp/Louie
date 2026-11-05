@@ -244,7 +244,7 @@ struct ConnectionGateView: View {
     private var addressCard: some View {
         VStack(spacing: 16) {
             VStack(spacing: 0) {
-                TextField("Hostname or IP address", text: $settings.host)
+                TextField("Hostname or IPv4 address", text: $settings.host)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
                 #if os(iOS)
@@ -267,7 +267,7 @@ struct ConnectionGateView: View {
             }
             .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 12))
 
-            Text("The hostname or reserved IP address of your Louie Home Server. Stored only on this device.")
+            Text("The hostname or reserved IPv4 address of your Louie Home Server. Stored only on this device.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
