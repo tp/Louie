@@ -460,6 +460,7 @@ nonisolated struct Louie_Linn_V1_PendingState: Sendable {
 
   var playback: Bool = false
 
+  /// Aggregate retained for older clients.
   var queue: Bool = false
 
   var timeline: Bool = false
@@ -467,6 +468,12 @@ nonisolated struct Louie_Linn_V1_PendingState: Sendable {
   var volume: Bool = false
 
   var mute: Bool = false
+
+  var queueIndex: Bool = false
+
+  var queueTotal: Bool = false
+
+  var currentItem: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1290,7 +1297,7 @@ nonisolated extension Louie_Linn_V1_StateSnapshot: SwiftProtobuf.Message, SwiftP
 
 nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PendingState"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}playback\0\u{1}queue\0\u{1}timeline\0\u{1}volume\0\u{1}mute\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}playback\0\u{1}queue\0\u{1}timeline\0\u{1}volume\0\u{1}mute\0\u{3}queue_index\0\u{3}queue_total\0\u{3}current_item\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1303,6 +1310,9 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
       case 3: try { try decoder.decodeSingularBoolField(value: &self.timeline) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.volume) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.mute) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.queueIndex) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.queueTotal) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.currentItem) }()
       default: break
       }
     }
@@ -1324,6 +1334,15 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
     if self.mute != false {
       try visitor.visitSingularBoolField(value: self.mute, fieldNumber: 5)
     }
+    if self.queueIndex != false {
+      try visitor.visitSingularBoolField(value: self.queueIndex, fieldNumber: 6)
+    }
+    if self.queueTotal != false {
+      try visitor.visitSingularBoolField(value: self.queueTotal, fieldNumber: 7)
+    }
+    if self.currentItem != false {
+      try visitor.visitSingularBoolField(value: self.currentItem, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1333,6 +1352,9 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
     if lhs.timeline != rhs.timeline {return false}
     if lhs.volume != rhs.volume {return false}
     if lhs.mute != rhs.mute {return false}
+    if lhs.queueIndex != rhs.queueIndex {return false}
+    if lhs.queueTotal != rhs.queueTotal {return false}
+    if lhs.currentItem != rhs.currentItem {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

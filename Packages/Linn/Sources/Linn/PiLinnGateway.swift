@@ -233,6 +233,9 @@ enum PiLinnMapping {
             result.pending = .init(
                 playback: snapshot.pending.playback,
                 queue: snapshot.pending.queue,
+                queueIndex: snapshot.pending.queueIndex,
+                queueTotal: snapshot.pending.queueTotal,
+                currentItem: snapshot.pending.currentItem,
                 timeline: snapshot.pending.timeline,
                 volume: snapshot.pending.volume,
                 mute: snapshot.pending.mute

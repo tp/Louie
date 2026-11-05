@@ -60,11 +60,15 @@ import Testing
     snapshot.room = "Linn"
     var pending = Louie_Linn_V1_PendingState()
     pending.queue = true
+    pending.queueIndex = true
+    pending.currentItem = true
     pending.volume = true
     snapshot.pending = pending
 
     let update = PiLinnMapping.nowPlaying(snapshot)
     #expect(update.pending.queue)
+    #expect(update.pending.queueIndex)
+    #expect(update.pending.currentItem)
     #expect(update.pending.volume)
     #expect(!update.pending.playback)
 }

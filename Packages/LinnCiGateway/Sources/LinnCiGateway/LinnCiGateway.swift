@@ -13,13 +13,19 @@ public final class CiGateway: Sendable {
         public struct Pending: Sendable, Equatable {
             public var playback = false
             public var queue = false
+            public var queueIndex = false
+            public var queueTotal = false
+            public var currentItem = false
             public var timeline = false
             public var volume = false
             public var mute = false
 
-            public init(playback: Bool = false, queue: Bool = false, timeline: Bool = false, volume: Bool = false, mute: Bool = false) {
+            public init(playback: Bool = false, queue: Bool = false, queueIndex: Bool = false, queueTotal: Bool = false, currentItem: Bool = false, timeline: Bool = false, volume: Bool = false, mute: Bool = false) {
                 self.playback = playback
                 self.queue = queue
+                self.queueIndex = queueIndex
+                self.queueTotal = queueTotal
+                self.currentItem = currentItem
                 self.timeline = timeline
                 self.volume = volume
                 self.mute = mute

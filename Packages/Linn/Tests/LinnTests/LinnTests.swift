@@ -16,6 +16,8 @@ func predictedSongClearsThePreviousTrackTimeline() async throws {
     predicted.timeline = nil
     predicted.pending.playback = true
     predicted.pending.queue = true
+    predicted.pending.queueIndex = true
+    predicted.pending.currentItem = true
     predicted.pending.timeline = true
     await gateway.send(predicted)
     try await waitUntil { linn.currentSong?.title == "Second" }

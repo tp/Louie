@@ -886,7 +886,7 @@ public final class Linn {
 
     private func apply(_ update: CiGateway.NowPlaying) {
         let suppressNowPlayingFields = shouldSuppressNowPlayingFields(
-            incomingQueueIndex: update.pending.queue ? nil : update.queue?.index
+            incomingQueueIndex: update.pending.queueIndex ? nil : update.queue?.index
         )
 
         playState = reconciledPlayState(incoming: PlayState(update.playback), confirmed: !update.pending.playback)
@@ -906,7 +906,7 @@ public final class Linn {
         if let incomingQueueIndex = update.queue?.index {
             incomingCurrentSong?.queueIndex = incomingQueueIndex
         }
-        if !update.pending.playback && !update.pending.queue {
+        if !update.pending.currentItem {
             reportedSong = incomingCurrentSong
         }
         if !update.pending.timeline {
@@ -920,7 +920,7 @@ public final class Linn {
             let wasPreviewingMedia = isPreviewingMedia
             // The queue position follows the device either way; only the
             // song shown as playing is held on the preview.
-            if (update.pending.queue && isPreviewingMedia) || shouldHoldMediaSelectionPreview(incoming: incomingCurrentSong) {
+            if (update.pending.queueIndex && isPreviewingMedia) || shouldHoldMediaSelectionPreview(incoming: incomingCurrentSong) {
                 playlist.currentIndex = update.queue?.index
             } else {
                 // The preview already moved forward; the new queue's index
@@ -929,7 +929,7 @@ public final class Linn {
                     updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
                 }
                 currentSong = incomingCurrentSong
-                if !update.pending.playback && !update.pending.queue,
+                if !update.pending.currentItem && !update.pending.queueIndex,
                    let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
                     playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
                 }
@@ -940,10 +940,10 @@ public final class Linn {
             }
         }
 
-        if !update.pending.queue {
+        if !update.pending.queueIndex {
             reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
         }
-        if !update.pending.queue {
+        if !update.pending.queueTotal {
             reconcilePendingQueueLength()
         }
         updatePlaylistSongs()
