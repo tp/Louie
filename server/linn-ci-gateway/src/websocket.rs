@@ -18,7 +18,7 @@ pub struct Envelope {
 }
 
 pub fn decode<T: DeserializeOwned>(value: &Value) -> Result<T, serde_json::Error> {
-    serde_json::from_value(value.clone())
+    T::deserialize(value)
 }
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Value, serde_json::Error> {

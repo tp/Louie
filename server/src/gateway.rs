@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    time::{Duration, SystemTime},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant, SystemTime},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -24,6 +25,7 @@ struct GatewayRequest {
     body: Value,
     preview: Option<crate::pb::MediaItem>,
     first_track: Option<crate::pb::MediaItem>,
+    started: Option<oneshot::Sender<()>>,
     reply: oneshot::Sender<Result<Value, tonic::Status>>,
 }
 
@@ -32,6 +34,7 @@ struct Pending {
     deadline: tokio::time::Instant,
     coalesce_key: Option<CoalesceKey>,
     search: bool,
+    target_index: Option<i32>,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -106,16 +109,24 @@ impl Gateway {
             return Err(tonic::Status::unavailable("Linn gateway is disconnected"));
         }
         let (reply, result) = oneshot::channel();
+        let (started, ready) = oneshot::channel();
+        let is_search = path == "/V2/services/search";
         self.requests
             .send(GatewayRequest {
                 path,
                 body,
                 preview,
                 first_track,
+                started: is_search.then_some(started),
                 reply,
             })
             .await
             .map_err(|_| tonic::Status::unavailable("Linn gateway worker stopped"))?;
+        if is_search {
+            // The command deadline starts when the serial search lane sends it,
+            // not while an older search is still occupying that lane.
+            let _ = ready.await;
+        }
         match tokio::time::timeout(Duration::from_secs(5), result).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(tonic::Status::unavailable(
@@ -243,6 +254,7 @@ async fn run_connection(
     let mut deferred: HashMap<CoalesceKey, TaggedRequest> = HashMap::new();
     let mut search_in_flight = false;
     let mut search_queue: VecDeque<TaggedRequest> = VecDeque::new();
+    let mut shuffle = false;
     let mut next_tag = 0_u64;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut ping = tokio::time::interval(Duration::from_secs(15));
@@ -272,6 +284,11 @@ async fn run_connection(
                     Ok(header) => header,
                     Err(error) => { warn!("Invalid Linn WebSocket envelope: {error}"); continue; }
                 };
+                if header.request_path.as_deref() == Some("/V2/transport/status")
+                    && let Ok(response) = websocket::decode::<models::V2TransportStatusResponse>(&envelope)
+                    && let Some(value) = response.data.and_then(|data| data.shuffle) {
+                    shuffle = value;
+                }
                 if let Some(tag) = header.tag.as_deref()
                     && let Some(waiter) = pending.remove(tag) {
                     debug!(tag, reply = %text, "Linn tagged reply");
@@ -285,19 +302,20 @@ async fn run_connection(
                     if let Some(key) = waiter.coalesce_key {
                         in_flight.remove(&key);
                         if let Some(next) = deferred.remove(&key) {
-                            send_request(&mut socket, next, &session, &mut pending, &mut in_flight, Some(key), false).await?;
+                            let tag = next.tag.clone();
+                            if !send_request(&mut socket, next, &session, &mut pending, &mut in_flight, Some(key), false).await?
+                                && optimism.fail(&tag) {
+                                state.send_replace(optimism.snapshot(observed));
+                            }
                         }
                     }
                     if waiter.search {
-                        search_in_flight = false;
-                        if let Some(next) = search_queue.pop_front() {
-                            send_request(&mut socket, next, &session, &mut pending, &mut in_flight, None, true).await?;
-                            search_in_flight = true;
-                        }
+                        search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending, &mut in_flight).await?;
                     }
                     continue;
                 }
-                let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope));
+                let published = state.borrow().clone();
+                let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope, &published));
                 let settled = optimism.reconcile(observed);
                 if changed || settled {
                     state.send_replace(optimism.snapshot(observed));
@@ -312,6 +330,10 @@ async fn run_connection(
             Some(mut request) = rx.recv() => {
                 if request.path == "/louie/skip" {
                     let step = request.body["step"].as_i64().unwrap_or(0) as i32;
+                    if shuffle {
+                        request.path = "/V2/transport/skip_track";
+                        request.body = json!({"room": observed.room, "skip_track": step});
+                    } else {
                     let effective = optimism.snapshot(observed);
                     let playlist = effective.now_playing.and_then(|state| state.playlist);
                     if let Some(playlist) = playlist
@@ -327,23 +349,51 @@ async fn run_connection(
                         request.path = "/V2/transport/skip_track";
                         request.body = json!({"room": observed.room, "skip_track": step});
                     }
+                    }
+                }
+                if request.path == "/V2/media/select"
+                    && matches!(request.body.get("queue").and_then(Value::as_str), Some("now" | "replace")) {
+                    let select_key = CoalesceKey { path: "/V2/playlist/select", group: false };
+                    if let Some(old) = deferred.remove(&select_key) {
+                        if optimism.fail(&old.tag) {
+                            state.send_replace(optimism.snapshot(observed));
+                        }
+                        let _ = old.request.reply.send(Ok(Value::Null));
+                    }
                 }
                 next_tag += 1;
                 let tag = format!("pi-{next_tag}");
                 let key = coalesce_key(&request);
-                if request.path == "/V2/services/search" && search_in_flight {
-                    if search_queue.len() >= 64 {
-                        let _ = request.reply.send(Err(tonic::Status::resource_exhausted("too many queued Linn searches")));
-                    } else {
-                        search_queue.push_back(TaggedRequest { tag, request });
+                if request.path == "/V2/playlist/select"
+                    && let Some(key) = key
+                    && let Some(index) = request.body.get("index").and_then(Value::as_i64)
+                    && pending.values().any(|waiter| waiter.coalesce_key == Some(key) && waiter.target_index == i32::try_from(index).ok()) {
+                    if let Some(old) = deferred.remove(&key) {
+                        if optimism.fail(&old.tag) {
+                            state.send_replace(optimism.snapshot(observed));
+                        }
+                        let _ = old.request.reply.send(Ok(Value::Null));
                     }
+                    let _ = request.reply.send(Ok(Value::Null));
+                    continue;
+                }
+                if request.path == "/V2/services/search" && search_in_flight {
+                    while let Some(old) = search_queue.pop_front() {
+                        let _ = old.request.reply.send(Err(tonic::Status::cancelled("superseded by a newer search")));
+                    }
+                    search_queue.push_back(TaggedRequest { tag, request });
                     continue;
                 }
                 if let Some(key) = key
                     && in_flight.contains(&key) {
                     if let Some(old) = deferred.remove(&key) {
                         optimism.fail(&old.tag);
-                        let _ = old.request.reply.send(Err(tonic::Status::cancelled("superseded by a newer value")));
+                        let result = if key.path == "/V2/playlist/select" {
+                            Ok(Value::Null)
+                        } else {
+                            Err(tonic::Status::cancelled("superseded by a newer value"))
+                        };
+                        let _ = old.request.reply.send(result);
                     }
                     let effective = optimism.snapshot(observed);
                     if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), &effective) {
@@ -357,8 +407,11 @@ async fn run_connection(
                     state.send_replace(optimism.snapshot(observed));
                 }
                 let search = request.path == "/V2/services/search";
-                send_request(&mut socket, TaggedRequest { tag, request }, &session, &mut pending, &mut in_flight, key, search).await?;
-                search_in_flight |= search;
+                let registered = send_request(&mut socket, TaggedRequest { tag: tag.clone(), request }, &session, &mut pending, &mut in_flight, key, search).await?;
+                if !registered && optimism.fail(&tag) {
+                    state.send_replace(optimism.snapshot(observed));
+                }
+                search_in_flight |= search && registered;
             }
             _ = tick.tick() => {
                 let now = tokio::time::Instant::now();
@@ -374,15 +427,15 @@ async fn run_connection(
                         if let Some(key) = waiter.coalesce_key {
                             in_flight.remove(&key);
                             if let Some(next) = deferred.remove(&key) {
-                                send_request(&mut socket, next, &session, &mut pending, &mut in_flight, Some(key), false).await?;
+                                let tag = next.tag.clone();
+                                if !send_request(&mut socket, next, &session, &mut pending, &mut in_flight, Some(key), false).await?
+                                    && optimism.fail(&tag) {
+                                    state.send_replace(optimism.snapshot(observed));
+                                }
                             }
                         }
                         if waiter.search {
-                            search_in_flight = false;
-                            if let Some(next) = search_queue.pop_front() {
-                                send_request(&mut socket, next, &session, &mut pending, &mut in_flight, None, true).await?;
-                                search_in_flight = true;
-                            }
+                            search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending, &mut in_flight).await?;
                         }
                     }
                 }
@@ -437,9 +490,16 @@ async fn send_request(
     in_flight: &mut HashSet<CoalesceKey>,
     key: Option<CoalesceKey>,
     search: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let TaggedRequest { tag, request } = tagged;
     let mut body = request.body;
+    let target_index = if request.path == "/V2/playlist/select" {
+        body.get("index")
+            .and_then(Value::as_i64)
+            .and_then(|index| i32::try_from(index).ok())
+    } else {
+        None
+    };
     body["requestPath"] = json!(request.path);
     body["tag"] = json!(tag);
     body["session"] = json!(session);
@@ -452,7 +512,7 @@ async fn send_request(
                     "invalid {} request: {error}",
                     request.path
                 ))));
-            return Ok(());
+            return Ok(false);
         }
     };
     if let Some(key) = key {
@@ -465,8 +525,12 @@ async fn send_request(
             deadline: tokio::time::Instant::now() + Duration::from_secs(5),
             coalesce_key: key,
             search,
+            target_index,
         },
     );
+    if let Some(started) = request.started {
+        let _ = started.send(());
+    }
     if let Err(error) = socket.send(Message::Text(body.to_string().into())).await {
         if let Some(waiter) = pending.remove(&tag) {
             let _ = waiter.reply.send(Err(tonic::Status::unavailable(format!(
@@ -479,7 +543,25 @@ async fn send_request(
         }
         return Err(error.to_string());
     }
-    Ok(())
+    Ok(true)
+}
+
+async fn send_next_search(
+    socket: &mut Socket,
+    session: &str,
+    search_queue: &mut VecDeque<TaggedRequest>,
+    pending: &mut HashMap<String, Pending>,
+    in_flight: &mut HashSet<CoalesceKey>,
+) -> Result<bool, String> {
+    while let Some(next) = search_queue.pop_front() {
+        if next.request.reply.is_closed() {
+            continue;
+        }
+        if send_request(socket, next, session, pending, in_flight, None, true).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn await_path(socket: &mut Socket, path: &str) -> Result<Value, String> {
@@ -527,7 +609,12 @@ fn subscriptions(session: &str, room: &str) -> Vec<(&'static str, &'static str, 
     result
 }
 
-fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool {
+fn apply_update(
+    snapshot: &mut StateSnapshot,
+    path: &str,
+    value: &Value,
+    published: &StateSnapshot,
+) -> bool {
     let room = snapshot.room.clone();
     let Some(now_playing) = snapshot.now_playing.as_mut() else {
         return false;
@@ -535,9 +622,12 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
     let previous = now_playing.clone();
     let changed = match path {
         "/V2/transport/status" => {
-            let Ok(response) = websocket::decode::<models::V2TransportStatusResponse>(value) else {
-                warn!("Invalid Linn transport status");
-                return false;
+            let response = match websocket::decode::<models::V2TransportStatusResponse>(value) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn_decode(path, &error);
+                    return false;
+                }
             };
             let transport = response
                 .data
@@ -563,9 +653,12 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
             }
         }
         "/V2/seek/status" => {
-            let Ok(response) = websocket::decode::<models::V2SeekStatusResponse>(value) else {
-                warn!("Invalid Linn seek status");
-                return false;
+            let response = match websocket::decode::<models::V2SeekStatusResponse>(value) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn_decode(path, &error);
+                    return false;
+                }
             };
             let Some(data) = response.data else {
                 return false;
@@ -594,9 +687,12 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
             true
         }
         "/V2/volume/status" => {
-            let Ok(response) = websocket::decode::<models::V2VolumeStatusResponse>(value) else {
-                warn!("Invalid Linn volume status");
-                return false;
+            let response = match websocket::decode::<models::V2VolumeStatusResponse>(value) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn_decode(path, &error);
+                    return false;
+                }
             };
             let Some(data) = response.data else {
                 return false;
@@ -611,9 +707,12 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
             true
         }
         "/V2/metadata/status" => {
-            let Ok(response) = websocket::decode::<models::V2MetadataStatusResponse>(value) else {
-                warn!("Invalid Linn metadata status");
-                return false;
+            let response = match websocket::decode::<models::V2MetadataStatusResponse>(value) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn_decode(path, &error);
+                    return false;
+                }
             };
             let Some(metadata) = response.metadata else {
                 return false;
@@ -635,9 +734,12 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
             true
         }
         "/V2/playlist/subscribe" => {
-            let Ok(response) = websocket::decode_playlist(value.clone()) else {
-                warn!("Invalid Linn playlist status");
-                return false;
+            let response = match websocket::decode_playlist(value.clone()) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn_decode(path, &error);
+                    return false;
+                }
             };
             let Some(data) = response.data else {
                 return false;
@@ -680,13 +782,33 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
             let after = now_playing.timeline.as_ref();
             match (before, after) {
                 (Some(before), Some(after)) => {
+                    let published_timeline = published
+                        .now_playing
+                        .as_ref()
+                        .and_then(|state| state.timeline.as_ref());
+                    let expected = published_timeline.and_then(|timeline| {
+                        let position = timeline.position_seconds?;
+                        let seconds = if published.now_playing.as_ref().is_some_and(|state| {
+                            state.transport_state == Some(TransportState::Playing as i32)
+                        }) {
+                            timeline
+                                .position_sampled_at
+                                .as_ref()
+                                .map(|sample| now().seconds.saturating_sub(sample.seconds).max(0))
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        Some(position.saturating_add(i32::try_from(seconds).unwrap_or(i32::MAX)))
+                    });
                     before.duration_seconds != after.duration_seconds
                         || before.is_seekable != after.is_seekable
                         || before.seek_upper_bound_seconds != after.seek_upper_bound_seconds
-                        || before
-                            .position_seconds
+                        || expected
                             .zip(after.position_seconds)
-                            .is_none_or(|(old, new)| !(0..=2).contains(&(new - old)))
+                            .is_none_or(|(expected, actual)| {
+                                (i64::from(expected) - i64::from(actual)).abs() > 2
+                            })
                 }
                 _ => before != after,
             }
@@ -701,6 +823,21 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
 
 fn now() -> prost_types::Timestamp {
     SystemTime::now().into()
+}
+
+fn warn_decode(path: &str, error: &serde_json::Error) {
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let mut last = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("decode log lock poisoned");
+    if last
+        .get(path)
+        .is_none_or(|time| time.elapsed() >= Duration::from_secs(60))
+    {
+        warn!(path, %error, "Invalid Linn status update");
+        last.insert(path.to_owned(), Instant::now());
+    }
 }
 
 fn str_at<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -719,6 +856,42 @@ fn int_at(value: &Value, field: &str) -> Option<i32> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn stalled_playback_updates_the_published_timeline_anchor() {
+        let old_sample = prost_types::Timestamp {
+            seconds: now().seconds - 10,
+            nanos: 0,
+        };
+        let mut observed = StateSnapshot {
+            now_playing: Some(NowPlayingState {
+                transport_state: Some(TransportState::Playing as i32),
+                timeline: Some(crate::pb::Timeline {
+                    position_seconds: Some(10),
+                    position_sampled_at: Some(old_sample),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let published = observed.clone();
+        assert!(apply_update(
+            &mut observed,
+            "/V2/seek/status",
+            &json!({"data": {"elapsed": 10}}),
+            &published,
+        ));
+        assert_eq!(
+            observed
+                .now_playing
+                .unwrap()
+                .timeline
+                .unwrap()
+                .position_seconds,
+            Some(10)
+        );
+    }
     use tokio_tungstenite::accept_async;
 
     #[test]
@@ -875,10 +1048,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_media_discards_a_deferred_playlist_selection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (select_tx, mut selections) = mpsc::channel(3);
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let mut release_rx = Some(release_rx);
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let path = str_at(&request, "requestPath").unwrap();
+                let reply = match path {
+                    "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
+                    "/V2/topology/status" => {
+                        Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
+                    }
+                    "/V2/playlist/select" => {
+                        select_tx
+                            .send(int_at(&request, "index").unwrap())
+                            .await
+                            .unwrap();
+                        if let Some(wait) = release_rx.take() {
+                            wait.await.unwrap();
+                        }
+                        Some(json!({"requestPath": path, "tag": request["tag"]}))
+                    }
+                    "/V2/media/select" => Some(json!({"requestPath": path, "tag": request["tag"]})),
+                    _ => None,
+                };
+                if let Some(reply) = reply {
+                    socket
+                        .send(Message::Text(reply.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let gateway = Gateway::start(format!("ws://{address}"), "Linn".into(), 70);
+        let mut state = gateway.subscribe();
+        wait_for(&mut state, |snapshot| {
+            snapshot.connection_status == ConnectionStatus::Connected as i32
+        })
+        .await;
+        let first_gateway = gateway.clone();
+        let first = tokio::spawn(async move {
+            first_gateway
+                .request("/V2/playlist/select", json!({"room":"Linn", "index":1}))
+                .await
+        });
+        assert_eq!(selections.recv().await, Some(1));
+        let second_gateway = gateway.clone();
+        let second = tokio::spawn(async move {
+            second_gateway
+                .request("/V2/playlist/select", json!({"room":"Linn", "index":2}))
+                .await
+        });
+        wait_for(&mut state, |snapshot| {
+            snapshot
+                .now_playing
+                .as_ref()
+                .and_then(|p| p.playlist.as_ref())
+                .and_then(|p| p.current_index)
+                == Some(2)
+        })
+        .await;
+        let replace_gateway = gateway.clone();
+        let replace = tokio::spawn(async move {
+            replace_gateway
+                .request(
+                    "/V2/media/select",
+                    json!({"room":"Linn", "media_id":"album", "queue":"replace"}),
+                )
+                .await
+        });
+        wait_for(&mut state, |snapshot| {
+            snapshot
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.playback)
+        })
+        .await;
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        replace.await.unwrap().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), selections.recv())
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn serializes_searches_on_the_shared_gateway_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (search_tx, mut searches) = mpsc::channel(2);
+        let (search_tx, mut searches) = mpsc::channel(3);
         let (release_tx, release_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -932,15 +1200,26 @@ mod tests {
                 .request("/V2/services/search", search("second"))
                 .await
         });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let third_gateway = gateway.clone();
+        let third = tokio::spawn(async move {
+            third_gateway
+                .request("/V2/services/search", search("third"))
+                .await
+        });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), searches.recv())
                 .await
                 .is_err()
         );
         release_tx.send(()).unwrap();
-        assert_eq!(searches.recv().await.as_deref(), Some("second"));
+        assert_eq!(searches.recv().await.as_deref(), Some("third"));
         first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
+        assert_eq!(
+            second.await.unwrap().unwrap_err().code(),
+            tonic::Code::Cancelled
+        );
+        third.await.unwrap().unwrap();
         server.abort();
     }
 }

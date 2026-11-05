@@ -12,6 +12,7 @@ struct Pending<T> {
     tag: String,
     value: T,
     expires: Instant,
+    saw_different_value: bool,
 }
 
 impl<T> Pending<T> {
@@ -20,6 +21,7 @@ impl<T> Pending<T> {
             tag: tag.into(),
             value,
             expires: Instant::now() + Duration::from_secs(seconds),
+            saw_different_value: false,
         }
     }
 
@@ -28,18 +30,25 @@ impl<T> Pending<T> {
     }
 }
 
+struct ReplaceBaseline {
+    revision: Option<i64>,
+    total: Option<i32>,
+    current_index: Option<i32>,
+}
+
 #[derive(Default)]
 pub struct Optimism {
     transport: Option<Pending<i32>>,
     current_item: Option<Pending<Option<CurrentItem>>>,
     queue_index: Option<Pending<i32>>,
+    queue_baseline_index: Option<i32>,
     queue_total: Option<Pending<i32>>,
     timeline: Option<Pending<Option<Timeline>>>,
     volume: Option<Pending<i32>>,
     mute: Option<Pending<bool>>,
     media_baseline_title: Option<String>,
     media_baseline_revision: Option<i64>,
-    replace_revision: Option<i64>,
+    replace_revision: Option<Pending<ReplaceBaseline>>,
 }
 
 impl Optimism {
@@ -116,8 +125,21 @@ impl Optimism {
                 if let Some(item) = preview {
                     let count = queued_track_count(&item);
                     if placement == "replace" {
-                        self.replace_revision =
-                            playing.playlist.as_ref().and_then(|p| p.content_revision);
+                        self.replace_revision = Some(Pending::new(
+                            tag,
+                            ReplaceBaseline {
+                                revision: playing
+                                    .playlist
+                                    .as_ref()
+                                    .and_then(|p| p.content_revision),
+                                total: playing.playlist.as_ref().and_then(|p| p.total),
+                                current_index: playing
+                                    .playlist
+                                    .as_ref()
+                                    .and_then(|p| p.current_index),
+                            },
+                            8,
+                        ));
                         if let Some(count) = count {
                             self.queue_total = Some(Pending::new(tag, count, 8));
                             self.queue_index = Some(Pending::new(tag, 0, 8));
@@ -154,7 +176,13 @@ impl Optimism {
         {
             return;
         }
-        self.queue_index = Some(Pending::new(tag, index, 6));
+        let baseline = self
+            .queue_baseline_index
+            .or_else(|| playing.playlist.as_ref().and_then(|p| p.current_index));
+        self.queue_baseline_index = baseline;
+        let mut pending = Pending::new(tag, index, 6);
+        pending.saw_different_value = baseline.is_some_and(|current| current != index);
+        self.queue_index = Some(pending);
         self.timeline = Some(Pending::new(tag, None, 6));
         if let Some(item) = playing
             .playlist
@@ -173,8 +201,20 @@ impl Optimism {
         let before = self.count();
         clear_if(&mut self.transport, playing.transport_state);
         let revision = playing.playlist.as_ref().and_then(|p| p.content_revision);
-        if self.replace_revision.is_none() || revision != self.replace_revision {
-            clear_if(
+        if self.replace_revision.as_ref().is_some_and(|pending| {
+            let playlist = playing.playlist.as_ref();
+            let new_revision = revision.is_some() && revision != pending.value.revision;
+            let changed_unversioned_queue = pending.value.revision.is_none()
+                && (playlist.and_then(|p| p.total) != pending.value.total
+                    || playlist.and_then(|p| p.current_index) != pending.value.current_index);
+            pending.expired() || new_revision || changed_unversioned_queue
+        }) && let Some(replace) = self.replace_revision.take()
+        {
+            clear_tag(&mut self.queue_index, &replace.tag);
+            clear_tag(&mut self.queue_total, &replace.tag);
+        }
+        if self.replace_revision.is_none() {
+            clear_queue_index(
                 &mut self.queue_index,
                 playing.playlist.as_ref().and_then(|p| p.current_index),
             );
@@ -185,6 +225,9 @@ impl Optimism {
         } else {
             expire(&mut self.queue_index);
             expire(&mut self.queue_total);
+        }
+        if self.queue_index.is_none() {
+            self.queue_baseline_index = None;
         }
         clear_if(
             &mut self.volume,
@@ -197,12 +240,15 @@ impl Optimism {
         if self.current_item.as_ref().is_some_and(|p| {
             p.expired()
                 || playing.current_item.as_ref().is_some_and(|item| {
-                    let new_revision = revision != self.media_baseline_revision;
+                    let new_revision =
+                        revision.is_some() && revision != self.media_baseline_revision;
+                    let changed_song = self.media_baseline_title.as_deref() != Some(title(item));
                     match p.value.as_ref() {
                         Some(expected) => {
-                            title(item).eq_ignore_ascii_case(title(expected))
-                                && (new_revision
-                                    || self.media_baseline_title.as_deref() != Some(title(item)))
+                            new_revision
+                                || (changed_song
+                                    && (self.media_baseline_revision.is_none()
+                                        || title(item).eq_ignore_ascii_case(title(expected))))
                         }
                         None => {
                             (new_revision || self.media_baseline_revision.is_none())
@@ -234,10 +280,20 @@ impl Optimism {
         clear_tag(&mut self.transport, tag);
         clear_tag(&mut self.current_item, tag);
         clear_tag(&mut self.queue_index, tag);
+        if self.queue_index.is_none() {
+            self.queue_baseline_index = None;
+        }
         clear_tag(&mut self.queue_total, tag);
         clear_tag(&mut self.timeline, tag);
         clear_tag(&mut self.volume, tag);
         clear_tag(&mut self.mute, tag);
+        if self
+            .replace_revision
+            .as_ref()
+            .is_some_and(|pending| pending.tag == tag)
+        {
+            self.replace_revision = None;
+        }
         before != self.count()
     }
 
@@ -246,10 +302,14 @@ impl Optimism {
         expire(&mut self.transport);
         expire(&mut self.current_item);
         expire(&mut self.queue_index);
+        if self.queue_index.is_none() {
+            self.queue_baseline_index = None;
+        }
         expire(&mut self.queue_total);
         expire(&mut self.timeline);
         expire(&mut self.volume);
         expire(&mut self.mute);
+        expire(&mut self.replace_revision);
         before != self.count()
     }
 
@@ -312,6 +372,17 @@ fn clear_if<T: PartialEq>(pending: &mut Option<Pending<T>>, actual: Option<T>) {
         .is_some_and(|p| p.expired() || actual.as_ref() == Some(&p.value))
     {
         *pending = None;
+    }
+}
+
+fn clear_queue_index(pending: &mut Option<Pending<i32>>, actual: Option<i32>) {
+    if let Some(value) = pending.as_mut() {
+        if actual.is_some_and(|index| index != value.value) {
+            value.saw_different_value = true;
+        }
+        if value.expired() || (value.saw_different_value && actual == Some(value.value)) {
+            *pending = None;
+        }
     }
 }
 
@@ -622,6 +693,56 @@ mod tests {
     }
 
     #[test]
+    fn failed_replace_allows_later_playlist_selection_to_confirm() {
+        let mut observed = state();
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap()
+            .content_revision = Some(10);
+        let mut optimism = Optimism::default();
+        let preview = MediaItem {
+            id: "missing-album".into(),
+            r#type: MediaItemType::Album as i32,
+            child_count: Some(4),
+            ..Default::default()
+        };
+        optimism.apply(
+            "replace",
+            "/V2/media/select",
+            &json!({"queue":"replace"}),
+            Some(preview),
+            None,
+            &observed,
+        );
+        assert!(optimism.replace_revision.is_some());
+        optimism.fail("replace");
+        assert!(optimism.replace_revision.is_none());
+
+        optimism.apply(
+            "select",
+            "/V2/playlist/select",
+            &json!({"index":2}),
+            None,
+            None,
+            &observed,
+        );
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap()
+            .current_index = Some(2);
+        optimism.reconcile(&observed);
+        assert!(!optimism.snapshot(&observed).pending.unwrap().queue);
+    }
+
+    #[test]
     fn tapping_playing_row_while_another_tap_is_in_flight_stays_pending() {
         let observed = state();
         let mut optimism = Optimism::default();
@@ -642,6 +763,8 @@ mod tests {
             None,
             &effective,
         );
+        optimism.reconcile(&observed);
+        assert!(optimism.snapshot(&observed).pending.unwrap().queue);
         optimism.fail("first");
         let snapshot = optimism.snapshot(&observed);
         assert_eq!(
