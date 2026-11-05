@@ -261,6 +261,7 @@ enum PiLinnMapping {
         if snapshot.hasPending {
             result.pending = .init(
                 playback: snapshot.pending.playback,
+                transport: snapshot.pending.transport,
                 queue: snapshot.pending.queue,
                 queueIndex: snapshot.pending.queueIndex,
                 queueTotal: snapshot.pending.queueTotal,

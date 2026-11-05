@@ -475,6 +475,8 @@ nonisolated struct Louie_Linn_V1_PendingState: Sendable {
 
   var currentItem: Bool = false
 
+  var transport: Bool = false
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1297,7 +1299,7 @@ nonisolated extension Louie_Linn_V1_StateSnapshot: SwiftProtobuf.Message, SwiftP
 
 nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PendingState"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}playback\0\u{1}queue\0\u{1}timeline\0\u{1}volume\0\u{1}mute\0\u{3}queue_index\0\u{3}queue_total\0\u{3}current_item\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}playback\0\u{1}queue\0\u{1}timeline\0\u{1}volume\0\u{1}mute\0\u{3}queue_index\0\u{3}queue_total\0\u{3}current_item\0\u{1}transport\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1313,6 +1315,7 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
       case 6: try { try decoder.decodeSingularBoolField(value: &self.queueIndex) }()
       case 7: try { try decoder.decodeSingularBoolField(value: &self.queueTotal) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.currentItem) }()
+      case 9: try { try decoder.decodeSingularBoolField(value: &self.transport) }()
       default: break
       }
     }
@@ -1343,6 +1346,9 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
     if self.currentItem != false {
       try visitor.visitSingularBoolField(value: self.currentItem, fieldNumber: 8)
     }
+    if self.transport != false {
+      try visitor.visitSingularBoolField(value: self.transport, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1355,6 +1361,7 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
     if lhs.queueIndex != rhs.queueIndex {return false}
     if lhs.queueTotal != rhs.queueTotal {return false}
     if lhs.currentItem != rhs.currentItem {return false}
+    if lhs.transport != rhs.transport {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

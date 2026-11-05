@@ -332,7 +332,7 @@ public final class Linn {
                         case .disconnected:
                             connectionState = .linnUnavailable(update.connectionError)
                         case .connecting:
-                            connectionState = .connecting
+                            connectionState = update.connectionError.map { .linnUnavailable($0) } ?? .connecting
                         case .connected:
                             break
                         }
@@ -915,7 +915,7 @@ public final class Linn {
             incomingQueueIndex: update.pending.queueIndex ? nil : update.queue?.index
         )
 
-        playState = reconciledPlayState(incoming: PlayState(update.playback), confirmed: !update.pending.playback)
+        playState = reconciledPlayState(incoming: PlayState(update.playback), confirmed: !update.pending.transport)
         playlist.total = update.queue?.length ?? playlist.total
         if let playlist = update.playlist {
             if let contentRevision = playlist.contentRevision, contentRevision != playlistContentRevision {
@@ -974,7 +974,7 @@ public final class Linn {
         }
         updatePlaylistSongs()
         if let serverMaximum = update.roomState?.maximumVolume, serverMaximum > 0 {
-            maximumVolume = min(serverMaximum, 70)
+            maximumVolume = serverMaximum
         }
         let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
         volume = reconcileOptimistic(

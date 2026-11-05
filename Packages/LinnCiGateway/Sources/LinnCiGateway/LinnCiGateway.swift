@@ -14,6 +14,7 @@ public final class CiGateway: Sendable {
         public var connectionError: String?
         public struct Pending: Sendable, Equatable {
             public var playback = false
+            public var transport = false
             public var queue = false
             public var queueIndex = false
             public var queueTotal = false
@@ -22,8 +23,9 @@ public final class CiGateway: Sendable {
             public var volume = false
             public var mute = false
 
-            public init(playback: Bool = false, queue: Bool = false, queueIndex: Bool = false, queueTotal: Bool = false, currentItem: Bool = false, timeline: Bool = false, volume: Bool = false, mute: Bool = false) {
+            public init(playback: Bool = false, transport: Bool = false, queue: Bool = false, queueIndex: Bool = false, queueTotal: Bool = false, currentItem: Bool = false, timeline: Bool = false, volume: Bool = false, mute: Bool = false) {
                 self.playback = playback
+                self.transport = transport
                 self.queue = queue
                 self.queueIndex = queueIndex
                 self.queueTotal = queueTotal
