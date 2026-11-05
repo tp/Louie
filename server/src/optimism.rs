@@ -1085,6 +1085,92 @@ mod tests {
     }
 
     #[test]
+    fn double_skip_holds_latest_target_through_first_linn_update() {
+        let mut observed = state();
+        let playlist = observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap();
+        playlist.total = Some(4);
+        for (index, name) in [(2, "Second"), (3, "Third")] {
+            playlist.items.push(PlaylistItem {
+                index,
+                display_name: Some(name.into()),
+                ..Default::default()
+            });
+        }
+        let mut optimism = Optimism::default();
+        assert!(optimism.apply(
+            "first",
+            "/V2/transport/skip_track",
+            &json!({"skip_track": 1}),
+            None,
+            None,
+            &observed,
+        ));
+        assert!(optimism.apply(
+            "second",
+            "/V2/transport/skip_track",
+            &json!({"skip_track": 1}),
+            None,
+            None,
+            &observed,
+        ));
+        assert_eq!(
+            optimism
+                .snapshot(&observed)
+                .now_playing
+                .unwrap()
+                .playlist
+                .unwrap()
+                .current_index,
+            Some(3),
+        );
+
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap()
+            .current_index = Some(2);
+        optimism.acknowledged("first");
+        optimism.reconcile(&observed);
+        let first_landed = optimism.snapshot(&observed);
+        assert_eq!(
+            first_landed
+                .now_playing
+                .unwrap()
+                .playlist
+                .unwrap()
+                .current_index,
+            Some(3)
+        );
+        assert!(first_landed.pending.unwrap().queue_index);
+
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap()
+            .current_index = Some(3);
+        optimism.acknowledged("second");
+        optimism.reconcile(&observed);
+        let settled = optimism.snapshot(&observed);
+        assert_eq!(
+            settled.now_playing.unwrap().playlist.unwrap().current_index,
+            Some(3)
+        );
+        assert!(!settled.pending.unwrap().queue_index);
+    }
+
+    #[test]
     fn media_preview_survives_stale_linn_state_until_confirmed() {
         let mut observed = state();
         let mut optimism = Optimism::default();
