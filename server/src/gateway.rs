@@ -180,8 +180,7 @@ async fn run_gateway(
 ) {
     let mut delay = Duration::from_millis(500);
     let mut observed = state.borrow().clone();
-    let mut last_warning: Option<String> = None;
-    let mut last_warning_at: Option<Instant> = None;
+    let mut recent_warnings: HashMap<String, Instant> = HashMap::new();
     loop {
         observed.connection_status = ConnectionStatus::Connecting as i32;
         state.send_replace(observed.clone());
@@ -200,20 +199,17 @@ async fn run_gateway(
             delay = Duration::from_millis(500);
         }
         if was_connected && attempt_started.elapsed() >= Duration::from_secs(60) {
-            last_warning = None;
+            recent_warnings.clear();
         }
         let message = result.err().unwrap_or_else(|| "connection closed".into());
-        let warning_changed = last_warning.as_deref() != Some(&message);
-        let warning_due =
-            last_warning_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
-        if last_warning.is_none() || (warning_changed && warning_due) {
+        recent_warnings.retain(|_, warned_at| warned_at.elapsed() < Duration::from_secs(60));
+        if !recent_warnings.contains_key(&message) {
             if was_connected {
                 warn!("Linn gateway disconnected: {message}");
             } else {
                 warn!("Could not connect to Linn gateway: {message}");
             }
-            last_warning = Some(message.clone());
-            last_warning_at = Some(Instant::now());
+            recent_warnings.insert(message.clone(), Instant::now());
         } else {
             info!("Linn gateway still unavailable: {message}");
         }
@@ -443,12 +439,16 @@ async fn run_connection(
                 let key = coalesce_key(&request);
                 if request.path == "/V2/playlist/select"
                     && let Some(key) = key
-                    && !deferred.contains_key(&key)
                     && let Some(index) = request.body.get("index").and_then(Value::as_i64)
                     && pending.values().any(|waiter|
                         waiter.coalesce_key == Some(key)
                             && waiter.queue_epoch == queue_epoch
                             && waiter.target_index == i32::try_from(index).ok()) {
+                    if let Some(old) = deferred.remove(&key) {
+                        optimism.fail(&old.tag);
+                        state.send_replace(optimism.snapshot(observed));
+                        let _ = old.request.reply.send(Ok(Value::Null));
+                    }
                     let _ = request.reply.send(Ok(Value::Null));
                     continue;
                 }
@@ -1176,6 +1176,99 @@ mod tests {
         first.await.unwrap().unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(100), volumes.recv())
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn returning_to_in_flight_selection_cancels_deferred_without_restarting_track() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (select_tx, mut selections) = mpsc::channel(3);
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let mut release_rx = Some(release_rx);
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let path = str_at(&request, "requestPath").unwrap();
+                let reply = match path {
+                    "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
+                    "/V2/topology/status" => {
+                        Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
+                    }
+                    "/V2/playlist/select" => {
+                        select_tx
+                            .send(int_at(&request, "index").unwrap())
+                            .await
+                            .unwrap();
+                        if let Some(wait) = release_rx.take() {
+                            wait.await.unwrap();
+                        }
+                        Some(json!({"requestPath": path, "tag": request["tag"]}))
+                    }
+                    _ => None,
+                };
+                if let Some(reply) = reply {
+                    socket
+                        .send(Message::Text(reply.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let gateway = Gateway::start(format!("ws://{address}"), "Linn".into(), 70);
+        let mut state = gateway.subscribe();
+        wait_for(&mut state, |snapshot| {
+            snapshot.connection_status == ConnectionStatus::Connected as i32
+        })
+        .await;
+        let first_gateway = gateway.clone();
+        let first = tokio::spawn(async move {
+            first_gateway
+                .request("/V2/playlist/select", json!({"room":"Linn", "index":0}))
+                .await
+        });
+        assert_eq!(selections.recv().await, Some(0));
+        let second_gateway = gateway.clone();
+        let second = tokio::spawn(async move {
+            second_gateway
+                .request("/V2/playlist/select", json!({"room":"Linn", "index":2}))
+                .await
+        });
+        wait_for(&mut state, |snapshot| {
+            snapshot
+                .now_playing
+                .as_ref()
+                .and_then(|p| p.playlist.as_ref())
+                .and_then(|p| p.current_index)
+                == Some(2)
+        })
+        .await;
+        let third_gateway = gateway.clone();
+        let third = tokio::spawn(async move {
+            third_gateway
+                .request("/V2/playlist/select", json!({"room":"Linn", "index":0}))
+                .await
+        });
+        third.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        wait_for(&mut state, |snapshot| {
+            snapshot
+                .now_playing
+                .as_ref()
+                .and_then(|p| p.playlist.as_ref())
+                .and_then(|p| p.current_index)
+                == Some(0)
+        })
+        .await;
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), selections.recv())
                 .await
                 .is_err()
         );
