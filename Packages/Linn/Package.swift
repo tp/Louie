@@ -38,6 +38,7 @@ let package = Package(
             dependencies: [
                 "Linn",
                 .product(name: "LinnCiGateway", package: "LinnCiGateway"),
+                .product(name: "GRPCCore", package: "grpc-swift-2"),
             ]
         ),
     ],

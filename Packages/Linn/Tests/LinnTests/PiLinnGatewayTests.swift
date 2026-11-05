@@ -1,6 +1,20 @@
 import LinnCiGateway
+import GRPCCore
 import Testing
 @testable import Linn
+
+@Test func rpcCodesDriveFriendlyMessagesWithoutLosingTheirIdentity() {
+    let unreachable = PiLinnRPCError(code: .unavailable, message: "transport closed")
+    #expect(unreachable.code == .unavailable)
+    #expect(unreachable.errorDescription == "Can't reach Louie Home Server.")
+
+    let linnDisconnected = PiLinnRPCError(code: .failedPrecondition, message: "Linn gateway is disconnected")
+    #expect(linnDisconnected.errorDescription == "Louie Home Server can't reach Linn.")
+
+    let rejected = PiLinnRPCError(code: .failedPrecondition, message: "Linn is in standby")
+    #expect(rejected.code == .failedPrecondition)
+    #expect(rejected.errorDescription == "Linn is in standby")
+}
 
 @Test func piSnapshotRetainsPlaybackQueueAndVolume() {
     var snapshot = Louie_Linn_V1_StateSnapshot()

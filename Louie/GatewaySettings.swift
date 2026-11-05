@@ -39,16 +39,17 @@ final class GatewaySettings {
         let storedPort = UserDefaults.standard.integer(forKey: Self.portKey)
         let legacyPort = UserDefaults.standard.integer(forKey: Self.legacyPortKey)
         port = storedPort != 0 ? storedPort : legacyPort != 0 ? legacyPort : fallback?.serverURL.port ?? 50051
-        UserDefaults.standard.set(host, forKey: Self.hostKey)
-        UserDefaults.standard.set(port, forKey: Self.portKey)
     }
 
     /// The stored address wins over the developer `LOUIE_SERVER_URL` fallback.
     var configuration: Linn.Configuration? {
         let trimmedHost = host.trimmingCharacters(in: .whitespaces)
-        guard !trimmedHost.isEmpty, (1 ... 65_535).contains(port),
-              let url = URL(string: "http://\(trimmedHost):\(port)"),
-              url.host()?.lowercased() == trimmedHost.lowercased() else {
+        let bareHost = trimmedHost.hasPrefix("[") && trimmedHost.hasSuffix("]")
+            ? String(trimmedHost.dropFirst().dropLast()) : trimmedHost
+        let urlHost = bareHost.contains(":") ? "[\(bareHost)]" : bareHost
+        guard !bareHost.isEmpty, (1 ... 65_535).contains(port),
+              let url = URL(string: "http://\(urlHost):\(port)"),
+              url.host()?.lowercased() == bareHost.lowercased() else {
             return nil
         }
         return Linn.Configuration(serverURL: url)

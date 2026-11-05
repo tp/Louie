@@ -326,7 +326,16 @@ public final class Linn {
                 let updates = await ciGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
                 for try await update in updates {
                     guard update.connectionStatus == .connected else {
-                        connectionState = .connecting
+                        switch update.connectionStatus {
+                        case .serverUnreachable:
+                            connectionState = .serverUnreachable
+                        case .disconnected:
+                            connectionState = .linnUnavailable(update.connectionError)
+                        case .connecting:
+                            connectionState = .connecting
+                        case .connected:
+                            break
+                        }
                         loadLibraryOnConnection = true
                         continue
                     }
@@ -568,6 +577,7 @@ public final class Linn {
 
         let startsPlaying = placement == .replace || placement == .now
         let previewGeneration = startsPlaying ? previewMediaSelection(item) : nil
+        let serverPreview = mediaSelectionServerPreview(for: item)
         queueCommandGeneration += 1
         let command = queueCommandGeneration
         let trackCount = queuedTrackCount(for: item)
@@ -583,20 +593,36 @@ public final class Linn {
                 mediaID: item.id,
                 room: room,
                 queue: CiGateway.QueuePlacement(placement),
-                preview: item.title.isEmpty ? nil : CiGateway.MediaItem(
-                    id: item.id,
-                    kind: item.kind,
-                    title: item.title,
-                    album: item.album,
-                    artists: item.artists,
-                    artworkURL: item.artworkURL,
-                    duration: item.duration,
-                    childCount: item.childCount,
-                    isFavourite: item.isFavourite,
-                    disabledActions: item.canFavourite ? [] : ["favourite"]
-                )
+                preview: serverPreview
             )
         }
+    }
+
+    private func mediaSelectionServerPreview(for item: LibraryItem) -> CiGateway.MediaItem? {
+        guard !item.title.isEmpty else { return nil }
+        let selected: LibraryItem
+        if item.isContainer {
+            guard let firstTrack = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: "")]?
+                .items.first(where: { !$0.isContainer && !$0.title.isEmpty }) else {
+                return nil
+            }
+            selected = firstTrack
+        } else {
+            selected = item
+        }
+        return CiGateway.MediaItem(
+            id: selected.id,
+            kind: selected.kind,
+            title: selected.title,
+            album: selected.album ?? (item.isContainer ? item.title : nil),
+            artists: selected.artists,
+            artworkURL: selected.artworkURL ?? item.artworkURL,
+            duration: selected.duration,
+            containedKinds: selected.containedKinds,
+            childCount: item.isContainer ? item.childCount : selected.childCount,
+            isFavourite: selected.isFavourite,
+            disabledActions: selected.canFavourite ? [] : ["favourite"]
+        )
     }
 
     public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {

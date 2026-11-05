@@ -37,7 +37,7 @@ func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
     var disconnected = CiGateway.NowPlaying(room: "Linn", session: "")
     disconnected.connectionStatus = .disconnected
     await gateway.send(disconnected)
-    try await waitUntil { linn.connectionState == .connecting }
+    try await waitUntil { linn.connectionState == .linnUnavailable(nil) }
     #expect(linn.currentSong?.title == "First")
 
     await gateway.send(nowPlaying(index: 0, titles: ["Second"], volume: 12))

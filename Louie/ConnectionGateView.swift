@@ -287,7 +287,7 @@ struct ConnectionGateView: View {
     private var connectingCard: some View {
         VStack(spacing: 16) {
             if let message = failureMessage {
-                Label("Can't reach \(displayAddress) yet", systemImage: "wifi.exclamationmark")
+                Label(failureTitle, systemImage: "wifi.exclamationmark")
                     .font(.headline)
 
                 Text(message)
@@ -296,7 +296,7 @@ struct ConnectionGateView: View {
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
 
-                Text("If asked about local network access, allow it. Check that louie.service is running on your home server and the address is right.")
+                Text(failureHelp)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -353,10 +353,30 @@ struct ConnectionGateView: View {
     }
 
     private var failureMessage: String? {
-        if case let .failed(message) = linn?.connectionState {
+        switch linn?.connectionState {
+        case .serverUnreachable:
+            return "The home server isn't answering."
+        case let .linnUnavailable(message):
+            return message ?? "The home server is running but Linn isn't connected."
+        case let .failed(message):
             return message
+        default:
+            return nil
         }
-        return nil
+    }
+
+    private var failureTitle: String {
+        if case .linnUnavailable = linn?.connectionState {
+            return "Linn isn't connected"
+        }
+        return "Can't reach \(displayAddress) yet"
+    }
+
+    private var failureHelp: String {
+        if case .linnUnavailable = linn?.connectionState {
+            return "Check that the Linn DSM and its CI Gateway are running. Louie Home Server will reconnect automatically."
+        }
+        return "If asked about local network access, allow it. Check the address and that louie.service is running on your home server."
     }
 }
 

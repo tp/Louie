@@ -7,9 +7,11 @@ public final class CiGateway: Sendable {
             case connected
             case connecting
             case disconnected
+            case serverUnreachable
         }
 
         public var connectionStatus = ConnectionStatus.connected
+        public var connectionError: String?
         public struct Pending: Sendable, Equatable {
             public var playback = false
             public var queue = false

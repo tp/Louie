@@ -154,6 +154,10 @@ public struct PlayerBar: View {
             "No song"
         case .connecting:
             "Connecting"
+        case .serverUnreachable:
+            "Home server unavailable"
+        case .linnUnavailable:
+            "Linn unavailable"
         case .connected:
             "No song"
         case .failed:
@@ -162,7 +166,7 @@ public struct PlayerBar: View {
     }
 
     private var statusSubtitle: String? {
-        if let message = state.lastErrorMessage {
+        if state.connectionState == .connected, let message = state.lastErrorMessage {
             return message
         }
 
@@ -171,6 +175,10 @@ public struct PlayerBar: View {
             return nil
         case .connecting:
             return "Waiting for gateway"
+        case .serverUnreachable:
+            return "Can't reach Louie Home Server"
+        case let .linnUnavailable(message):
+            return message ?? "Louie Home Server is reconnecting to Linn"
         case .connected:
             return "No now playing info"
         case let .failed(message):

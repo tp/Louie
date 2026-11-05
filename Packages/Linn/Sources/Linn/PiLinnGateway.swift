@@ -74,12 +74,18 @@ actor PiLinnGateway: LinnGateway {
                                 }
                             } catch is CancellationError {
                                 throw CancellationError()
+                            } catch let error as RPCError where error.code == .cancelled && Task.isCancelled {
+                                throw CancellationError()
                             } catch {
-                                // The next WatchState begins with a full snapshot.
+                                // A new WatchState starts with a full snapshot.
                             }
                             return receivedSnapshot
                         }
                         if receivedSnapshot { retrySeconds = 1 }
+                        guard !Task.isCancelled else { break }
+                        var update = CiGateway.NowPlaying(room: room ?? "Linn", session: "")
+                        update.connectionStatus = .serverUnreachable
+                        continuation.yield(update)
                     } catch is CancellationError {
                         break
                     } catch let error as PiLinnError {
@@ -90,7 +96,7 @@ actor PiLinnGateway: LinnGateway {
                         // from its next complete snapshot on the same gRPC client.
                         guard !Task.isCancelled else { break }
                         var update = CiGateway.NowPlaying(room: room ?? "Linn", session: "")
-                        update.connectionStatus = .connecting
+                        update.connectionStatus = .serverUnreachable
                         continuation.yield(update)
                     }
                     do {
@@ -202,20 +208,42 @@ actor PiLinnGateway: LinnGateway {
     private func remapCancellation<Value>(_ operation: () async throws -> Value) async throws -> Value {
         do {
             return try await operation()
-        } catch let error as RPCError where error.code == .cancelled {
-            throw CancellationError()
+        } catch let error as RPCError {
+            if error.code == .cancelled && (Task.isCancelled || error.message.contains("superseded")) {
+                throw CancellationError()
+            }
+            throw PiLinnRPCError(code: error.code, message: error.message)
         }
     }
 }
 
 private enum PiLinnError: Error, LocalizedError {
     case invalidServerURL
-    case gatewayDisconnected(String?)
 
     var errorDescription: String? {
         switch self {
         case .invalidServerURL: "Invalid Louie Home Server address"
-        case let .gatewayDisconnected(message): message ?? "Louie Home Server is reconnecting to Linn"
+        }
+    }
+}
+
+/// Keep the gRPC status available to callers while presenting stable, useful copy.
+struct PiLinnRPCError: Error, LocalizedError {
+    let code: RPCError.Code
+    let message: String
+
+    var errorDescription: String? {
+        switch code {
+        case .unavailable: "Can't reach Louie Home Server."
+        case .deadlineExceeded: "The Linn request timed out."
+        case .failedPrecondition:
+            message == "Linn gateway is disconnected"
+                ? "Louie Home Server can't reach Linn."
+                : message.isEmpty ? "Linn can't perform this action right now." : message
+        case .invalidArgument: "This request isn't valid."
+        case .unauthenticated, .permissionDenied: "Louie Home Server rejected access."
+        case .cancelled: "The request was cancelled."
+        default: "Louie Home Server request failed (\(code))."
         }
     }
 }
@@ -224,6 +252,7 @@ enum PiLinnMapping {
     static func connectionUpdate(_ snapshot: Louie_Linn_V1_StateSnapshot) -> CiGateway.NowPlaying {
         var update = CiGateway.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
         update.connectionStatus = snapshot.connectionStatus == .disconnected ? .disconnected : .connecting
+        update.connectionError = snapshot.hasConnectionError ? snapshot.connectionError : nil
         return update
     }
 
@@ -354,7 +383,8 @@ enum PiLinnMapping {
     static func preview(_ item: CiGateway.MediaItem) -> Louie_Linn_V1_MediaItem {
         var preview = Louie_Linn_V1_MediaItem()
         preview.id = item.id
-        preview.type = if item.kind.contains("track") { .track }
+        preview.type = if item.kind.contains("container") { .container }
+            else if item.kind.contains("track") { .track }
             else if item.kind.contains("album") { .album }
             else if item.kind.contains("artist") { .artist }
             else if item.kind.contains("playlist") { .playlist }

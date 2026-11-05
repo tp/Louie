@@ -5,6 +5,8 @@ public extension Linn {
         case idle
         case connecting
         case connected
+        case serverUnreachable
+        case linnUnavailable(String?)
         case failed(String)
     }
 
