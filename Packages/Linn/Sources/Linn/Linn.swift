@@ -42,7 +42,7 @@ public extension LinnGateway {
 @MainActor
 public final class Linn {
     public let room: String
-    public let maximumVolume: Int
+    public private(set) var maximumVolume: Int
     public private(set) var connectionState: ConnectionState = .idle
     public private(set) var library = Library()
     public private(set) var currentSong: Song?
@@ -294,7 +294,7 @@ public final class Linn {
                 Self.logger.info("Loaded Louie server URL \(configuration.serverURL.absoluteString, privacy: .public)")
                 ciGateway = PiLinnGateway(serverURL: configuration.serverURL)
             } catch {
-                let message = String(describing: error)
+                let message = error.localizedDescription
                 Self.logger.error("Failed to load Linn configuration: \(message, privacy: .public)")
                 lastErrorMessage = message
                 connectionState = .failed(message)
@@ -327,6 +327,7 @@ public final class Linn {
                 for try await update in updates {
                     guard update.connectionStatus == .connected else {
                         connectionState = .connecting
+                        loadLibraryOnConnection = true
                         continue
                     }
                     apply(update)
@@ -340,7 +341,7 @@ public final class Linn {
                 Self.logger.info("Linn now-playing update task cancelled")
                 connectionState = .idle
             } catch {
-                let message = String(describing: error)
+                let message = error.localizedDescription
                 Self.logger.error("Linn now-playing update task failed: \(message, privacy: .public)")
                 lastErrorMessage = message
                 connectionState = .failed(message)
@@ -505,7 +506,7 @@ public final class Linn {
                 guard !Task.isCancelled else {
                     return
                 }
-                let message = String(describing: error)
+                let message = error.localizedDescription
                 Self.logger.error("Qobuz library load failed: \(message, privacy: .public)")
                 library.availability = .failed(message)
             }
@@ -905,11 +906,14 @@ public final class Linn {
         if let incomingQueueIndex = update.queue?.index {
             incomingCurrentSong?.queueIndex = incomingQueueIndex
         }
-        if !update.pending.queue {
+        if !update.pending.playback && !update.pending.queue {
             reportedSong = incomingCurrentSong
         }
         if !update.pending.timeline {
             reportedTimeline = Timeline(update.timeline)
+        }
+        if update.pending.timeline {
+            timeline = Timeline(update.timeline)
         }
 
         if !suppressNowPlayingFields {
@@ -925,11 +929,14 @@ public final class Linn {
                     updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
                 }
                 currentSong = incomingCurrentSong
-                if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
+                if !update.pending.playback && !update.pending.queue,
+                   let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
                     playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
                 }
                 playlist.currentIndex = update.queue?.index
-                timeline = reportedTimeline
+                if !update.pending.timeline {
+                    timeline = reportedTimeline
+                }
             }
         }
 
@@ -940,6 +947,9 @@ public final class Linn {
             reconcilePendingQueueLength()
         }
         updatePlaylistSongs()
+        if let serverMaximum = update.roomState?.maximumVolume, serverMaximum > 0 {
+            maximumVolume = min(serverMaximum, 70)
+        }
         let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
         volume = reconcileOptimistic(
             &optimisticVolume,

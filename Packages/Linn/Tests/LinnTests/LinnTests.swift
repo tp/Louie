@@ -5,6 +5,25 @@ import Testing
 
 @Test
 @MainActor
+func predictedSongClearsThePreviousTrackTimeline() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: ["First", "Second"], position: 45))
+    try await waitUntil { linn.timeline?.position == 45 }
+
+    var predicted = nowPlaying(index: 1, titles: ["First", "Second"], position: 0)
+    predicted.timeline = nil
+    predicted.pending.playback = true
+    predicted.pending.queue = true
+    predicted.pending.timeline = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "Second" }
+    #expect(linn.timeline == nil)
+}
+
+@Test
+@MainActor
 func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)

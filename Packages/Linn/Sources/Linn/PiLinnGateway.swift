@@ -34,9 +34,9 @@ actor PiLinnGateway: LinnGateway {
             throw PiLinnError.invalidServerURL
         }
         let config = Transport.Config.defaults { config in
-            config.connection.keepalive = .init(time: .seconds(20), timeout: .seconds(10), allowWithoutCalls: false)
-            config.backoff.max = .seconds(8)
-            config.resolverBackoff.max = .seconds(8)
+            config.connection.keepalive = .init(time: .seconds(20), timeout: .seconds(10), allowWithoutCalls: true)
+            config.backoff.max = .seconds(5)
+            config.resolverBackoff.max = .seconds(5)
         }
         let transport = try Transport(target: .dns(host: host, port: port), transportSecurity: .plaintext, config: config)
         let grpcClient = GRPCClient(transport: transport)
@@ -55,22 +55,31 @@ actor PiLinnGateway: LinnGateway {
                 while !Task.isCancelled {
                     do {
                         let client = try service()
-                        try await client.watchState(Google_Protobuf_Empty()) { response in
-                            for try await snapshot in response.messages {
-                                guard !Task.isCancelled else { break }
-                                switch snapshot.connectionStatus {
-                                case .connected:
-                                    continuation.yield(PiLinnMapping.nowPlaying(snapshot))
-                                case .connecting, .disconnected, .unspecified:
-                                    // Linn can drop while the home server stays available.
-                                    // Keep the stream alive for its next connected snapshot.
-                                    continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
-                                default:
-                                    continue
+                        let receivedSnapshot = try await client.watchState(Google_Protobuf_Empty()) { response in
+                            var receivedSnapshot = false
+                            do {
+                                for try await snapshot in response.messages {
+                                    guard !Task.isCancelled else { break }
+                                    receivedSnapshot = true
+                                    switch snapshot.connectionStatus {
+                                    case .connected:
+                                        continuation.yield(PiLinnMapping.nowPlaying(snapshot))
+                                    case .connecting, .disconnected, .unspecified:
+                                        // Linn can drop while the home server stays available.
+                                        // Keep the stream alive for its next connected snapshot.
+                                        continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
+                                    default:
+                                        continue
+                                    }
                                 }
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch {
+                                // The next WatchState begins with a full snapshot.
                             }
+                            return receivedSnapshot
                         }
-                        retrySeconds = 1
+                        if receivedSnapshot { retrySeconds = 1 }
                     } catch is CancellationError {
                         break
                     } catch let error as PiLinnError {
@@ -294,7 +303,8 @@ enum PiLinnMapping {
             let volume = state.roomVolume
             result.roomState = .init(
                 volume: volume.hasVolume ? Int(volume.volume) : nil,
-                isMuted: volume.hasIsMuted ? volume.isMuted : nil
+                isMuted: volume.hasIsMuted ? volume.isMuted : nil,
+                maximumVolume: volume.maximumVolume > 0 ? Int(volume.maximumVolume) : nil
             )
         }
         return result

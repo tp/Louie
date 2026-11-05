@@ -89,10 +89,12 @@ public final class CiGateway: Sendable {
         public struct RoomState: Sendable, Equatable {
             public var volume: Int?
             public var isMuted: Bool?
+            public var maximumVolume: Int?
 
-            public init(volume: Int? = nil, isMuted: Bool? = nil) {
+            public init(volume: Int? = nil, isMuted: Bool? = nil, maximumVolume: Int? = nil) {
                 self.volume = volume
                 self.isMuted = isMuted
+                self.maximumVolume = maximumVolume
             }
         }
 

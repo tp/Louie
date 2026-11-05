@@ -19,6 +19,7 @@ import Testing
     var volume = Louie_Linn_V1_RoomVolume()
     volume.volume = 42
     volume.isMuted = false
+    volume.maximumVolume = 45
     state.roomVolume = volume
     snapshot.nowPlaying = state
 
@@ -31,6 +32,7 @@ import Testing
     #expect(update.queue?.length == 3)
     #expect(update.roomState?.volume == 42)
     #expect(update.roomState?.isMuted == false)
+    #expect(update.roomState?.maximumVolume == 45)
 }
 
 @Test func piQobuzFolderKeepsLibraryNavigation() {
