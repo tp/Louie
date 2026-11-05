@@ -1,0 +1,12 @@
+[Unit]
+Description=Louie home server
+
+[Service]
+EnvironmentFile=%h/.config/louie/server.env
+ExecStart=%h/.local/bin/louie-server
+Restart=always
+RestartSec=5s
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

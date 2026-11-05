@@ -8,6 +8,44 @@
 
 Louie is an iOS companion app for the home. It currently supports managing one's Linn music system, with more features to come.
 
+## Linn server
+
+The Raspberry Pi server is in `server/`; its gRPC schema is in
+`proto/louie/linn/v1/linn.proto`. Build and test it with:
+
+```sh
+cd server
+cargo test --locked --all-targets
+cargo build --release --locked
+```
+
+`server/rust-toolchain.toml` fixes the Rust version, and `server/Cargo.lock` fixes
+crate versions. `build.rs` generates Rust code locally using the versioned
+`protoc-bin-vendored` crate; no system `protoc` installation or Buf account is
+needed. Cargo downloads dependencies from crates.io on a clean machine, but
+the schema and code-generation inputs are not sent to a hosted generator.
+
+If we add Buf for linting or Swift generation later, use only local schema
+inputs and `local:` plugins. Do not add `remote:` plugins or BSR module inputs
+to the generation configuration.
+
+### Pi deployment
+
+Run `bash server/deploy/deploy-pi.sh` from the repository root. It builds an
+ARM64 Linux release binary in Docker with the pinned Rust version, copies it
+over SSH, verifies its checksum, restarts `louie.service`, and checks the gRPC
+state stream. It keeps the previous binary for rollback if the check fails.
+
+The Pi configuration is at `~/.config/louie/server.env`; the initial values are
+in `server/deploy/server.env.example`. The user unit is
+`server/deploy/louie.service`. User lingering is enabled on the Pi so the
+service starts at boot. To inspect it on the Pi:
+
+```sh
+systemctl --user status louie.service
+journalctl --user -u louie.service -f
+```
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/iPad%20Home%20Dark.png">
   <source media="(prefers-color-scheme: light)" srcset="./docs/assets/iPad%20Home%20Light.png">
