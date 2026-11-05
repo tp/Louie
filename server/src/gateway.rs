@@ -468,7 +468,11 @@ async fn run_connection(
                         let result = if key.path == "/V2/playlist/select" {
                             Ok(Value::Null)
                         } else {
-                            Err(tonic::Status::cancelled("superseded by a newer value"))
+                            Err(crate::error::with_reason(
+                                tonic::Code::Cancelled,
+                                "superseded",
+                                "superseded by a newer value",
+                            ))
                         };
                         let _ = old.request.reply.send(result);
                     }

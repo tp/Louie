@@ -1,9 +1,13 @@
-use tonic::{Status, metadata::MetadataValue};
+use tonic::{Code, Status, metadata::MetadataValue};
 
 pub const REASON_HEADER: &str = "louie-error-reason";
 
 pub fn failed_precondition(reason: &'static str, message: impl Into<String>) -> Status {
-    let mut status = Status::failed_precondition(message);
+    with_reason(Code::FailedPrecondition, reason, message)
+}
+
+pub fn with_reason(code: Code, reason: &'static str, message: impl Into<String>) -> Status {
+    let mut status = Status::new(code, message);
     status
         .metadata_mut()
         .insert(REASON_HEADER, MetadataValue::from_static(reason));
@@ -21,6 +25,12 @@ mod tests {
         assert_eq!(
             status.metadata().get(REASON_HEADER).unwrap(),
             "linn-disconnected"
+        );
+        let superseded = with_reason(Code::Cancelled, "superseded", "newer value arrived");
+        assert_eq!(superseded.code(), Code::Cancelled);
+        assert_eq!(
+            superseded.metadata().get(REASON_HEADER).unwrap(),
+            "superseded"
         );
     }
 }
