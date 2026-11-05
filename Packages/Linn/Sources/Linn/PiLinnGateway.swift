@@ -3,6 +3,13 @@ import GRPCCore
 import GRPCNIOTransportHTTP2TransportServices
 import SwiftProtobuf
 
+private actor WatchAttempt {
+    private var receivedSnapshot = false
+
+    func markSnapshotReceived() { receivedSnapshot = true }
+    func hasReceivedSnapshot() -> Bool { receivedSnapshot }
+}
+
 /// One long-lived HTTP/2 connection to the Raspberry Pi. The Pi alone talks to Linn.
 actor PiLinnGateway: LinnGateway {
     private typealias Transport = HTTP2ClientTransport.TransportServices
@@ -51,19 +58,28 @@ actor PiLinnGateway: LinnGateway {
         host.contains(":") ? "[\(host)]:\(port)" : nil
     }
 
+    static func isTerminalStreamError(_ code: RPCError.Code) -> Bool {
+        switch code {
+        case .unimplemented, .unauthenticated, .permissionDenied, .invalidArgument, .failedPrecondition:
+            true
+        default:
+            false
+        }
+    }
+
     func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
         // The server currently owns one Linn room and controls its update rate.
         AsyncThrowingStream { continuation in
             let task = Task {
                 var retrySeconds = 1
                 while !Task.isCancelled {
+                    let attempt = WatchAttempt()
                     do {
                         let client = try service()
-                        let receivedSnapshot = try await client.watchState(Google_Protobuf_Empty()) { response in
-                            var receivedSnapshot = false
+                        _ = try await client.watchState(Google_Protobuf_Empty()) { response in
                             for try await snapshot in response.messages {
                                 guard !Task.isCancelled else { break }
-                                receivedSnapshot = true
+                                await attempt.markSnapshotReceived()
                                 switch snapshot.connectionStatus {
                                 case .connected:
                                     continuation.yield(PiLinnMapping.nowPlaying(snapshot))
@@ -75,9 +91,7 @@ actor PiLinnGateway: LinnGateway {
                                     continue
                                 }
                             }
-                            return receivedSnapshot
                         }
-                        if receivedSnapshot { retrySeconds = 1 }
                         guard !Task.isCancelled else { break }
                         var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
                         update.connectionStatus = .serverUnreachable
@@ -89,15 +103,13 @@ actor PiLinnGateway: LinnGateway {
                         return
                     } catch let error as RPCError {
                         guard !Task.isCancelled else { break }
-                        switch error.code {
-                        case .unavailable, .deadlineExceeded:
-                            var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
-                            update.connectionStatus = .serverUnreachable
-                            continuation.yield(update)
-                        default:
+                        if Self.isTerminalStreamError(error.code) {
                             continuation.finish(throwing: PiLinnRPCError(code: error.code, message: error.message))
                             return
                         }
+                        var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
+                        update.connectionStatus = .serverUnreachable
+                        continuation.yield(update)
                     } catch {
                         // A Pi restart or network transition closes WatchState. Resume
                         // from its next complete snapshot on the same gRPC client.
@@ -106,6 +118,7 @@ actor PiLinnGateway: LinnGateway {
                         update.connectionStatus = .serverUnreachable
                         continuation.yield(update)
                     }
+                    if await attempt.hasReceivedSnapshot() { retrySeconds = 1 }
                     do {
                         try await Task.sleep(for: .seconds(retrySeconds))
                     } catch {
@@ -243,10 +256,7 @@ struct PiLinnRPCError: Error, LocalizedError {
         switch code {
         case .unavailable: "Can't reach Louie Home Server."
         case .deadlineExceeded: "The Linn request timed out."
-        case .failedPrecondition:
-            message == "Linn gateway is disconnected"
-                ? "Louie Home Server can't reach Linn."
-                : message.isEmpty ? "Linn can't perform this action right now." : message
+        case .failedPrecondition: "Linn can't perform this action right now."
         case .invalidArgument: "This request isn't valid."
         case .unauthenticated, .permissionDenied: "Louie Home Server rejected access."
         case .unimplemented: "Louie Home Server needs an update."

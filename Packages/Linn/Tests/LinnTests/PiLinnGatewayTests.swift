@@ -13,11 +13,22 @@ import Testing
     #expect(unreachable.errorDescription == "Can't reach Louie Home Server.")
 
     let linnDisconnected = PiLinnRPCError(code: .failedPrecondition, message: "Linn gateway is disconnected")
-    #expect(linnDisconnected.errorDescription == "Louie Home Server can't reach Linn.")
+    #expect(linnDisconnected.errorDescription == "Linn can't perform this action right now.")
 
     let rejected = PiLinnRPCError(code: .failedPrecondition, message: "Linn is in standby")
     #expect(rejected.code == .failedPrecondition)
-    #expect(rejected.errorDescription == "Linn is in standby")
+    #expect(rejected.errorDescription == linnDisconnected.errorDescription)
+}
+
+@Test func transientStreamCodesRetryAndConfigurationCodesStop() {
+    let transientCodes: [RPCError.Code] = [.unavailable, .deadlineExceeded, .unknown, .internalError, .cancelled]
+    for code in transientCodes {
+        #expect(!PiLinnGateway.isTerminalStreamError(code))
+    }
+    let terminalCodes: [RPCError.Code] = [.unimplemented, .unauthenticated, .permissionDenied, .invalidArgument, .failedPrecondition]
+    for code in terminalCodes {
+        #expect(PiLinnGateway.isTerminalStreamError(code))
+    }
 }
 
 @Test func piSnapshotRetainsPlaybackQueueAndVolume() {

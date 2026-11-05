@@ -396,7 +396,7 @@ struct ConnectionGateView: View {
             return "Check that the Linn DSM and its CI Gateway are running. Louie Home Server will reconnect automatically."
         }
         if case .failed = linn?.connectionState {
-            return "Check that Louie Home Server is up to date, then try again."
+            return "Check the Louie Home Server address, then try again. If it still fails, update the app and home server."
         }
         return "If asked about local network access, allow it. Check the address and that louie.service is running on your home server."
     }
