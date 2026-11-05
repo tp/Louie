@@ -1,5 +1,10 @@
 use std::pin::Pin;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
+use linn_ci_gateway::{models, websocket};
 use serde_json::{Value, json};
 use tokio_stream::{Stream, StreamExt, wrappers::WatchStream};
 use tonic::{Request, Response, Status};
@@ -12,11 +17,15 @@ use crate::{
 #[derive(Clone)]
 pub struct LinnService {
     gateway: Gateway,
+    first_tracks: Arc<Mutex<HashMap<String, pb::MediaItem>>>,
 }
 
 impl LinnService {
     pub fn new(gateway: Gateway) -> Self {
-        Self { gateway }
+        Self {
+            gateway,
+            first_tracks: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     async fn command(&self, path: &'static str, body: Value) -> Result<Response<()>, Status> {
@@ -26,6 +35,11 @@ impl LinnService {
 
     fn room(&self) -> String {
         self.gateway.snapshot().room
+    }
+
+    async fn skip(&self, step: i32) -> Result<Response<()>, Status> {
+        self.gateway.skip(step).await?;
+        Ok(Response::new(()))
     }
 }
 
@@ -56,26 +70,18 @@ impl Linn for LinnService {
     }
 
     async fn previous(&self, _: Request<()>) -> Result<Response<()>, Status> {
-        self.command(
-            "/V2/transport/skip_track",
-            json!({"room": self.room(), "skip_track": -1}),
-        )
-        .await
+        self.skip(-1).await
     }
 
     async fn next(&self, _: Request<()>) -> Result<Response<()>, Status> {
-        self.command(
-            "/V2/transport/skip_track",
-            json!({"room": self.room(), "skip_track": 1}),
-        )
-        .await
+        self.skip(1).await
     }
 
     async fn seek(&self, request: Request<pb::SeekRequest>) -> Result<Response<()>, Status> {
-        let position = request.into_inner().position_seconds;
-        if position < 0 {
-            return Err(Status::invalid_argument("position must be nonnegative"));
-        }
+        let position = validated_seek_position(
+            &self.gateway.snapshot(),
+            request.into_inner().position_seconds,
+        )?;
         self.command(
             "/V2/seek/set_position",
             json!({"room": self.room(), "position": position}),
@@ -143,21 +149,22 @@ impl Linn for LinnService {
                 }),
             )
             .await?;
-        let services = response
-            .pointer("/data/children")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| {
-                        Some(pb::MediaService {
-                            id: string(item, "id")?.to_owned(),
-                            name: string(item, "name")?.to_owned(),
-                        })
-                    })
-                    .collect()
+        let status: models::V2ServicesStatusResponse =
+            websocket::decode(&response).map_err(|error| {
+                Status::internal(format!("invalid Linn services response: {error}"))
+            })?;
+        let services = status
+            .data
+            .and_then(|data| data.children)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| {
+                Some(pb::MediaService {
+                    id: item.id?,
+                    name: item.name?,
+                })
             })
-            .unwrap_or_default();
+            .collect();
         Ok(Response::new(pb::MediaServicesResponse { services }))
     }
 
@@ -180,7 +187,21 @@ impl Linn for LinnService {
                 }),
             )
             .await?;
-        Ok(Response::new(media_page(&response)))
+        let page = media_page(response)?;
+        if page.index == 0
+            && let Some(first) = page.children.first()
+            && first.r#type == pb::MediaItemType::Track as i32
+        {
+            let mut cache = self
+                .first_tracks
+                .lock()
+                .expect("first-track cache poisoned");
+            if cache.len() >= 128 {
+                cache.clear();
+            }
+            cache.insert(request.media_id, first.clone());
+        }
+        Ok(Response::new(page))
     }
 
     async fn search_media(
@@ -213,7 +234,7 @@ impl Linn for LinnService {
                 }),
             )
             .await?;
-        Ok(Response::new(media_page(&response)))
+        Ok(Response::new(media_page(response)?))
     }
 
     async fn select_media(
@@ -231,6 +252,12 @@ impl Linn for LinnService {
             Some(pb::QueuePlacement::Replace) => "replace",
             _ => return Err(Status::invalid_argument("queue placement is required")),
         };
+        let first_track = self
+            .first_tracks
+            .lock()
+            .expect("first-track cache poisoned")
+            .get(&request.media_id)
+            .cloned();
         self.gateway
             .request_with_preview(
                 "/V2/media/select",
@@ -238,6 +265,7 @@ impl Linn for LinnService {
                     "room": self.room(), "media_id": request.media_id, "queue": queue
                 }),
                 request.preview,
+                first_track,
             )
             .await?;
         Ok(Response::new(()))
@@ -297,33 +325,56 @@ fn validate_page(index: i32, count: i32) -> Result<(), Status> {
     }
 }
 
-fn media_page(response: &Value) -> pb::MediaPage {
-    let data = response.get("data").unwrap_or(&Value::Null);
-    let children = data
-        .get("children")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().map(media_item).collect())
-        .unwrap_or_default();
-    pb::MediaPage {
-        id: string(data, "id").map(str::to_owned),
-        content_revision: integer(data, "content_revision"),
-        index: integer(data, "index").unwrap_or(0) as i32,
-        count: integer(data, "count").unwrap_or_else(|| {
-            data.get("children")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len() as i64)
-        }) as i32,
-        total: integer(data, "total").map(|n| n as i32),
-        children,
+fn validated_seek_position(snapshot: &pb::StateSnapshot, mut position: i32) -> Result<i32, Status> {
+    if position < 0 {
+        return Err(Status::invalid_argument("position must be nonnegative"));
     }
+    if let Some(timeline) = snapshot
+        .now_playing
+        .as_ref()
+        .and_then(|state| state.timeline.as_ref())
+    {
+        if timeline.is_seekable == Some(false) {
+            return Err(Status::failed_precondition(
+                "current source is not seekable",
+            ));
+        }
+        if let Some(lower) = timeline.seek_lower_bound_seconds {
+            position = position.max(lower);
+        }
+        if let Some(upper) = timeline.seek_upper_bound_seconds {
+            position = position.min(upper);
+        }
+    }
+    Ok(position)
 }
 
-fn media_item(item: &Value) -> pb::MediaItem {
-    let class = string(item, "class")
+fn media_page(response: Value) -> Result<pb::MediaPage, Status> {
+    let page = websocket::decode_media_page(response)
+        .map_err(|error| Status::internal(format!("invalid Linn media response: {error}")))?;
+    let data = page
+        .data
+        .ok_or_else(|| Status::internal("Linn media response has no data"))?;
+    let children: Vec<_> = data
+        .children
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    let contained = strings(item, "contained_classes");
-    let child_count = integer(item, "count").map(|n| n as i32);
+        .iter()
+        .map(media_item)
+        .collect();
+    Ok(pb::MediaPage {
+        id: data.id,
+        content_revision: data.content_revision.map(i64::from),
+        index: data.index.unwrap_or(0),
+        count: data.count.unwrap_or(children.len() as i32),
+        total: data.total,
+        children,
+    })
+}
+
+fn media_item(item: &models::ItemMetaData) -> pb::MediaItem {
+    let class = item.class.to_ascii_lowercase();
+    let contained = item.contained_classes.clone().unwrap_or_default();
+    let child_count = item.count;
     let is_container = class.contains("container")
         || class.contains("album")
         || class.contains("playlist")
@@ -345,17 +396,17 @@ fn media_item(item: &Value) -> pb::MediaItem {
     } else {
         pb::MediaItemType::Other
     };
-    let disabled = strings(item, "disabledActions");
-    let is_favourite = item.get("is_favourite").and_then(Value::as_bool);
+    let disabled = item.disabled_actions.as_deref().unwrap_or_default();
+    let is_favourite = item.is_favourite;
     pb::MediaItem {
-        id: string(item, "id").unwrap_or_default().to_owned(),
+        id: item.id.clone(),
         r#type: item_type as i32,
-        name: string(item, "name").map(str::to_owned),
-        title: string(item, "title").map(str::to_owned),
-        album: string(item, "album").map(str::to_owned),
-        artists: strings(item, "artist"),
-        artwork_url: string(item, "art_uri").map(str::to_owned),
-        duration_seconds: integer(item, "duration").map(|n| n as i32),
+        name: item.name.clone(),
+        title: item.title.clone(),
+        album: item.album.clone(),
+        artists: item.artist.clone().unwrap_or_default(),
+        artwork_url: item.art_uri.clone(),
+        duration_seconds: item.duration,
         child_count,
         is_favourite,
         is_container,
@@ -369,21 +420,58 @@ fn media_item(item: &Value) -> pb::MediaItem {
     }
 }
 
-fn string<'a>(item: &'a Value, name: &str) -> Option<&'a str> {
-    item.get(name).and_then(Value::as_str)
-}
-fn integer(item: &Value, name: &str) -> Option<i64> {
-    item.get(name).and_then(Value::as_i64)
-}
-fn strings(item: &Value, name: &str) -> Vec<String> {
-    item.get(name)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn seek_forwards_clamped_seconds_and_rejects_radio() {
+        let mut snapshot = pb::StateSnapshot {
+            now_playing: Some(pb::NowPlayingState {
+                timeline: Some(pb::Timeline {
+                    is_seekable: Some(true),
+                    seek_lower_bound_seconds: Some(0),
+                    seek_upper_bound_seconds: Some(215),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(validated_seek_position(&snapshot, 500).unwrap(), 215);
+        assert_eq!(validated_seek_position(&snapshot, 42).unwrap(), 42);
+        snapshot
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .timeline
+            .as_mut()
+            .unwrap()
+            .is_seekable = Some(false);
+        assert_eq!(
+            validated_seek_position(&snapshot, 42).unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    #[test]
+    fn browse_maps_favourite_and_string_artist_from_gateway_payload() {
+        let page = media_page(json!({
+            "data": {
+                "id": "qobuz", "index": 0, "count": 1, "total": 1,
+                "children": [{
+                    "id": "album:1", "class": "md.qobuz.album", "name": "Album",
+                    "artist": "Nala Sinephro", "isFavourite": true,
+                    "art_uri": "https://example.com/art"
+                }]
+            }
+        }))
+        .unwrap();
+        let album = &page.children[0];
+        assert_eq!(album.artists, ["Nala Sinephro"]);
+        assert_eq!(album.is_favourite, Some(true));
+        assert!(album.can_favourite);
+        assert_eq!(album.r#type, pb::MediaItemType::Album as i32);
+    }
 }

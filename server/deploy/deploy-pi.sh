@@ -21,16 +21,18 @@ docker run --rm --platform linux/arm64 \
   "rust:$rust_version-bookworm" \
   cargo build --release --locked --bins --examples
 
+artifact_dir="$build_dir/release"
+
 ssh "${ssh_options[@]}" "$pi" \
   'mkdir -p ~/.local/bin ~/.config/systemd/user && test -f ~/.config/louie/server.env'
-scp "${ssh_options[@]}" "$build_dir/release/louie-server" \
+scp "${ssh_options[@]}" "$artifact_dir/louie-server" \
   "$pi:/home/louie/.local/bin/louie-server.new"
-scp "${ssh_options[@]}" "$build_dir/release/examples/check_linn" \
+scp "${ssh_options[@]}" "$artifact_dir/examples/check_linn" \
   "$pi:/home/louie/.local/bin/check_linn.new"
 scp "${ssh_options[@]}" "$repo_root/server/deploy/louie.service" \
   "$pi:/home/louie/.config/systemd/user/louie.service.new"
 
-local_sha="$(shasum -a 256 "$build_dir/release/louie-server" | cut -d ' ' -f 1)"
+local_sha="$(shasum -a 256 "$artifact_dir/louie-server" | cut -d ' ' -f 1)"
 remote_sha="$(ssh "${ssh_options[@]}" "$pi" \
   'sha256sum ~/.local/bin/louie-server.new' | cut -d ' ' -f 1)"
 if [[ "$local_sha" != "$remote_sha" ]]; then
@@ -43,6 +45,12 @@ ssh "${ssh_options[@]}" "$pi" '
   if test -f ~/.local/bin/louie-server; then
     cp -p ~/.local/bin/louie-server ~/.local/bin/louie-server.previous
   fi
+  if test -f ~/.local/bin/check_linn; then
+    cp -p ~/.local/bin/check_linn ~/.local/bin/check_linn.previous
+  fi
+  if test -f ~/.config/systemd/user/louie.service; then
+    cp -p ~/.config/systemd/user/louie.service ~/.config/systemd/user/louie.service.previous
+  fi
   mv ~/.local/bin/louie-server.new ~/.local/bin/louie-server
   chmod 755 ~/.local/bin/louie-server
   mv ~/.local/bin/check_linn.new ~/.local/bin/check_linn
@@ -54,20 +62,39 @@ ssh "${ssh_options[@]}" "$pi" '
 '
 
 if ! ssh "${ssh_options[@]}" "$pi" '
+  set -eu
+  set -a
+  . ~/.config/louie/server.env
+  set +a
+  bind=${LOUIE_GRPC_BIND:?LOUIE_GRPC_BIND is required}
+  host=${bind%:*}
+  port=${bind##*:}
+  case "$host" in
+    0.0.0.0|"[::]"|"[::0]") host=127.0.0.1 ;;
+  esac
+  endpoint="http://$host:$port"
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if ~/.local/bin/check_linn http://192.168.4.58:50051; then
+    if ~/.local/bin/check_linn "$endpoint"; then
       exit 0
     fi
     sleep 1
   done
   exit 1
 '; then
-  echo 'Smoke check failed; restoring the previous binary' >&2
+  echo 'Smoke check failed; restoring the previous deployment' >&2
   ssh "${ssh_options[@]}" "$pi" '
+    set -eu
     if test -f ~/.local/bin/louie-server.previous; then
       mv ~/.local/bin/louie-server.previous ~/.local/bin/louie-server
-      systemctl --user restart louie.service
     fi
+    if test -f ~/.local/bin/check_linn.previous; then
+      mv ~/.local/bin/check_linn.previous ~/.local/bin/check_linn
+    fi
+    if test -f ~/.config/systemd/user/louie.service.previous; then
+      mv ~/.config/systemd/user/louie.service.previous ~/.config/systemd/user/louie.service
+    fi
+    systemctl --user daemon-reload
+    systemctl --user restart louie.service
   '
   exit 1
 fi

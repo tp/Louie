@@ -25,6 +25,16 @@ crate versions. `build.rs` generates Rust code locally using the versioned
 needed. Cargo downloads dependencies from crates.io on a clean machine, but
 the schema and code-generation inputs are not sent to a hosted generator.
 
+The Linn CI Gateway WebSocket payload models live in the separate
+`server/linn-ci-gateway` crate. They are generated from the normalized local
+`Packages/LinnCiGateway/Sources/LinnCiGateway/openapi.yaml` by running
+`bash server/linn-ci-gateway/generate.sh`. The script runs a pinned OpenAPI
+Generator image locally and commits only the model output; CI checks that it
+is current. The handwritten `websocket` module handles the live gateway's
+string-or-array `artist` deviation. Set `OPENAPI_USE_LOCAL_SPEC=1` when
+running the Swift spec generator to normalize its checked-in upstream copy
+without downloading a new one.
+
 If we add Buf for linting or Swift generation later, use only local schema
 inputs and `local:` plugins. Do not add `remote:` plugins or BSR module inputs
 to the generation configuration.
@@ -34,7 +44,8 @@ to the generation configuration.
 Run `bash server/deploy/deploy-pi.sh` from the repository root. It builds an
 ARM64 Linux release binary in Docker with the pinned Rust version, copies it
 over SSH, verifies its checksum, restarts `louie.service`, and checks the gRPC
-state stream. It keeps the previous binary for rollback if the check fails.
+state stream. The smoke check also works while Linn is offline. It keeps the
+previous binary, check tool, and systemd unit for rollback if the check fails.
 
 The Pi configuration is at `~/.config/louie/server.env`; the initial values are
 in `server/deploy/server.env.example`. The user unit is

@@ -16,6 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      - name: Check generated Linn gateway models
+        run: |
+          bash server/linn-ci-gateway/generate.sh
+          git diff --exit-code -- server/linn-ci-gateway/src/models
+
       - name: Check formatting
         working-directory: server
         run: cargo fmt --all -- --check

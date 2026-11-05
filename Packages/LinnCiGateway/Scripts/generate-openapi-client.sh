@@ -27,8 +27,12 @@ EOF
     exit 1
 fi
 
-echo "Downloading OpenAPI document from ${SPEC_URL}"
-curl --fail --location --silent --show-error "${SPEC_URL}" --output "${ORIGINAL_SPEC_PATH}"
+if [[ "${OPENAPI_USE_LOCAL_SPEC:-0}" == "1" ]]; then
+    echo "Using checked-in OpenAPI source at ${ORIGINAL_SPEC_PATH}"
+else
+    echo "Downloading OpenAPI document from ${SPEC_URL}"
+    curl --fail --location --silent --show-error "${SPEC_URL}" --output "${ORIGINAL_SPEC_PATH}"
+fi
 cp "${ORIGINAL_SPEC_PATH}" "${SPEC_PATH}"
 
 # Keep only the websocket paths the package wraps. The generated HTTP API
@@ -42,6 +46,7 @@ yq -i '.paths = (.paths | pick([
     "/V2/transport/pause",
     "/V2/transport/skip_track",
     "/V2/seek/status",
+    "/V2/seek/set_position",
     "/V2/metadata/status",
     "/V2/volume/status",
     "/V2/volume/set_vol",
@@ -89,7 +94,8 @@ yq -i '.definitions.V2PlaylistItemMetadata.properties.album = {
     "type": "integer",
     "format": "int32",
     "description": "Duration of the item in seconds. 0 if unknown"
-}' "${SPEC_PATH}"
+} |
+del(.definitions.V2PlaylistItemMetadata.discriminator)' "${SPEC_PATH}"
 
 # Media browse items are modeled in the upstream spec through composed
 # subclasses, but the websocket wrapper maps a flat item model. Keep the
@@ -134,7 +140,8 @@ yq -i '.definitions.ItemMetaData.properties.title = {
 .definitions.ItemMetaData.properties.artist_id = {
     "type": "string",
     "description": "Media id of the artist that created this item."
-}' "${SPEC_PATH}"
+} |
+del(.definitions.ItemMetaData.discriminator)' "${SPEC_PATH}"
 
 # Keep the refined spec small without hand-authoring generated schemas here.
 # This keeps the session helpers, shared request params, and the V2 surfaces
