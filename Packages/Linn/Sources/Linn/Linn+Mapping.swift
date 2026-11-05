@@ -1,33 +1,7 @@
 import Foundation
-import LinnCiGateway
-
-extension CiGateway: LinnGateway {
-    public func nowPlayingUpdates(
-        room: String?,
-        updateInterval: Int
-    ) async -> AsyncThrowingStream<NowPlaying, Error> {
-        nowPlayingEvents(room: room, updateInterval: updateInterval)
-    }
-
-    public func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> MediaPage {
-        try await browse(mediaID: mediaID, index: index, count: count, browseType: browseType)
-    }
-
-    public func searchMedia(serviceID: String, query: String, type: MediaSearchType, index: Int, count: Int) async throws -> MediaPage {
-        try await search(serviceID: serviceID, query: query, type: type, index: index, count: count)
-    }
-
-    public func selectMedia(mediaID: String, room: String, queue: QueuePlacement) async throws {
-        try await select(mediaID: mediaID, room: room, queue: queue)
-    }
-
-    public func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws {
-        try await setFavourite(mediaID: mediaID, isFavourite: isFavourite)
-    }
-}
 
 public extension Linn.PlayState {
-    init?(_ playback: CiGateway.NowPlaying.Playback?) {
+    init?(_ playback: LinnGatewayData.NowPlaying.Playback?) {
         guard let transportState = playback?.transportState else {
             return nil
         }
@@ -48,7 +22,7 @@ public extension Linn.PlayState {
 }
 
 public extension Linn.Song {
-    init?(_ item: CiGateway.NowPlaying.CurrentItem?) {
+    init?(_ item: LinnGatewayData.NowPlaying.CurrentItem?) {
         guard let item else {
             return nil
         }
@@ -67,7 +41,7 @@ public extension Linn.Song {
         )
     }
 
-    init?(_ item: CiGateway.NowPlaying.PlaylistItem) {
+    init?(_ item: LinnGatewayData.NowPlaying.PlaylistItem) {
         let title = item.displayName
         guard let title, !title.isEmpty else {
             return nil
@@ -86,7 +60,7 @@ public extension Linn.Song {
 }
 
 public extension Linn.Timeline {
-    init?(_ timeline: CiGateway.NowPlaying.Timeline?) {
+    init?(_ timeline: LinnGatewayData.NowPlaying.Timeline?) {
         guard let timeline else {
             return nil
         }
@@ -99,13 +73,13 @@ public extension Linn.Timeline {
 }
 
 public extension Linn.LibraryService {
-    init(_ service: CiGateway.MediaService) {
+    init(_ service: LinnGatewayData.MediaService) {
         self.init(id: service.id, name: service.name, kind: service.kind)
     }
 }
 
 public extension Linn.LibraryPage {
-    init(_ page: CiGateway.MediaPage) {
+    init(_ page: LinnGatewayData.MediaPage) {
         self.init(
             id: page.id,
             contentRevision: page.contentRevision,
@@ -118,7 +92,7 @@ public extension Linn.LibraryPage {
 }
 
 public extension Linn.LibraryItem {
-    init(_ item: CiGateway.MediaItem) {
+    init(_ item: LinnGatewayData.MediaItem) {
         let title = item.displayTitle?.isEmpty == false ? item.displayTitle! : item.id
         let subtitle = item.artists.isEmpty ? item.album : item.artists.joined(separator: ", ")
         self.init(
@@ -135,39 +109,5 @@ public extension Linn.LibraryItem {
             isFavourite: item.isFavourite,
             canFavourite: item.canFavourite
         )
-    }
-}
-
-public extension CiGateway.MediaSearchType {
-    init(_ type: Linn.SearchType) {
-        switch type {
-        case .albums:
-            self = .albums
-        case .artists:
-            self = .artists
-        case .tracks:
-            self = .tracks
-        case .playlists:
-            self = .playlists
-        case .composers:
-            self = .composers
-        case .stations:
-            self = .stations
-        }
-    }
-}
-
-public extension CiGateway.QueuePlacement {
-    init(_ placement: Linn.QueuePlacement) {
-        switch placement {
-        case .now:
-            self = .now
-        case .next:
-            self = .next
-        case .last:
-            self = .last
-        case .replace:
-            self = .replace
-        }
     }
 }

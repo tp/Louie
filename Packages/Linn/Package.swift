@@ -14,7 +14,6 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../LinnCiGateway"),
         .package(url: "https://github.com/grpc/grpc-swift-2.git", exact: "2.4.4"),
         .package(url: "https://github.com/grpc/grpc-swift-nio-transport.git", exact: "2.12.0"),
         .package(url: "https://github.com/grpc/grpc-swift-protobuf.git", exact: "2.5.0"),
@@ -26,7 +25,6 @@ let package = Package(
         .target(
             name: "Linn",
             dependencies: [
-                .product(name: "LinnCiGateway", package: "LinnCiGateway"),
                 .product(name: "GRPCCore", package: "grpc-swift-2"),
                 .product(name: "GRPCNIOTransportHTTP2TransportServices", package: "grpc-swift-nio-transport"),
                 .product(name: "GRPCProtobuf", package: "grpc-swift-protobuf"),
@@ -37,7 +35,6 @@ let package = Package(
             name: "LinnTests",
             dependencies: [
                 "Linn",
-                .product(name: "LinnCiGateway", package: "LinnCiGateway"),
                 .product(name: "GRPCCore", package: "grpc-swift-2"),
             ]
         ),

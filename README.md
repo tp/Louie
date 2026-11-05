@@ -34,9 +34,9 @@ is current. The handwritten `websocket` module handles the live gateway's
 string-or-array `artist` deviation. To update from a local gateway, run
 `bash server/linn-ci-gateway/fetch-spec.sh`, then
 `bash server/linn-ci-gateway/normalize.sh`, then regenerate the Rust models
-with `bash server/linn-ci-gateway/generate.sh`. Until #25 removes the Swift
-client, also run
-`OPENAPI_USE_LOCAL_SPEC=1 bash Packages/LinnCiGateway/Scripts/generate-openapi-client.sh`.
+with `bash server/linn-ci-gateway/generate.sh`.
+The Apple apps use the server's gRPC API and do not compile the CI Gateway
+OpenAPI models.
 
 If we add Buf for linting or Swift generation later, use only local schema
 inputs and `local:` plugins. Do not add `remote:` plugins or BSR module inputs

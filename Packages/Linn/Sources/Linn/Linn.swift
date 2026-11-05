@@ -1,5 +1,4 @@
 import Foundation
-import LinnCiGateway
 import Observation
 import OSLog
 
@@ -7,7 +6,7 @@ public protocol LinnGateway: Sendable {
     func nowPlayingUpdates(
         room: String?,
         updateInterval: Int
-    ) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error>
+    ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>
 
     func play(room: String) async throws
     func pause(room: String) async throws
@@ -16,16 +15,16 @@ public protocol LinnGateway: Sendable {
     func selectPlaylistItem(at index: Int, room: String) async throws
     func setVolume(_ volume: Int, room: String, group: Bool) async throws
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws
-    func mediaServices(room: String) async throws -> [CiGateway.MediaService]
-    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> CiGateway.MediaPage
-    func searchMedia(serviceID: String, query: String, type: CiGateway.MediaSearchType, index: Int, count: Int) async throws -> CiGateway.MediaPage
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement, preview: CiGateway.MediaItem?) async throws
+    func mediaServices(room: String) async throws -> [LinnGatewayData.MediaService]
+    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> LinnGatewayData.MediaPage
+    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> LinnGatewayData.MediaPage
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: LinnGatewayData.MediaItem?) async throws
     func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws
 }
 
 public extension LinnGateway {
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement, preview: CiGateway.MediaItem?) async throws {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: LinnGatewayData.MediaItem?) async throws {
         try await selectMedia(mediaID: mediaID, room: room, queue: queue)
     }
 
@@ -563,7 +562,7 @@ public final class Linn {
         let page = try await ciGateway.searchMedia(
             serviceID: serviceID,
             query: trimmedQuery,
-            type: CiGateway.MediaSearchType(type),
+            type: type,
             index: index,
             count: count
         )
@@ -592,13 +591,13 @@ public final class Linn {
             try await ciGateway.selectMedia(
                 mediaID: item.id,
                 room: room,
-                queue: CiGateway.QueuePlacement(placement),
+                queue: placement,
                 preview: serverPreview
             )
         }
     }
 
-    private func mediaSelectionServerPreview(for item: LibraryItem) -> CiGateway.MediaItem? {
+    private func mediaSelectionServerPreview(for item: LibraryItem) -> LinnGatewayData.MediaItem? {
         guard !item.title.isEmpty else { return nil }
         let selected: LibraryItem
         if item.isContainer {
@@ -610,7 +609,7 @@ public final class Linn {
         } else {
             selected = item
         }
-        return CiGateway.MediaItem(
+        return LinnGatewayData.MediaItem(
             id: selected.id,
             kind: selected.kind,
             title: selected.title,
@@ -621,7 +620,7 @@ public final class Linn {
             containedKinds: selected.containedKinds,
             childCount: item.isContainer ? item.childCount : selected.childCount,
             isFavourite: selected.isFavourite,
-            disabledActions: selected.canFavourite ? [] : ["favourite"]
+            canFavourite: selected.canFavourite
         )
     }
 
@@ -659,7 +658,7 @@ public final class Linn {
         libraryPageCache = [:]
     }
 
-    private static func availableMediaServicesDescription(_ services: [CiGateway.MediaService]) -> String {
+    private static func availableMediaServicesDescription(_ services: [LinnGatewayData.MediaService]) -> String {
         guard !services.isEmpty else {
             return "none"
         }
@@ -910,7 +909,7 @@ public final class Linn {
         }
     }
 
-    private func apply(_ update: CiGateway.NowPlaying) {
+    private func apply(_ update: LinnGatewayData.NowPlaying) {
         let suppressNowPlayingFields = shouldSuppressNowPlayingFields(
             incomingQueueIndex: update.pending.queueIndex ? nil : update.queue?.index
         )
@@ -1504,7 +1503,7 @@ public final class Linn {
 
         /// Preview/mock-only adapter from button availability flags to the internal queue shape.
         ///
-        /// Production state comes from `CiGateway.NowPlaying.Queue`, where `hasPrevious`
+        /// Production state comes from `LinnGatewayData.NowPlaying.Queue`, where `hasPrevious`
         /// and `hasNext` are derived from the playlist current index and total. The debug mock
         /// initializer accepts direct booleans because previews usually care about the
         /// visible button states, not a realistic queue position.

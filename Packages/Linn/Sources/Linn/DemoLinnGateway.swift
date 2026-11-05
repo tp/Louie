@@ -1,6 +1,5 @@
 #if DEBUG
     import Foundation
-    import LinnCiGateway
 
     public actor DemoLinnGateway: LinnGateway {
         private struct DemoSong: Sendable {
@@ -27,7 +26,7 @@
                 self.artworkURL = artworkURL
             }
 
-            init?(_ item: CiGateway.MediaItem) {
+            init?(_ item: LinnGatewayData.MediaItem) {
                 let title = item.displayTitle ?? item.title ?? item.name
                 guard let title, !title.isEmpty else {
                     return nil
@@ -46,12 +45,12 @@
 
         private struct Subscription {
             var room: String
-            var continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
+            var continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
         }
 
         private var songs: [DemoSong]
         private var currentIndex: Int
-        private var transportState: CiGateway.NowPlaying.TransportState
+        private var transportState: LinnGatewayData.NowPlaying.TransportState
         private var position: Int
         private var volume: Int
         private var isMuted: Bool
@@ -114,7 +113,7 @@
         private init(
             songs: [DemoSong],
             currentIndex: Int,
-            transportState: CiGateway.NowPlaying.TransportState,
+            transportState: LinnGatewayData.NowPlaying.TransportState,
             position: Int,
             volume: Int,
             isMuted: Bool,
@@ -135,7 +134,7 @@
         public func nowPlayingUpdates(
             room: String?,
             updateInterval _: Int
-        ) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error> {
+        ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
             AsyncThrowingStream { continuation in
                 let id = UUID()
                 Task {
@@ -214,9 +213,9 @@
             yieldSnapshot()
         }
 
-        public func mediaServices(room _: String) async throws -> [CiGateway.MediaService] {
+        public func mediaServices(room _: String) async throws -> [LinnGatewayData.MediaService] {
             [
-                CiGateway.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
+                LinnGatewayData.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
             ]
         }
 
@@ -225,10 +224,10 @@
             index: Int,
             count: Int,
             browseType _: String
-        ) async throws -> CiGateway.MediaPage {
+        ) async throws -> LinnGatewayData.MediaPage {
             let children = Self.mediaChildren(for: mediaID)
             let slice = Array(children.dropFirst(index).prefix(count))
-            return CiGateway.MediaPage(
+            return LinnGatewayData.MediaPage(
                 id: mediaID,
                 contentRevision: 1,
                 index: index,
@@ -241,16 +240,16 @@
         public func searchMedia(
             serviceID _: String,
             query: String,
-            type _: CiGateway.MediaSearchType,
+            type _: Linn.SearchType,
             index: Int,
             count: Int
-        ) async throws -> CiGateway.MediaPage {
+        ) async throws -> LinnGatewayData.MediaPage {
             let matches = Self.demoLibraryAlbums.filter {
                 ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
                     || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
             }
             let slice = Array(matches.dropFirst(index).prefix(count))
-            return CiGateway.MediaPage(
+            return LinnGatewayData.MediaPage(
                 id: "qobuz-search",
                 contentRevision: 1,
                 index: index,
@@ -260,7 +259,7 @@
             )
         }
 
-        public func selectMedia(mediaID: String, room _: String, queue: CiGateway.QueuePlacement) async throws {
+        public func selectMedia(mediaID: String, room _: String, queue: Linn.QueuePlacement) async throws {
             let selectedSongs = Self.queueSongs(for: mediaID)
             guard !selectedSongs.isEmpty else {
                 return
@@ -290,7 +289,7 @@
         private func addSubscription(
             id: UUID,
             room: String,
-            continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
+            continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
         ) {
             subscriptions[id] = Subscription(room: room, continuation: continuation)
             continuation.yield(snapshot(room: room))
@@ -312,45 +311,45 @@
             }
         }
 
-        private func snapshot(room: String) -> CiGateway.NowPlaying {
+        private func snapshot(room: String) -> LinnGatewayData.NowPlaying {
             let song = songs[currentIndex]
-            var nowPlaying = CiGateway.NowPlaying(room: room, session: "preview-session")
-            nowPlaying.playback = CiGateway.NowPlaying.Playback(transportState: transportState)
-            nowPlaying.queue = CiGateway.NowPlaying.Queue(index: currentIndex, length: songs.count)
+            var nowPlaying = LinnGatewayData.NowPlaying(room: room, session: "preview-session")
+            nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: transportState)
+            nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: currentIndex, length: songs.count)
             nowPlaying.currentItem = currentItem(song)
             nowPlaying.playlist = playlist
-            nowPlaying.timeline = CiGateway.NowPlaying.Timeline(
+            nowPlaying.timeline = LinnGatewayData.NowPlaying.Timeline(
                 position: position,
                 duration: song.duration,
-                seekableRange: CiGateway.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
+                seekableRange: LinnGatewayData.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
             )
-            nowPlaying.roomState = CiGateway.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
+            nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
             return nowPlaying
         }
 
-        private func countOnlySnapshot(room: String, queueLength: Int) -> CiGateway.NowPlaying {
+        private func countOnlySnapshot(room: String, queueLength: Int) -> LinnGatewayData.NowPlaying {
             let song = songs[currentIndex]
-            var nowPlaying = CiGateway.NowPlaying(room: room, session: "preview-session")
-            nowPlaying.playback = CiGateway.NowPlaying.Playback(transportState: transportState)
-            nowPlaying.queue = CiGateway.NowPlaying.Queue(index: currentIndex, length: queueLength)
+            var nowPlaying = LinnGatewayData.NowPlaying(room: room, session: "preview-session")
+            nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: transportState)
+            nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: currentIndex, length: queueLength)
             nowPlaying.currentItem = currentItem(song)
-            nowPlaying.playlist = CiGateway.NowPlaying.Playlist(items: [], total: queueLength)
-            nowPlaying.timeline = CiGateway.NowPlaying.Timeline(
+            nowPlaying.playlist = LinnGatewayData.NowPlaying.Playlist(items: [], total: queueLength)
+            nowPlaying.timeline = LinnGatewayData.NowPlaying.Timeline(
                 position: position,
                 duration: song.duration,
-                seekableRange: CiGateway.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
+                seekableRange: LinnGatewayData.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
             )
-            nowPlaying.roomState = CiGateway.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
+            nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
             return nowPlaying
         }
 
-        private func currentItem(_ song: DemoSong) -> CiGateway.NowPlaying.CurrentItem {
-            CiGateway.NowPlaying.CurrentItem(
+        private func currentItem(_ song: DemoSong) -> LinnGatewayData.NowPlaying.CurrentItem {
+            LinnGatewayData.NowPlaying.CurrentItem(
                 id: song.id,
                 kind: "md.track.preview",
                 displayName: song.title,
                 artworkURL: song.artworkURL,
-                track: CiGateway.NowPlaying.Track(
+                track: LinnGatewayData.NowPlaying.Track(
                     title: song.title,
                     album: song.album,
                     artist: song.artist
@@ -358,11 +357,11 @@
             )
         }
 
-        private var playlist: CiGateway.NowPlaying.Playlist {
+        private var playlist: LinnGatewayData.NowPlaying.Playlist {
             let selectedIndex = pendingSelectionIndex ?? currentIndex
-            return CiGateway.NowPlaying.Playlist(
+            return LinnGatewayData.NowPlaying.Playlist(
                 items: songs.enumerated().map { index, song in
-                    CiGateway.NowPlaying.PlaylistItem(
+                    LinnGatewayData.NowPlaying.PlaylistItem(
                         index: index,
                         displayName: song.title,
                         album: song.album,
@@ -379,7 +378,7 @@
 
         private func queueMutation(
             placing selectedSongs: [DemoSong],
-            queue: CiGateway.QueuePlacement
+            queue: Linn.QueuePlacement
         ) -> (songs: [DemoSong], currentIndex: Int) {
             switch queue {
             case .replace:
@@ -399,7 +398,7 @@
             }
         }
 
-        private static func transportState(for playState: Linn.PlayState) -> CiGateway.NowPlaying.TransportState {
+        private static func transportState(for playState: Linn.PlayState) -> LinnGatewayData.NowPlaying.TransportState {
             switch playState {
             case .stopped:
                 .stop
@@ -422,7 +421,7 @@
                 .compactMap(DemoSong.init)
         }
 
-        private static func queueableTracks(in item: CiGateway.MediaItem) -> [CiGateway.MediaItem] {
+        private static func queueableTracks(in item: LinnGatewayData.MediaItem) -> [LinnGatewayData.MediaItem] {
             if isTrack(item) {
                 return [item]
             }
@@ -430,36 +429,36 @@
             return mediaChildren(for: item.id).filter(isTrack)
         }
 
-        private static var queueableMediaItems: [CiGateway.MediaItem] {
+        private static var queueableMediaItems: [LinnGatewayData.MediaItem] {
             hitMeHardAndSoftTracks
                 + demoPlaylistTracks
                 + demoLibraryAlbums.flatMap { demoTracks(for: $0.id) }
         }
 
-        private static func isTrack(_ item: CiGateway.MediaItem) -> Bool {
+        private static func isTrack(_ item: LinnGatewayData.MediaItem) -> Bool {
             item.kind.localizedCaseInsensitiveContains("track")
         }
 
-        private static func mediaChildren(for mediaID: String) -> [CiGateway.MediaItem] {
+        private static func mediaChildren(for mediaID: String) -> [LinnGatewayData.MediaItem] {
             switch mediaID {
             case "service-qobuz":
                 [
-                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                    LinnGatewayData.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    LinnGatewayData.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    LinnGatewayData.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
                 ]
             case "qobuz-myqobuz":
                 [
-                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    LinnGatewayData.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
                 ]
             case "qobuz-favourites":
                 [
-                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-tracks", kind: "md.container", name: "Tracks"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-tracks", kind: "md.container", name: "Tracks"),
                 ]
             case "qobuz-favourite-albums":
                 demoLibraryAlbums
@@ -471,15 +470,15 @@
                 Array(demoLibraryAlbums.reversed())
             case "qobuz-discover":
                 [
-                    CiGateway.MediaItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", name: "New Releases"),
-                    CiGateway.MediaItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", name: "Qobuz Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", name: "Most Streamed"),
+                    LinnGatewayData.MediaItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", name: "New Releases"),
+                    LinnGatewayData.MediaItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", name: "Qobuz Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", name: "Most Streamed"),
                 ]
             case "qobuz-genres":
                 [
-                    CiGateway.MediaItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", name: "Jazz"),
-                    CiGateway.MediaItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", name: "Electronic"),
-                    CiGateway.MediaItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", name: "Classical"),
+                    LinnGatewayData.MediaItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", name: "Jazz"),
+                    LinnGatewayData.MediaItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", name: "Electronic"),
+                    LinnGatewayData.MediaItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", name: "Classical"),
                 ]
             case "qobuz-album-hit-me-hard-and-soft":
                 hitMeHardAndSoftTracks
@@ -623,8 +622,8 @@
             ),
         ]
 
-        private static let demoLibraryAlbums: [CiGateway.MediaItem] = [
-            CiGateway.MediaItem(
+        private static let demoLibraryAlbums: [LinnGatewayData.MediaItem] = [
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-happy-christmas",
                 kind: "md.album.qobuz",
                 name: "Happy Christmas",
@@ -635,7 +634,7 @@
                 childCount: 50,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-shostakovich-quartets",
                 kind: "md.album.qobuz",
                 name: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
@@ -646,7 +645,7 @@
                 childCount: 30,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-hit-me-hard-and-soft",
                 kind: "md.album.qobuz",
                 name: "HIT ME HARD AND SOFT",
@@ -657,7 +656,7 @@
                 childCount: 10,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-birth-of-the-blue",
                 kind: "md.album.qobuz",
                 name: "Birth of the Blue",
@@ -668,7 +667,7 @@
                 childCount: 4,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-chopin-nocturnes",
                 kind: "md.album.qobuz",
                 name: "Chopin: The Complete Nocturnes",
@@ -679,7 +678,7 @@
                 childCount: 21,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-abbey-road",
                 kind: "md.album.qobuz",
                 name: "Abbey Road",
@@ -690,7 +689,7 @@
                 childCount: 40,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-opus",
                 kind: "md.album.qobuz",
                 name: "Opus",
@@ -701,7 +700,7 @@
                 childCount: 20,
                 isFavourite: true
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-album-the-old-country",
                 kind: "md.album.qobuz",
                 name: "The Old Country",
@@ -714,8 +713,8 @@
             ),
         ]
 
-        private static let demoLibraryArtists: [CiGateway.MediaItem] = [
-            CiGateway.MediaItem(
+        private static let demoLibraryArtists: [LinnGatewayData.MediaItem] = [
+            LinnGatewayData.MediaItem(
                 id: "qobuz-artist-qrion",
                 kind: "md.artist.qobuz",
                 name: "Qrion",
@@ -725,8 +724,8 @@
             ),
         ]
 
-        private static let demoLibraryPlaylists: [CiGateway.MediaItem] = [
-            CiGateway.MediaItem(
+        private static let demoLibraryPlaylists: [LinnGatewayData.MediaItem] = [
+            LinnGatewayData.MediaItem(
                 id: "qobuz-playlist-willkommen",
                 kind: "md.playlist.qobuz",
                 name: "Willkommen bei Qobuz",
@@ -734,7 +733,7 @@
                 containedKinds: ["md.track.qobuz"],
                 childCount: 125
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-playlist-true-sound-covers",
                 kind: "md.playlist.qobuz",
                 name: "True Sound Covers",
@@ -742,7 +741,7 @@
                 containedKinds: ["md.track.qobuz"],
                 childCount: 50
             ),
-            CiGateway.MediaItem(
+            LinnGatewayData.MediaItem(
                 id: "qobuz-playlist-grammy-winners-2021",
                 kind: "md.playlist.qobuz",
                 name: "2021 Grammy Winners",
@@ -753,7 +752,7 @@
             ),
         ]
 
-        private static let hitMeHardAndSoftTracks: [CiGateway.MediaItem] = [
+        private static let hitMeHardAndSoftTracks: [LinnGatewayData.MediaItem] = [
             demoTrack(id: "qobuz-track-skinny", title: "SKINNY", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 219),
             demoTrack(id: "qobuz-track-lunch", title: "LUNCH", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 180),
             demoTrack(id: "qobuz-track-chihiro", title: "CHIHIRO", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 303),
@@ -766,7 +765,7 @@
             demoTrack(id: "qobuz-track-blue", title: "BLUE", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 343),
         ]
 
-        private static let demoPlaylistTracks: [CiGateway.MediaItem] = [
+        private static let demoPlaylistTracks: [LinnGatewayData.MediaItem] = [
             demoTrack(id: "qobuz-playlist-track-chainsmoking", title: "Chainsmoking", album: "Preview Queue", artist: "Jacob Banks", duration: 197),
             demoTrack(id: "qobuz-playlist-track-green-light", title: "Green Light", album: "Melodrama", artist: "Lorde", duration: 234),
             demoTrack(id: "qobuz-playlist-track-supercut", title: "Supercut", album: "Melodrama", artist: "Lorde", duration: 278),
@@ -774,7 +773,7 @@
             demoTrack(id: "qobuz-playlist-track-time", title: "Time", album: "The Old Country", artist: "Keith Jarrett", duration: 298),
         ]
 
-        private static func demoTracks(for albumID: String) -> [CiGateway.MediaItem] {
+        private static func demoTracks(for albumID: String) -> [LinnGatewayData.MediaItem] {
             guard let album = demoLibraryAlbums.first(where: { $0.id == albumID }) else {
                 return []
             }
@@ -800,8 +799,8 @@
             artist: String,
             duration: Int,
             artworkURL: URL? = URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
-        ) -> CiGateway.MediaItem {
-            CiGateway.MediaItem(
+        ) -> LinnGatewayData.MediaItem {
+            LinnGatewayData.MediaItem(
                 id: id,
                 kind: "md.track.qobuz",
                 title: title,

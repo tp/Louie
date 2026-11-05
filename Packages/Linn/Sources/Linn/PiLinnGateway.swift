@@ -1,7 +1,6 @@
 import Foundation
 import GRPCCore
 import GRPCNIOTransportHTTP2TransportServices
-import LinnCiGateway
 import SwiftProtobuf
 
 /// One long-lived HTTP/2 connection to the Raspberry Pi. The Pi alone talks to Linn.
@@ -47,7 +46,7 @@ actor PiLinnGateway: LinnGateway {
         return Client(wrapping: grpcClient)
     }
 
-    func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error> {
+    func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
         // The server currently owns one Linn room and controls its update rate.
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -83,7 +82,7 @@ actor PiLinnGateway: LinnGateway {
                         }
                         if receivedSnapshot { retrySeconds = 1 }
                         guard !Task.isCancelled else { break }
-                        var update = CiGateway.NowPlaying(room: room ?? "Linn", session: "")
+                        var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
                         update.connectionStatus = .serverUnreachable
                         continuation.yield(update)
                     } catch is CancellationError {
@@ -95,7 +94,7 @@ actor PiLinnGateway: LinnGateway {
                         // A Pi restart or network transition closes WatchState. Resume
                         // from its next complete snapshot on the same gRPC client.
                         guard !Task.isCancelled else { break }
-                        var update = CiGateway.NowPlaying(room: room ?? "Linn", session: "")
+                        var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
                         update.connectionStatus = .serverUnreachable
                         continuation.yield(update)
                     }
@@ -148,12 +147,12 @@ actor PiLinnGateway: LinnGateway {
         _ = try await remapCancellation { try await service().setMuted(request, options: Self.commandOptions) }
     }
 
-    func mediaServices(room: String) async throws -> [CiGateway.MediaService] {
+    func mediaServices(room: String) async throws -> [LinnGatewayData.MediaService] {
         let response = try await remapCancellation { try await service().listMediaServices(Google_Protobuf_Empty(), options: Self.commandOptions) }
-        return response.services.map { CiGateway.MediaService(id: $0.id, name: $0.name) }
+        return response.services.map { LinnGatewayData.MediaService(id: $0.id, name: $0.name) }
     }
 
-    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> CiGateway.MediaPage {
+    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> LinnGatewayData.MediaPage {
         var request = Louie_Linn_V1_BrowseMediaRequest()
         request.mediaID = mediaID
         request.index = Int32(clamping: index)
@@ -162,7 +161,7 @@ actor PiLinnGateway: LinnGateway {
         return PiLinnMapping.mediaPage(try await remapCancellation { try await service().browseMedia(request, options: Self.commandOptions) })
     }
 
-    func searchMedia(serviceID: String, query: String, type: CiGateway.MediaSearchType, index: Int, count: Int) async throws -> CiGateway.MediaPage {
+    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> LinnGatewayData.MediaPage {
         var request = Louie_Linn_V1_SearchMediaRequest()
         request.serviceID = serviceID
         request.query = query
@@ -179,11 +178,11 @@ actor PiLinnGateway: LinnGateway {
         return PiLinnMapping.mediaPage(try await remapCancellation { try await service().searchMedia(request, options: Self.commandOptions) })
     }
 
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws {
         try await selectMedia(mediaID: mediaID, room: room, queue: queue, preview: nil)
     }
 
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement, preview: CiGateway.MediaItem?) async throws {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: LinnGatewayData.MediaItem?) async throws {
         var request = Louie_Linn_V1_SelectMediaRequest()
         request.mediaID = mediaID
         request.queue = switch queue {
@@ -249,15 +248,15 @@ struct PiLinnRPCError: Error, LocalizedError {
 }
 
 enum PiLinnMapping {
-    static func connectionUpdate(_ snapshot: Louie_Linn_V1_StateSnapshot) -> CiGateway.NowPlaying {
-        var update = CiGateway.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
+    static func connectionUpdate(_ snapshot: Louie_Linn_V1_StateSnapshot) -> LinnGatewayData.NowPlaying {
+        var update = LinnGatewayData.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
         update.connectionStatus = snapshot.connectionStatus == .disconnected ? .disconnected : .connecting
         update.connectionError = snapshot.hasConnectionError ? snapshot.connectionError : nil
         return update
     }
 
-    static func nowPlaying(_ snapshot: Louie_Linn_V1_StateSnapshot) -> CiGateway.NowPlaying {
-        var result = CiGateway.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
+    static func nowPlaying(_ snapshot: Louie_Linn_V1_StateSnapshot) -> LinnGatewayData.NowPlaying {
+        var result = LinnGatewayData.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
         if snapshot.hasPending {
             result.pending = .init(
                 playback: snapshot.pending.playback,
@@ -274,7 +273,7 @@ enum PiLinnMapping {
         guard snapshot.hasNowPlaying else { return result }
         let state = snapshot.nowPlaying
         if state.hasTransportState {
-            let transport: CiGateway.NowPlaying.TransportState = switch state.transportState {
+            let transport: LinnGatewayData.NowPlaying.TransportState = switch state.transportState {
             case .playing: .play
             case .paused: .pause
             case .stopped: .stop
@@ -343,7 +342,7 @@ enum PiLinnMapping {
         return result
     }
 
-    static func mediaPage(_ page: Louie_Linn_V1_MediaPage) -> CiGateway.MediaPage {
+    static func mediaPage(_ page: Louie_Linn_V1_MediaPage) -> LinnGatewayData.MediaPage {
         .init(
             id: page.hasID ? page.id : nil,
             contentRevision: page.hasContentRevision ? Int(exactly: page.contentRevision) : nil,
@@ -354,7 +353,7 @@ enum PiLinnMapping {
         )
     }
 
-    private static func mediaItem(_ item: Louie_Linn_V1_MediaItem) -> CiGateway.MediaItem {
+    private static func mediaItem(_ item: Louie_Linn_V1_MediaItem) -> LinnGatewayData.MediaItem {
         let fallbackKind: String = switch item.type {
         case .track: "md.track"
         case .album: "md.album"
@@ -377,11 +376,11 @@ enum PiLinnMapping {
             containedKinds: item.containedClasses,
             childCount: item.hasChildCount ? Int(item.childCount) : nil,
             isFavourite: item.hasIsFavourite ? item.isFavourite : nil,
-            disabledActions: item.canFavourite ? [] : ["favourite"]
+            canFavourite: item.canFavourite
         )
     }
 
-    static func preview(_ item: CiGateway.MediaItem) -> Louie_Linn_V1_MediaItem {
+    static func preview(_ item: LinnGatewayData.MediaItem) -> Louie_Linn_V1_MediaItem {
         var preview = Louie_Linn_V1_MediaItem()
         preview.id = item.id
         preview.type = if item.kind.contains("container") { .container }

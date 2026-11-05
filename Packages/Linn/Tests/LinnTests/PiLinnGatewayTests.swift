@@ -1,4 +1,3 @@
-import LinnCiGateway
 import GRPCCore
 import Testing
 @testable import Linn

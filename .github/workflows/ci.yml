@@ -54,10 +54,6 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Build & test LinnCiGateway
-        working-directory: Packages/LinnCiGateway
-        run: swift test --parallel
-
       - name: Build & test Linn
         working-directory: Packages/Linn
         run: swift test --parallel
