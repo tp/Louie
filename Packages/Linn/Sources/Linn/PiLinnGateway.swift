@@ -312,7 +312,7 @@ enum PiLinnMapping {
     }
 
     private static func mediaItem(_ item: Louie_Linn_V1_MediaItem) -> CiGateway.MediaItem {
-        let kind: String = switch item.type {
+        let fallbackKind: String = switch item.type {
         case .track: "md.track"
         case .album: "md.album"
         case .artist: "md.artist"
@@ -324,13 +324,14 @@ enum PiLinnMapping {
         }
         return .init(
             id: item.id,
-            kind: kind,
+            kind: item.hasLinnClass ? item.linnClass : fallbackKind,
             name: item.hasName ? item.name : nil,
             title: item.hasTitle ? item.title : nil,
             album: item.hasAlbum ? item.album : nil,
             artists: item.artists,
             artworkURL: item.hasArtworkURL ? URL(string: item.artworkURL) : nil,
             duration: item.hasDurationSeconds ? Int(item.durationSeconds) : nil,
+            containedKinds: item.containedClasses,
             childCount: item.hasChildCount ? Int(item.childCount) : nil,
             isFavourite: item.hasIsFavourite ? item.isFavourite : nil,
             disabledActions: item.canFavourite ? [] : ["favourite"]
@@ -347,6 +348,8 @@ enum PiLinnMapping {
             else if item.kind.contains("station") { .station }
             else { .container }
         preview.provider = item.kind.contains("qobuz") ? .qobuz : .other
+        preview.linnClass = item.kind
+        preview.containedClasses = item.containedKinds
         preview.isContainer = item.isContainer
         preview.canFavourite = item.canFavourite
         if let title = item.title { preview.title = title }

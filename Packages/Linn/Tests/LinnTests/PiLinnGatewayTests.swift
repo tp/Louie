@@ -40,12 +40,15 @@ import Testing
     folder.type = .container
     folder.provider = .qobuz
     folder.isContainer = true
+    folder.linnClass = "md.container.qobuz.album"
+    folder.containedClasses = ["md.album.qobuz"]
     var page = Louie_Linn_V1_MediaPage()
     page.children = [folder]
 
     let mapped = PiLinnMapping.mediaPage(page)
     let libraryItem = Linn.LibraryItem(mapped.children[0])
-    #expect(libraryItem.kind.hasPrefix("md.qobuz"))
+    #expect(libraryItem.kind == "md.container.qobuz.album")
+    #expect(libraryItem.containedKinds == ["md.album.qobuz"])
     #expect(libraryItem.isContainer)
     #expect(libraryItem.title == "My Qobuz")
 }

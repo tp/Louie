@@ -1079,6 +1079,19 @@ nonisolated struct Louie_Linn_V1_MediaItem: Sendable {
 
   var provider: Louie_Linn_V1_MediaProvider = .unspecified
 
+  /// Preserve Linn's precise class for library navigation (for example,
+  /// md.container.qobuz.album) rather than reconstructing it from type.
+  var linnClass: String {
+    get {_linnClass ?? String()}
+    set {_linnClass = newValue}
+  }
+  /// Returns true if `linnClass` has been explicitly set.
+  var hasLinnClass: Bool {self._linnClass != nil}
+  /// Clears the value of `linnClass`. Subsequent reads from it will return its default value.
+  mutating func clearLinnClass() {self._linnClass = nil}
+
+  var containedClasses: [String] = []
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1090,32 +1103,39 @@ nonisolated struct Louie_Linn_V1_MediaItem: Sendable {
   fileprivate var _durationSeconds: Int32? = nil
   fileprivate var _childCount: Int32? = nil
   fileprivate var _isFavourite: Bool? = nil
+  fileprivate var _linnClass: String? = nil
 }
 
-nonisolated struct Louie_Linn_V1_SelectMediaRequest: Sendable {
+nonisolated struct Louie_Linn_V1_SelectMediaRequest: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  var mediaID: String = String()
+  var mediaID: String {
+    get {_storage._mediaID}
+    set {_uniqueStorage()._mediaID = newValue}
+  }
 
-  var queue: Louie_Linn_V1_QueuePlacement = .unspecified
+  var queue: Louie_Linn_V1_QueuePlacement {
+    get {_storage._queue}
+    set {_uniqueStorage()._queue = newValue}
+  }
 
   /// Optional UI metadata so the Pi can broadcast the selection immediately.
   var preview: Louie_Linn_V1_MediaItem {
-    get {_preview ?? Louie_Linn_V1_MediaItem()}
-    set {_preview = newValue}
+    get {_storage._preview ?? Louie_Linn_V1_MediaItem()}
+    set {_uniqueStorage()._preview = newValue}
   }
   /// Returns true if `preview` has been explicitly set.
-  var hasPreview: Bool {self._preview != nil}
+  var hasPreview: Bool {_storage._preview != nil}
   /// Clears the value of `preview`. Subsequent reads from it will return its default value.
-  mutating func clearPreview() {self._preview = nil}
+  mutating func clearPreview() {_uniqueStorage()._preview = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
-  fileprivate var _preview: Louie_Linn_V1_MediaItem? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 nonisolated struct Louie_Linn_V1_SetMediaFavouriteRequest: Sendable {
@@ -2076,7 +2096,7 @@ nonisolated extension Louie_Linn_V1_MediaPage: SwiftProtobuf.Message, SwiftProto
 
 nonisolated extension Louie_Linn_V1_MediaItem: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MediaItem"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}type\0\u{1}name\0\u{1}title\0\u{1}album\0\u{1}artists\0\u{3}artwork_url\0\u{3}duration_seconds\0\u{3}child_count\0\u{3}is_favourite\0\u{3}is_container\0\u{3}can_favourite\0\u{1}provider\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}type\0\u{1}name\0\u{1}title\0\u{1}album\0\u{1}artists\0\u{3}artwork_url\0\u{3}duration_seconds\0\u{3}child_count\0\u{3}is_favourite\0\u{3}is_container\0\u{3}can_favourite\0\u{1}provider\0\u{3}linn_class\0\u{3}contained_classes\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2097,6 +2117,8 @@ nonisolated extension Louie_Linn_V1_MediaItem: SwiftProtobuf.Message, SwiftProto
       case 11: try { try decoder.decodeSingularBoolField(value: &self.isContainer) }()
       case 12: try { try decoder.decodeSingularBoolField(value: &self.canFavourite) }()
       case 13: try { try decoder.decodeSingularEnumField(value: &self.provider) }()
+      case 14: try { try decoder.decodeSingularStringField(value: &self._linnClass) }()
+      case 15: try { try decoder.decodeRepeatedStringField(value: &self.containedClasses) }()
       default: break
       }
     }
@@ -2146,6 +2168,12 @@ nonisolated extension Louie_Linn_V1_MediaItem: SwiftProtobuf.Message, SwiftProto
     if self.provider != .unspecified {
       try visitor.visitSingularEnumField(value: self.provider, fieldNumber: 13)
     }
+    try { if let v = self._linnClass {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 14)
+    } }()
+    if !self.containedClasses.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.containedClasses, fieldNumber: 15)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2163,6 +2191,8 @@ nonisolated extension Louie_Linn_V1_MediaItem: SwiftProtobuf.Message, SwiftProto
     if lhs.isContainer != rhs.isContainer {return false}
     if lhs.canFavourite != rhs.canFavourite {return false}
     if lhs.provider != rhs.provider {return false}
+    if lhs._linnClass != rhs._linnClass {return false}
+    if lhs.containedClasses != rhs.containedClasses {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2172,41 +2202,81 @@ nonisolated extension Louie_Linn_V1_SelectMediaRequest: SwiftProtobuf.Message, S
   static let protoMessageName: String = _protobuf_package + ".SelectMediaRequest"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}media_id\0\u{1}queue\0\u{1}preview\0")
 
+  fileprivate class _StorageClass {
+    var _mediaID: String = String()
+    var _queue: Louie_Linn_V1_QueuePlacement = .unspecified
+    var _preview: Louie_Linn_V1_MediaItem? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _mediaID = source._mediaID
+      _queue = source._queue
+      _preview = source._preview
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.mediaID) }()
-      case 2: try { try decoder.decodeSingularEnumField(value: &self.queue) }()
-      case 3: try { try decoder.decodeSingularMessageField(value: &self._preview) }()
-      default: break
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._mediaID) }()
+        case 2: try { try decoder.decodeSingularEnumField(value: &_storage._queue) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._preview) }()
+        default: break
+        }
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.mediaID.isEmpty {
-      try visitor.visitSingularStringField(value: self.mediaID, fieldNumber: 1)
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._mediaID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._mediaID, fieldNumber: 1)
+      }
+      if _storage._queue != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._queue, fieldNumber: 2)
+      }
+      try { if let v = _storage._preview {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
     }
-    if self.queue != .unspecified {
-      try visitor.visitSingularEnumField(value: self.queue, fieldNumber: 2)
-    }
-    try { if let v = self._preview {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Louie_Linn_V1_SelectMediaRequest, rhs: Louie_Linn_V1_SelectMediaRequest) -> Bool {
-    if lhs.mediaID != rhs.mediaID {return false}
-    if lhs.queue != rhs.queue {return false}
-    if lhs._preview != rhs._preview {return false}
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._mediaID != rhs_storage._mediaID {return false}
+        if _storage._queue != rhs_storage._queue {return false}
+        if _storage._preview != rhs_storage._preview {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
