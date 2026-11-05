@@ -677,11 +677,30 @@ func serverPredictionIsReplacedByTheNextServerState() async throws {
     await gateway.send(predicted)
     try await waitUntil { linn.currentSong?.title == "Predicted" }
     #expect(linn.playlist.currentIndex == 1)
+    #expect(linn.songTransitionDirection == .forward)
 
     await gateway.send(nowPlaying(index: 0, titles: ["Actual", "Other"], position: 7, volume: 10))
     try await waitUntil { linn.currentSong?.title == "Actual" }
     #expect(linn.playlist.currentIndex == 0)
     #expect(linn.timeline?.position == 7)
+    #expect(linn.songTransitionDirection == .backward)
+}
+
+@Test
+@MainActor
+func predictedQueueReplaceAnimatesForwardFromAnEarlierIndex() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    await gateway.send(nowPlaying(index: 2, titles: ["Zero", "One", "Old"]))
+    try await waitUntil { linn.currentSong?.title == "Old" }
+
+    var predicted = nowPlaying(index: 0, titles: ["New", "Second"])
+    predicted.pending.queueTotal = true
+    predicted.pending.currentItem = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "New" }
+    #expect(linn.songTransitionDirection == .forward)
 }
 
 @Test

@@ -823,7 +823,11 @@ public final class Linn {
         if let incomingQueueIndex = update.queue?.index {
             incomingCurrentSong?.queueIndex = incomingQueueIndex
         }
-        if !update.pending.queue {
+        if update.pending.queueTotal && update.pending.currentItem {
+            // A new queue starts at its first row even when its index is
+            // numerically lower than the old queue's playing row.
+            songTransitionDirection = .forward
+        } else {
             updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
         }
         currentSong = incomingCurrentSong
