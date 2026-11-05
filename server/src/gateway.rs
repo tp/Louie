@@ -56,6 +56,7 @@ struct Pending {
     coalesce_key: Option<CoalesceKey>,
     search: bool,
     target_index: Option<i32>,
+    queue_epoch: u64,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -67,6 +68,7 @@ struct CoalesceKey {
 struct TaggedRequest {
     tag: String,
     request: GatewayRequest,
+    queue_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -144,7 +146,7 @@ impl Gateway {
                 reply,
             })
             .await
-            .map_err(|_| tonic::Status::unavailable("Linn gateway worker stopped"))?;
+            .map_err(|_| tonic::Status::failed_precondition("Linn gateway worker stopped"))?;
         if is_search {
             // The command deadline starts when the serial search lane sends it,
             // not while an older search is still occupying that lane.
@@ -152,7 +154,7 @@ impl Gateway {
         }
         match tokio::time::timeout(Duration::from_secs(5), result).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(tonic::Status::unavailable(
+            Ok(Err(_)) => Err(tonic::Status::failed_precondition(
                 "Linn gateway connection dropped",
             )),
             Err(_) => Err(tonic::Status::deadline_exceeded(
@@ -171,6 +173,7 @@ async fn run_gateway(
 ) {
     let mut delay = Duration::from_millis(500);
     let mut observed = state.borrow().clone();
+    let mut last_warning: Option<String> = None;
     loop {
         observed.connection_status = ConnectionStatus::Connecting as i32;
         state.send_replace(observed.clone());
@@ -186,10 +189,12 @@ async fn run_gateway(
         let was_connected = state.borrow().connection_status == ConnectionStatus::Connected as i32;
         if was_connected {
             delay = Duration::from_millis(500);
+            last_warning = None;
         }
         let message = result.err().unwrap_or_else(|| "connection closed".into());
-        if was_connected {
+        if last_warning.as_deref() != Some(&message) {
             warn!("Linn gateway disconnected: {message}");
+            last_warning = Some(message.clone());
         } else {
             info!("Linn gateway still unavailable: {message}");
         }
@@ -283,6 +288,7 @@ async fn run_connection(
     let mut search_queue: VecDeque<TaggedRequest> = VecDeque::new();
     let mut shuffle = false;
     let mut next_tag = 0_u64;
+    let mut queue_epoch = 0_u64;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut ping = tokio::time::interval(Duration::from_secs(15));
     ping.tick().await;
@@ -383,6 +389,7 @@ async fn run_connection(
                 }
                 if request.path == "/V2/media/select"
                     && matches!(request.body.get("queue").and_then(Value::as_str), Some("now" | "replace")) {
+                    queue_epoch += 1;
                     let select_key = CoalesceKey { path: "/V2/playlist/select", group: false };
                     if let Some(old) = deferred.remove(&select_key) {
                         if optimism.fail(&old.tag) {
@@ -398,7 +405,9 @@ async fn run_connection(
                     && let Some(key) = key
                     && let Some(index) = request.body.get("index").and_then(Value::as_i64)
                     && let Some(in_flight_tag) = pending.iter().find_map(|(tag, waiter)|
-                        (waiter.coalesce_key == Some(key) && waiter.target_index == i32::try_from(index).ok()).then(|| tag.clone())) {
+                        (waiter.coalesce_key == Some(key)
+                            && waiter.queue_epoch == queue_epoch
+                            && waiter.target_index == i32::try_from(index).ok()).then(|| tag.clone())) {
                     if let Some(old) = deferred.remove(&key) {
                         if optimism.fail(&old.tag) {
                             state.send_replace(optimism.snapshot(observed));
@@ -418,7 +427,7 @@ async fn run_connection(
                         let _ = request.reply.send(Err(tonic::Status::resource_exhausted("search queue is full")));
                         continue;
                     }
-                    search_queue.push_back(TaggedRequest { tag, request });
+                    search_queue.push_back(TaggedRequest { tag, request, queue_epoch });
                     continue;
                 }
                 if let Some(key) = key
@@ -435,14 +444,14 @@ async fn run_connection(
                     if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
                         state.send_replace(optimism.snapshot(observed));
                     }
-                    deferred.insert(key, TaggedRequest { tag, request });
+                    deferred.insert(key, TaggedRequest { tag, request, queue_epoch });
                     continue;
                 }
                 if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
                     state.send_replace(optimism.snapshot(observed));
                 }
                 let search = request.path == "/V2/services/search";
-                let registered = send_request(&mut socket, TaggedRequest { tag: tag.clone(), request }, &session, &mut pending, &mut in_flight, key, search).await?;
+                let registered = send_request(&mut socket, TaggedRequest { tag: tag.clone(), request, queue_epoch }, &session, &mut pending, &mut in_flight, key, search).await?;
                 if !registered && optimism.fail(&tag) {
                     state.send_replace(optimism.snapshot(observed));
                 }
@@ -526,7 +535,11 @@ async fn send_request(
     key: Option<CoalesceKey>,
     search: bool,
 ) -> Result<bool, String> {
-    let TaggedRequest { tag, request } = tagged;
+    let TaggedRequest {
+        tag,
+        request,
+        queue_epoch,
+    } = tagged;
     let mut body = request.body;
     let target_index = if request.path == "/V2/playlist/select" {
         body.get("index")
@@ -561,6 +574,7 @@ async fn send_request(
             coalesce_key: key,
             search,
             target_index,
+            queue_epoch,
         },
     );
     if let Some(started) = request.started {
@@ -568,10 +582,12 @@ async fn send_request(
     }
     if let Err(error) = socket.send(Message::Text(body.to_string().into())).await {
         if let Some(waiter) = pending.remove(&tag) {
-            let _ = waiter.reply.send(Err(tonic::Status::unavailable(format!(
-                "failed to send {}: {error}",
-                request.path
-            ))));
+            let _ = waiter
+                .reply
+                .send(Err(tonic::Status::failed_precondition(format!(
+                    "failed to send {}: {error}",
+                    request.path
+                ))));
         }
         if let Some(key) = key {
             in_flight.remove(&key);
@@ -1127,7 +1143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_media_discards_a_deferred_playlist_selection() {
+    async fn replacing_media_discards_old_select_but_sends_a_new_same_target() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (select_tx, mut selections) = mpsc::channel(3);
@@ -1209,10 +1225,18 @@ mod tests {
                 .is_some_and(|pending| pending.playback)
         })
         .await;
+        let third_gateway = gateway.clone();
+        let third = tokio::spawn(async move {
+            third_gateway
+                .request("/V2/playlist/select", json!({"room":"Linn", "index":1}))
+                .await
+        });
         release_tx.send(()).unwrap();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
         replace.await.unwrap().unwrap();
+        assert_eq!(selections.recv().await, Some(1));
+        third.await.unwrap().unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(100), selections.recv())
                 .await

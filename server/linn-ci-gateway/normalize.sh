@@ -10,8 +10,9 @@ if ! command -v yq >/dev/null 2>&1 || ! yq --version | grep -Eq 'mikefarah/yq.*v
   exit 1
 fi
 
-SPEC_PATH="$(mktemp "${TMPDIR:-/tmp}/linn-openapi.XXXXXX.yaml")"
-trap 'rm -f "$SPEC_PATH"' EXIT
+SPEC_DIR="$(mktemp -d "${TMPDIR:-/tmp}/linn-openapi.XXXXXX")"
+SPEC_PATH="$SPEC_DIR/spec.yaml"
+trap 'rm -rf "$SPEC_DIR"' EXIT
 cp "${ORIGINAL_SPEC_PATH}" "${SPEC_PATH}"
 
 # Keep only the websocket paths the package wraps. The generated HTTP API

@@ -8,11 +8,19 @@ use pb::{ConnectionStatus, linn_client::LinnClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1);
-    let endpoint = args
-        .next()
-        .unwrap_or_else(|| "http://127.0.0.1:50051".into());
-    let probe_ack = args.next().as_deref() == Some("--probe-ack");
+    let mut endpoint = None;
+    let mut probe_ack = false;
+    let mut require_connected = false;
+    for arg in env::args().skip(1) {
+        match arg.as_str() {
+            "--probe-ack" => probe_ack = true,
+            "--require-connected" => require_connected = true,
+            _ if arg.starts_with('-') => return Err(format!("unknown option: {arg}").into()),
+            _ if endpoint.is_none() => endpoint = Some(arg),
+            _ => return Err(format!("unexpected argument: {arg}").into()),
+        }
+    }
+    let endpoint = endpoint.unwrap_or_else(|| "http://127.0.0.1:50051".into());
     let mut client = LinnClient::connect(endpoint).await?;
 
     let snapshot = tokio::time::timeout(Duration::from_secs(5), client.get_state(()))
@@ -24,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Linn room is empty".into());
     }
     if connection != ConnectionStatus::Connected {
-        if probe_ack || env::args().any(|arg| arg == "--require-connected") {
+        if probe_ack || require_connected {
             return Err(format!(
                 "Linn gateway is not connected: {:?}",
                 snapshot.connection_error

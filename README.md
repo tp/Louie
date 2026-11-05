@@ -33,8 +33,7 @@ Generator image locally and commits only the model output; CI checks that it
 is current. The handwritten `websocket` module handles the live gateway's
 string-or-array `artist` deviation. To update from a local gateway, run
 `bash server/linn-ci-gateway/fetch-spec.sh`, then
-`bash server/linn-ci-gateway/normalize.sh` and regenerate both clients. The
-Swift generator uses this same fetch script unless `OPENAPI_USE_LOCAL_SPEC=1`.
+`bash server/linn-ci-gateway/normalize.sh` and regenerate the Rust models.
 
 If we add Buf for linting or Swift generation later, use only local schema
 inputs and `local:` plugins. Do not add `remote:` plugins or BSR module inputs
