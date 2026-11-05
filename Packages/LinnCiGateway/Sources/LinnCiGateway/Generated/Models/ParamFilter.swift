@@ -27,4 +27,3 @@ internal struct ParamFilter: Sendable, Codable, Hashable {
         try container.encodeIfPresent(filter, forKey: .filter)
     }
 }
-

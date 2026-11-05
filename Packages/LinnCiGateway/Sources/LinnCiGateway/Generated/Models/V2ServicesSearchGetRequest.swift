@@ -7,16 +7,24 @@
 
 import Foundation
 
-struct V2ServicesSearchGetRequest: Sendable, Codable, Hashable {
-    var tag: String?
-    var session: String
-    var mediaId: String
-    var searchArg: String
-    var searchType: String
-    var index: Int
-    var count: Int
+internal struct V2ServicesSearchGetRequest: Sendable, Codable, Hashable {
 
-    init(tag: String? = nil, session: String, mediaId: String, searchArg: String, searchType: String, index: Int, count: Int) {
+    /** Opaque string, returned in the response. Varies per message. */
+    internal var tag: String?
+    /** Opaque string, returned in the response.  Fixed for a session. */
+    internal var session: String
+    /** Identifier of the service you wish to search. */
+    internal var mediaId: String
+    /** Search argument used to find results. */
+    internal var searchArg: String?
+    /** Type of search results to be returned. */
+    internal var searchType: String?
+    /** Zero-based offset into the matching items from which to return information. */
+    internal var index: Int
+    /** Number of child items to return. */
+    internal var count: Int
+
+    internal init(tag: String? = nil, session: String, mediaId: String, searchArg: String? = nil, searchType: String? = nil, index: Int, count: Int) {
         self.tag = tag
         self.session = session
         self.mediaId = mediaId
@@ -26,7 +34,7 @@ struct V2ServicesSearchGetRequest: Sendable, Codable, Hashable {
         self.count = count
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case tag
         case session
         case mediaId = "media_id"
@@ -36,13 +44,15 @@ struct V2ServicesSearchGetRequest: Sendable, Codable, Hashable {
         case count
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(tag, forKey: .tag)
         try container.encode(session, forKey: .session)
         try container.encode(mediaId, forKey: .mediaId)
-        try container.encode(searchArg, forKey: .searchArg)
-        try container.encode(searchType, forKey: .searchType)
+        try container.encodeIfPresent(searchArg, forKey: .searchArg)
+        try container.encodeIfPresent(searchType, forKey: .searchType)
         try container.encode(index, forKey: .index)
         try container.encode(count, forKey: .count)
     }

@@ -36,4 +36,3 @@ internal struct V2TopologyStatusResponse: Sendable, Codable, Hashable {
         try container.encodeIfPresent(session, forKey: .session)
     }
 }
-

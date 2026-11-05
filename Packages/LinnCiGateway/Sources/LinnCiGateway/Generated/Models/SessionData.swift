@@ -33,4 +33,3 @@ internal struct SessionData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(filters, forKey: .filters)
     }
 }
-

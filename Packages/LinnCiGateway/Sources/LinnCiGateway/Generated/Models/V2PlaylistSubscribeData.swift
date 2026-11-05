@@ -48,4 +48,3 @@ internal struct V2PlaylistSubscribeData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(children, forKey: .children)
     }
 }
-

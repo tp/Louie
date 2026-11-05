@@ -296,7 +296,7 @@ async fn run_connection(
                     }
                     continue;
                 }
-                let changed = apply_update(observed, &header.request_path, &envelope);
+                let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope));
                 let settled = optimism.reconcile(observed);
                 if changed || settled {
                     state.send_replace(optimism.snapshot(observed));

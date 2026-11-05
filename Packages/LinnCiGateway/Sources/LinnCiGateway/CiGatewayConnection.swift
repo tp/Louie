@@ -255,13 +255,19 @@ actor CiGatewayConnection {
     }
 
     func select(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
+        let requestedQueue: V2MediaSelectPostRequest.Queue = switch queue {
+        case .now: .now
+        case .next: .next
+        case .last: .last
+        case .replace: .replace
+        }
         try await sendCommand(room: room, requestPath: "/V2/media/select") { session, tag in
             V2MediaSelectPostRequest(
                 tag: tag,
                 session: session,
                 room: room,
                 mediaId: mediaID,
-                queue: queue.rawValue
+                queue: requestedQueue
             )
         }
     }
@@ -713,7 +719,12 @@ actor CiGatewayConnection {
             tag: tag,
             socket: socket
         )
-        return try JSONDecoder().decode(Response.self, from: data)
+        let responseData = if requestPath == "/V2/media/browse" || requestPath == "/V2/services/search" {
+            try GatewayResponseNormalization.mediaBrowse(data)
+        } else {
+            data
+        }
+        return try JSONDecoder().decode(Response.self, from: responseData)
     }
 
     private func sendCommandAwaitingAck<Command: Encodable & Sendable>(

@@ -7,45 +7,45 @@
 
 import Foundation
 
-/** Information about an item in the system (e.g. album, track or stream, input). */
-struct ItemMetaData: Sendable, Codable, Hashable {
-    var id: String
-    var _class: String
-    var buffering: Bool?
-    var playing: Bool?
-    var selected: Bool?
-    var name: String?
-    var artUri: String?
-    var disabledActions: [String]?
-    var title: String?
-    var album: String?
-    var artist: [String]?
-    var duration: Int?
-    var containedClasses: [String]?
-    var count: Int?
-    var isFavourite: Bool?
-    var albumId: String?
-    var artistId: String?
+/** Information about an item in the system (e.g. album, track or stream, input) */
+internal struct ItemMetaData: Sendable, Codable, Hashable {
 
-    init(
-        id: String,
-        _class: String,
-        buffering: Bool? = nil,
-        playing: Bool? = nil,
-        selected: Bool? = nil,
-        name: String? = nil,
-        artUri: String? = nil,
-        disabledActions: [String]? = nil,
-        title: String? = nil,
-        album: String? = nil,
-        artist: [String]? = nil,
-        duration: Int? = nil,
-        containedClasses: [String]? = nil,
-        count: Int? = nil,
-        isFavourite: Bool? = nil,
-        albumId: String? = nil,
-        artistId: String? = nil
-    ) {
+    /** The unique identifier for the browsed object.  Can be used to browse children or play the item. */
+    internal var id: String
+    /** A class id that defines the type of item, which in turn defines what operations it supports. */
+    internal var _class: String
+    /** true if the item is being buffered to play.  false if not.  Not present (null) if metadata is not for an item in a room's playlist. */
+    internal var buffering: Bool?
+    /** true if the item is being played.  false if not.  Not present (null) if metadata is not for an item in a room's playlist. */
+    internal var playing: Bool?
+    /** true if the item is selected for play.  false if not.  Not present (null) if metadata is not for an item in a room's playlist. */
+    internal var selected: Bool?
+    /** Title of the item.  What this is will vary according to the item type, but the intention is that this should be the string that best represents the item if it is the only string displayed for it. */
+    internal var name: String?
+    /** URL for associated logo/album art for item. Can be null. */
+    internal var artUri: String?
+    /** List of action ids of actions that are valid for this item's class but which this particular item does not currently support (e.g. can't favourite a curerntly favourited item).  */
+    internal var disabledActions: [String]?
+    /** Artist name */
+    internal var artist: [String]?
+    /** Track title */
+    internal var title: String?
+    /** Album name */
+    internal var album: String?
+    /** Duration of the item in seconds. 0 if unknown */
+    internal var duration: Int?
+    /** Array of class ids indicating the type(s) of the content of this item. */
+    internal var containedClasses: [String]?
+    /** Number of direct children of the container. -1 if unknown */
+    internal var count: Int?
+    /** True if favourited, false if not. The presence of this attribute indicates that the item can be marked as a favourite. */
+    internal var isFavourite: Bool?
+    /** Media id of the album from which this item comes. */
+    internal var albumId: String?
+    /** Media id of the artist that created this item. */
+    internal var artistId: String?
+
+    internal init(id: String, _class: String, buffering: Bool? = nil, playing: Bool? = nil, selected: Bool? = nil, name: String? = nil, artUri: String? = nil, disabledActions: [String]? = nil, artist: [String]? = nil, title: String? = nil, album: String? = nil, duration: Int? = nil, containedClasses: [String]? = nil, count: Int? = nil, isFavourite: Bool? = nil, albumId: String? = nil, artistId: String? = nil) {
         self.id = id
         self._class = _class
         self.buffering = buffering
@@ -54,9 +54,9 @@ struct ItemMetaData: Sendable, Codable, Hashable {
         self.name = name
         self.artUri = artUri
         self.disabledActions = disabledActions
+        self.artist = artist
         self.title = title
         self.album = album
-        self.artist = artist
         self.duration = duration
         self.containedClasses = containedClasses
         self.count = count
@@ -65,7 +65,7 @@ struct ItemMetaData: Sendable, Codable, Hashable {
         self.artistId = artistId
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case id
         case _class = "class"
         case buffering
@@ -74,9 +74,9 @@ struct ItemMetaData: Sendable, Codable, Hashable {
         case name
         case artUri = "art_uri"
         case disabledActions
+        case artist
         case title
         case album
-        case artist
         case duration
         case containedClasses = "contained_classes"
         case count
@@ -85,28 +85,9 @@ struct ItemMetaData: Sendable, Codable, Hashable {
         case artistId = "artist_id"
     }
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
-        _class = try container.decode(String.self, forKey: ._class)
-        buffering = try container.decodeIfPresent(Bool.self, forKey: .buffering)
-        playing = try container.decodeIfPresent(Bool.self, forKey: .playing)
-        selected = try container.decodeIfPresent(Bool.self, forKey: .selected)
-        name = try container.decodeIfPresent(String.self, forKey: .name)
-        artUri = try container.decodeIfPresent(String.self, forKey: .artUri)
-        disabledActions = try container.decodeIfPresent([String].self, forKey: .disabledActions)
-        title = try container.decodeIfPresent(String.self, forKey: .title)
-        album = try container.decodeIfPresent(String.self, forKey: .album)
-        artist = try container.decodeFlexibleStringArrayIfPresent(forKey: .artist)
-        duration = try container.decodeIfPresent(Int.self, forKey: .duration)
-        containedClasses = try container.decodeIfPresent([String].self, forKey: .containedClasses)
-        count = try container.decodeIfPresent(Int.self, forKey: .count)
-        isFavourite = try container.decodeIfPresent(Bool.self, forKey: .isFavourite)
-        albumId = try container.decodeIfPresent(String.self, forKey: .albumId)
-        artistId = try container.decodeIfPresent(String.self, forKey: .artistId)
-    }
+    // Encodable protocol methods
 
-    func encode(to encoder: Encoder) throws {
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(_class, forKey: ._class)
@@ -116,9 +97,9 @@ struct ItemMetaData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(artUri, forKey: .artUri)
         try container.encodeIfPresent(disabledActions, forKey: .disabledActions)
+        try container.encodeIfPresent(artist, forKey: .artist)
         try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(album, forKey: .album)
-        try container.encodeIfPresent(artist, forKey: .artist)
         try container.encodeIfPresent(duration, forKey: .duration)
         try container.encodeIfPresent(containedClasses, forKey: .containedClasses)
         try container.encodeIfPresent(count, forKey: .count)
@@ -128,14 +109,5 @@ struct ItemMetaData: Sendable, Codable, Hashable {
     }
 }
 
-private extension KeyedDecodingContainer {
-    func decodeFlexibleStringArrayIfPresent(forKey key: Key) throws -> [String]? {
-        if let values = try? decodeIfPresent([String].self, forKey: key) {
-            return values
-        }
-        if let value = try decodeIfPresent(String.self, forKey: key) {
-            return [value]
-        }
-        return nil
-    }
-}
+
+extension ItemMetaData: Identifiable {}

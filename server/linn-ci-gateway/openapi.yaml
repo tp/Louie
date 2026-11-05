@@ -467,11 +467,7 @@ paths:
           required: true
           in: body
           schema:
-            allOf:
-              - $ref: '#/definitions/ParamTag'
-              - $ref: '#/definitions/ParamSession'
-              - $ref: '#/definitions/ParamRoom'
-              - $ref: '#/definitions/ParamUpdate'
+            $ref: '#/definitions/V2ServicesStatusGetRequest'
       tags:
         - API V2 - Services
       responses:
@@ -1306,6 +1302,20 @@ definitions:
         description: Duration of the item in seconds. 0 if unknown
     required:
       - class
+  V2ServicesStatusGetRequest:
+    type: object
+    required:
+      - session
+      - room
+    properties:
+      tag:
+        type: string
+      session:
+        type: string
+      room:
+        type: string
+      update:
+        type: integer
 responses:
   default:
     description: |

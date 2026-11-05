@@ -37,4 +37,3 @@ internal struct V2TopologyStatusGetRequest: Sendable, Codable, Hashable {
         try container.encodeIfPresent(update, forKey: .update)
     }
 }
-

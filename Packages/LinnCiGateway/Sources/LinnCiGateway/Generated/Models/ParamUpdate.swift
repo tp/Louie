@@ -27,4 +27,3 @@ internal struct ParamUpdate: Sendable, Codable, Hashable {
         try container.encodeIfPresent(update, forKey: .update)
     }
 }
-

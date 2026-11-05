@@ -47,4 +47,3 @@ internal struct SessionCreatePostRequest: Sendable, Codable, Hashable {
         try container.encodeIfPresent(locale, forKey: .locale)
     }
 }
-

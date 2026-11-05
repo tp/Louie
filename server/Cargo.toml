@@ -3,6 +3,11 @@ name = "louie-server"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["linn-ci-gateway"]
+default-members = [".", "linn-ci-gateway"]
+resolver = "3"
+
 [dependencies]
 futures-util = "0.3"
 linn-ci-gateway = { path = "linn-ci-gateway" }

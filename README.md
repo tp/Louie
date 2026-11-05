@@ -27,7 +27,7 @@ the schema and code-generation inputs are not sent to a hosted generator.
 
 The Linn CI Gateway WebSocket payload models live in the separate
 `server/linn-ci-gateway` crate. They are generated from the normalized local
-`Packages/LinnCiGateway/Sources/LinnCiGateway/openapi.yaml` by running
+`server/linn-ci-gateway/openapi.yaml` by running
 `bash server/linn-ci-gateway/generate.sh`. The script runs a pinned OpenAPI
 Generator image locally and commits only the model output; CI checks that it
 is current. The handwritten `websocket` module handles the live gateway's

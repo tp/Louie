@@ -10,7 +10,7 @@ use crate::models;
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Envelope {
-    pub request_path: String,
+    pub request_path: Option<String>,
     pub tag: Option<String>,
     pub error_code: Option<i32>,
     pub message: Option<String>,
@@ -116,5 +116,12 @@ mod tests {
         assert_eq!(item.artist, Some(vec!["Nala Sinephro".into()]));
         assert_eq!(item.is_favourite, Some(true));
         assert_eq!(item.disabled_actions, Some(vec!["queue".into()]));
+    }
+
+    #[test]
+    fn tagged_ack_does_not_require_request_path() {
+        let envelope: Envelope = decode(&json!({"tag": "control-1"})).unwrap();
+        assert_eq!(envelope.tag.as_deref(), Some("control-1"));
+        assert_eq!(envelope.request_path, None);
     }
 }

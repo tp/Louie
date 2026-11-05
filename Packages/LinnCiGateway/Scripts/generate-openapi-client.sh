@@ -3,13 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd -- "${PACKAGE_DIR}/../.." && pwd)"
 
 GENERATOR_IMAGE_TAG="${OPENAPI_GENERATOR_IMAGE_TAG:-v7.22.0}"
 GATEWAY_BASE_URL="${GATEWAY_BASE_URL:-http://192.168.7.218:4100}"
 SPEC_URL="${OPENAPI_SPEC_URL:-${GATEWAY_BASE_URL}/api/swagger.yaml}"
 
-ORIGINAL_SPEC_PATH="${PACKAGE_DIR}/Sources/LinnCiGateway/openapi.original.yaml"
-SPEC_PATH="${PACKAGE_DIR}/Sources/LinnCiGateway/openapi.yaml"
+ORIGINAL_SPEC_PATH="${REPO_DIR}/server/linn-ci-gateway/openapi.original.yaml"
+SPEC_PATH="${REPO_DIR}/server/linn-ci-gateway/openapi.yaml"
 GENERATED_DIR="${PACKAGE_DIR}/Sources/LinnCiGateway/Generated"
 WORK_DIR="${PACKAGE_DIR}/.build/openapi-generator"
 OUTPUT_NAME="output-$$"
@@ -156,14 +157,31 @@ yq -i '.definitions = (.definitions | with_entries(select(
     .key == "ItemMetaData"
 )))' "${SPEC_PATH}"
 
+# The upstream allOf request for services/status is omitted by the Swift
+# generator. Name its actual wire shape so both client generators emit it.
+yq -i '.definitions.V2ServicesStatusGetRequest = {
+    "type": "object",
+    "required": ["session", "room"],
+    "properties": {
+        "tag": {"type": "string"},
+        "session": {"type": "string"},
+        "room": {"type": "string"},
+        "update": {"type": "integer"}
+    }
+} |
+.paths."/V2/services/status".get.parameters[0].schema = {
+    "$ref": "#/definitions/V2ServicesStatusGetRequest"
+}' "${SPEC_PATH}"
+
 rm -rf "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
 generate_with_docker() {
     docker run --rm \
         --volume "${PACKAGE_DIR}:/local" \
+        --volume "${REPO_DIR}/server/linn-ci-gateway:/spec:ro" \
         "openapitools/openapi-generator-cli:${GENERATOR_IMAGE_TAG}" generate \
-        --input-spec /local/Sources/LinnCiGateway/openapi.yaml \
+        --input-spec /spec/openapi.yaml \
         --generator-name swift6 \
         --output "/local/.build/openapi-generator/${OUTPUT_NAME}" \
         --global-property "${GENERATOR_GLOBAL_PROPERTIES}" \
@@ -183,6 +201,7 @@ generate_with_docker
 rm -rf "${GENERATED_DIR}"
 mkdir -p "${GENERATED_DIR}"
 cp -R "${OUTPUT_DIR}/Sources/LinnCiGateway/Generated/." "${GENERATED_DIR}/"
+find "${GENERATED_DIR}" -name '*.swift' -type f -print0 | xargs -0 perl -0777 -i -pe 's/\n+\z/\n/'
 rm -rf "${OUTPUT_DIR}"
 
 echo "Stored original OpenAPI document at ${ORIGINAL_SPEC_PATH}"

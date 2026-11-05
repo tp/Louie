@@ -42,4 +42,3 @@ internal struct V2PlaylistSelectPostRequest: Sendable, Codable, Hashable {
         try container.encode(index, forKey: .index)
     }
 }
-

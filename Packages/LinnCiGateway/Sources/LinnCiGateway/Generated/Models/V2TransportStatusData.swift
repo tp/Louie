@@ -38,4 +38,3 @@ internal struct V2TransportStatusData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(_repeat, forKey: ._repeat)
     }
 }
-

@@ -52,4 +52,3 @@ internal struct V2PlaylistSubscribeGetRequest: Sendable, Codable, Hashable {
         try container.encode(concise, forKey: .concise)
     }
 }
-

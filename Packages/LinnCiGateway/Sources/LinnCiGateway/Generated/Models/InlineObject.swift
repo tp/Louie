@@ -32,4 +32,3 @@ internal struct InlineObject: Sendable, Codable, Hashable {
         try container.encodeIfPresent(tag, forKey: .tag)
     }
 }
-

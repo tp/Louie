@@ -53,4 +53,3 @@ internal struct V2TopologyStatusDataRoomsInner: Sendable, Codable, Hashable {
         try container.encodeIfPresent(listeners, forKey: .listeners)
     }
 }
-

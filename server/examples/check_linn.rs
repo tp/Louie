@@ -8,9 +8,11 @@ use pb::{ConnectionStatus, linn_client::LinnClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = env::args()
-        .nth(1)
+    let mut args = env::args().skip(1);
+    let endpoint = args
+        .next()
         .unwrap_or_else(|| "http://127.0.0.1:50051".into());
+    let probe_ack = args.next().as_deref() == Some("--probe-ack");
     let mut client = LinnClient::connect(endpoint).await?;
 
     let snapshot = tokio::time::timeout(Duration::from_secs(5), client.get_state(()))
@@ -50,5 +52,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("WatchState room differs from GetState room".into());
     }
     println!("WatchState delivered initial snapshot");
+    if probe_ack {
+        let volume = snapshot
+            .now_playing
+            .as_ref()
+            .and_then(|state| state.room_volume.as_ref())
+            .and_then(|volume| volume.volume)
+            .ok_or("cannot probe a command without an observed room volume")?;
+        if volume > 70 {
+            return Err(
+                "observed volume exceeds 70; refusing to change it for the ack probe".into(),
+            );
+        }
+        tokio::time::timeout(
+            Duration::from_secs(6),
+            client.set_volume(pb::SetVolumeRequest {
+                volume,
+                scope: pb::VolumeScope::Room as i32,
+            }),
+        )
+        .await??;
+        println!("SetVolume acknowledged at unchanged volume {volume}");
+    }
     Ok(())
 }

@@ -60,6 +60,8 @@ pub mod _v2_services_search_get_request;
 pub use self::_v2_services_search_get_request::V2ServicesSearchGetRequest;
 pub mod v2_services_status_data;
 pub use self::v2_services_status_data::V2ServicesStatusData;
+pub mod v2_services_status_get_request;
+pub use self::v2_services_status_get_request::V2ServicesStatusGetRequest;
 pub mod v2_services_status_item;
 pub use self::v2_services_status_item::V2ServicesStatusItem;
 pub mod v2_services_status_response;

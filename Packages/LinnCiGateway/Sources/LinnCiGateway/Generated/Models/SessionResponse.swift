@@ -36,4 +36,3 @@ internal struct SessionResponse: Sendable, Codable, Hashable {
         try container.encodeIfPresent(data, forKey: .data)
     }
 }
-
