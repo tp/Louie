@@ -17,14 +17,14 @@ struct LinnAPIHelpView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("The Louie server runs on your Raspberry Pi and keeps the single connection to Linn's CI Gateway. Your Apple devices connect to the Pi on the local network.")
+                    Text("Louie Home Server keeps the connection to Linn's CI Gateway. Your devices connect to the home server on the local network.")
                         .foregroundStyle(.secondary)
 
                     step(1, "Open Manage Systems", "Sign in with your Linn account and select the DS/DSM that should run the gateway.")
                     step(2, "Turn on the CI Gateway", "On the device's Advanced tab, switch CI Gateway on. If the option is missing, update the firmware first (Davaar 100 or later).")
                     step(3, "Reboot the device", "Power-cycle the DSM when prompted. The gateway comes up about 3 minutes after the restart — don't worry if it's not reachable right away.")
-                    step(4, "Check the Pi", "SSH to louie-pi.local and run systemctl --user status louie.service. The app connects to the Pi on port 50051.")
-                    step(5, "Connect Louie", "Use louie-pi.local or the Pi's reserved IP address, and allow local network access when asked.")
+                    step(4, "Check Louie Home Server", "SSH to your home server and run systemctl --user status louie.service. Louie connects on port 50051.")
+                    step(5, "Connect Louie", "Use your home server's hostname or reserved IP address, and allow local network access when asked.")
 
                     VStack(alignment: .leading, spacing: 10) {
                         Link(destination: manageSystemsURL) {
@@ -36,7 +36,7 @@ struct LinnAPIHelpView: View {
                     }
                     .font(.callout)
 
-                    Text("The Linn CI Gateway still needs to be enabled on the DSM for the Pi to observe playback.")
+                    Text("The Linn CI Gateway must be enabled on the DSM for Louie Home Server to observe playback.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -44,7 +44,7 @@ struct LinnAPIHelpView: View {
                 .frame(maxWidth: 560, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .navigationTitle("Connect to Louie Pi")
+            .navigationTitle("Connect to Louie Home Server")
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif

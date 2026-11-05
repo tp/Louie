@@ -411,7 +411,7 @@ public final class Linn {
             expiresAt: Date().addingTimeInterval(2.5)
         )
         performControl { ciGateway, room in
-            try await ciGateway.setVolume(clampedVolume, room: room)
+            try await ciGateway.setVolume(clampedVolume, room: room, group: false)
         }
     }
 
@@ -422,7 +422,7 @@ public final class Linn {
             expiresAt: Date().addingTimeInterval(2.5)
         )
         performControl { ciGateway, room in
-            try await ciGateway.setMuted(isMuted, room: room)
+            try await ciGateway.setMuted(isMuted, room: room, group: false)
         }
     }
 

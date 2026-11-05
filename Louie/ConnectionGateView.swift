@@ -231,10 +231,10 @@ struct ConnectionGateView: View {
             WordmarkViewport(width: 180)
                 .frame(width: 152, alignment: .center)
 
-            Text("Connect to Louie Pi")
+            Text("Connect to Louie Home Server")
                 .font(.title2.weight(.semibold))
 
-            Text("Louie connects to your Raspberry Pi, which keeps one connection to the Linn system.")
+            Text("Louie Home Server keeps your Linn system in sync across your devices.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -244,7 +244,7 @@ struct ConnectionGateView: View {
     private var addressCard: some View {
         VStack(spacing: 16) {
             VStack(spacing: 0) {
-                TextField("Address, e.g. louie-pi.local", text: $settings.host)
+                TextField("Hostname or IP address", text: $settings.host)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
                 #if os(iOS)
@@ -267,7 +267,7 @@ struct ConnectionGateView: View {
             }
             .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 12))
 
-            Text("The hostname or reserved IP address of your Raspberry Pi. Stored only on this device.")
+            Text("The hostname or reserved IP address of your Louie Home Server. Stored only on this device.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -296,7 +296,7 @@ struct ConnectionGateView: View {
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
 
-                Text("If asked about local network access, allow it. Check that louie.service is running on the Pi and the address is right.")
+                Text("If asked about local network access, allow it. Check that louie.service is running on your home server and the address is right.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -307,7 +307,7 @@ struct ConnectionGateView: View {
                 Text("Still connecting to \(displayAddress)…")
                     .font(.headline)
 
-                Text("If asked about local network access, allow it. Louie retries while the Pi starts.")
+                Text("If asked about local network access, allow it. Louie retries while the home server starts.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -340,7 +340,7 @@ struct ConnectionGateView: View {
         Button {
             isShowingHelp = true
         } label: {
-            Label("How do I connect the Pi?", systemImage: "questionmark.circle")
+            Label("How do I connect Louie Home Server?", systemImage: "questionmark.circle")
                 .font(.footnote)
         }
         .buttonStyle(.plain)
@@ -349,7 +349,7 @@ struct ConnectionGateView: View {
 
     private var displayAddress: String {
         let trimmedHost = settings.host.trimmingCharacters(in: .whitespaces)
-        return trimmedHost.isEmpty ? "the gateway" : trimmedHost
+        return trimmedHost.isEmpty ? "the home server" : trimmedHost
     }
 
     private var failureMessage: String? {

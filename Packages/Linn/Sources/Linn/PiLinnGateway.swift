@@ -94,14 +94,22 @@ actor PiLinnGateway: LinnGateway {
         var request = Louie_Linn_V1_SetVolumeRequest()
         request.volume = Int32(clamping: volume)
         request.scope = group ? .group : .room
-        _ = try await service().setVolume(request)
+        do {
+            _ = try await service().setVolume(request)
+        } catch let error as RPCError where error.code == .cancelled {
+            throw CancellationError()
+        }
     }
 
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws {
         var request = Louie_Linn_V1_SetMutedRequest()
         request.isMuted = isMuted
         request.scope = group ? .group : .room
-        _ = try await service().setMuted(request)
+        do {
+            _ = try await service().setMuted(request)
+        } catch let error as RPCError where error.code == .cancelled {
+            throw CancellationError()
+        }
     }
 
     func mediaServices(room: String) async throws -> [CiGateway.MediaService] {
@@ -168,8 +176,8 @@ private enum PiLinnError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidServerURL: "Invalid Louie Pi address"
-        case let .gatewayDisconnected(message): message ?? "The Pi is reconnecting to Linn"
+        case .invalidServerURL: "Invalid Louie Home Server address"
+        case let .gatewayDisconnected(message): message ?? "Louie Home Server is reconnecting to Linn"
         }
     }
 }

@@ -26,7 +26,7 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Louie connects to its Raspberry Pi server on your local network.</string>
+	<string>Louie connects to Louie Home Server on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Louie listens to your voice commands while you hold the push-to-talk button.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

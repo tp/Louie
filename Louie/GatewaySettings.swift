@@ -2,7 +2,7 @@
 //  GatewaySettings.swift
 //  Louie
 //
-//  The Raspberry Pi server's local address. Kept separate from the former
+//  The Louie Home Server's local address. Kept separate from the former
 //  direct Linn CI Gateway setting so old DSM addresses are not reused.
 //
 
@@ -13,8 +13,10 @@ import Observation
 @MainActor
 @Observable
 final class GatewaySettings {
-    private static let hostKey = "pi.host"
-    private static let portKey = "pi.port"
+    private static let hostKey = "homeServer.host"
+    private static let portKey = "homeServer.port"
+    private static let legacyHostKey = "pi.host"
+    private static let legacyPortKey = "pi.port"
 
     var host: String {
         didSet {
@@ -31,10 +33,14 @@ final class GatewaySettings {
     init() {
         let fallback = try? Linn.Configuration.local()
         host = UserDefaults.standard.string(forKey: Self.hostKey)
+            ?? UserDefaults.standard.string(forKey: Self.legacyHostKey)
             ?? fallback?.serverURL.host()
             ?? "louie-pi.local"
         let storedPort = UserDefaults.standard.integer(forKey: Self.portKey)
-        port = storedPort == 0 ? fallback?.serverURL.port ?? 50051 : storedPort
+        let legacyPort = UserDefaults.standard.integer(forKey: Self.legacyPortKey)
+        port = storedPort != 0 ? storedPort : legacyPort != 0 ? legacyPort : fallback?.serverURL.port ?? 50051
+        UserDefaults.standard.set(host, forKey: Self.hostKey)
+        UserDefaults.standard.set(port, forKey: Self.portKey)
     }
 
     /// The stored address wins over the developer `LOUIE_SERVER_URL` fallback.
