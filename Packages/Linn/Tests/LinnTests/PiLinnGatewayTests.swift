@@ -1,3 +1,4 @@
+import Foundation
 import GRPCCore
 import Testing
 @testable import Linn
@@ -18,6 +19,16 @@ import Testing
     let rejected = PiLinnRPCError(code: .failedPrecondition, message: "Linn is in standby")
     #expect(rejected.code == .failedPrecondition)
     #expect(rejected.errorDescription == linnDisconnected.errorDescription)
+
+    let withReason = PiLinnRPCError(RPCError(
+        code: .failedPrecondition,
+        message: "device is offline",
+        metadata: ["louie-error-reason": "linn-disconnected"]
+    ))
+    #expect(withReason.reason == .linnDisconnected)
+    #expect(withReason.errorDescription == "Louie Home Server can't reach Linn.")
+    #expect(PiLinnRPCError(code: .failedPrecondition, message: "", reason: .sourceNotSeekable).errorDescription == "This source doesn't support seeking.")
+    #expect(PiLinnRPCError(code: .failedPrecondition, message: "", reason: .linnRejected).errorDescription == "Linn rejected the request.")
 }
 
 @Test func transientStreamCodesRetryAndConfigurationCodesStop() {
@@ -29,6 +40,54 @@ import Testing
     for code in terminalCodes {
         #expect(PiLinnGateway.isTerminalStreamError(code))
     }
+}
+
+private actor ScriptedWatch {
+    private var attempts = 0
+
+    func run(_ receive: @escaping @Sendable (Louie_Linn_V1_StateSnapshot) async -> Void) async throws {
+        attempts += 1
+        if attempts > 3 {
+            throw RPCError(code: .unimplemented, message: "incompatible server")
+        }
+        var snapshot = Louie_Linn_V1_StateSnapshot()
+        snapshot.room = "Linn"
+        snapshot.connectionStatus = .connected
+        await receive(snapshot)
+        throw RPCError(code: .unavailable, message: "stream dropped")
+    }
+}
+
+private actor RetryDelays {
+    private var values: [Int] = []
+
+    func record(_ seconds: Int) { values.append(seconds) }
+    func recorded() -> [Int] { values }
+}
+
+@Test func watchRetriesAfterSnapshotsAndReportsEveryDrop() async {
+    let gateway = PiLinnGateway(serverURL: URL(string: "http://louie-pi.local:50051")!)
+    let scripted = ScriptedWatch()
+    let delays = RetryDelays()
+    let updates = await gateway.updates(
+        room: "Linn",
+        watch: { receive in try await scripted.run(receive) },
+        sleep: { seconds in await delays.record(seconds) }
+    )
+    var statuses: [LinnGatewayData.NowPlaying.ConnectionStatus] = []
+    var terminalCode: RPCError.Code?
+    do {
+        for try await update in updates {
+            statuses.append(update.connectionStatus)
+        }
+    } catch let error as PiLinnRPCError {
+        terminalCode = error.code
+    } catch {
+        Issue.record("Unexpected stream error: \(error)")
+    }
+    #expect(statuses == [.connected, .serverUnreachable, .connected, .serverUnreachable, .connected, .serverUnreachable])
+    #expect(await delays.recorded() == [1, 1, 1])
+    #expect(terminalCode == .unimplemented)
 }
 
 @Test func piSnapshotRetainsPlaybackQueueAndVolume() {

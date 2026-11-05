@@ -14,6 +14,8 @@ private actor WatchAttempt {
 actor PiLinnGateway: LinnGateway {
     private typealias Transport = HTTP2ClientTransport.TransportServices
     private typealias Client = Louie_Linn_V1_Linn.Client<Transport>
+    typealias Watch = @Sendable (@escaping @Sendable (Louie_Linn_V1_StateSnapshot) async -> Void) async throws -> Void
+    typealias Sleep = @Sendable (Int) async throws -> Void
     private static let commandOptions: CallOptions = {
         var options = CallOptions.defaults
         options.timeout = .seconds(8)
@@ -69,27 +71,38 @@ actor PiLinnGateway: LinnGateway {
 
     func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
         // The server currently owns one Linn room and controls its update rate.
+        updates(room: room, watch: { [self] receive in
+            let client = try await service()
+            _ = try await client.watchState(Google_Protobuf_Empty()) { response in
+                for try await snapshot in response.messages {
+                    guard !Task.isCancelled else { break }
+                    await receive(snapshot)
+                }
+            }
+        }, sleep: { seconds in
+            try await Task.sleep(for: .seconds(seconds))
+        })
+    }
+
+    func updates(room: String?, watch: @escaping Watch, sleep: @escaping Sleep) -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var retrySeconds = 1
                 while !Task.isCancelled {
                     let attempt = WatchAttempt()
                     do {
-                        let client = try service()
-                        _ = try await client.watchState(Google_Protobuf_Empty()) { response in
-                            for try await snapshot in response.messages {
-                                guard !Task.isCancelled else { break }
-                                await attempt.markSnapshotReceived()
-                                switch snapshot.connectionStatus {
-                                case .connected:
-                                    continuation.yield(PiLinnMapping.nowPlaying(snapshot))
-                                case .connecting, .disconnected, .unspecified:
-                                    // Linn can drop while the home server stays available.
-                                    // Keep the stream alive for its next connected snapshot.
-                                    continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
-                                default:
-                                    continue
-                                }
+                        try await watch { snapshot in
+                            guard !Task.isCancelled else { return }
+                            await attempt.markSnapshotReceived()
+                            switch snapshot.connectionStatus {
+                            case .connected:
+                                continuation.yield(PiLinnMapping.nowPlaying(snapshot))
+                            case .connecting, .disconnected, .unspecified:
+                                // Linn can drop while the home server stays available.
+                                // Keep the stream alive for its next connected snapshot.
+                                continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
+                            default:
+                                break
                             }
                         }
                         guard !Task.isCancelled else { break }
@@ -104,7 +117,7 @@ actor PiLinnGateway: LinnGateway {
                     } catch let error as RPCError {
                         guard !Task.isCancelled else { break }
                         if Self.isTerminalStreamError(error.code) {
-                            continuation.finish(throwing: PiLinnRPCError(code: error.code, message: error.message))
+                            continuation.finish(throwing: PiLinnRPCError(error))
                             return
                         }
                         var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
@@ -120,7 +133,7 @@ actor PiLinnGateway: LinnGateway {
                     }
                     if await attempt.hasReceivedSnapshot() { retrySeconds = 1 }
                     do {
-                        try await Task.sleep(for: .seconds(retrySeconds))
+                        try await sleep(retrySeconds)
                     } catch {
                         break
                     }
@@ -232,7 +245,7 @@ actor PiLinnGateway: LinnGateway {
             if error.code == .cancelled && (Task.isCancelled || error.message.contains("superseded")) {
                 throw CancellationError()
             }
-            throw PiLinnRPCError(code: error.code, message: error.message)
+            throw PiLinnRPCError(error)
         }
     }
 }
@@ -249,14 +262,43 @@ private enum PiLinnError: Error, LocalizedError {
 
 /// Keep the gRPC status available to callers while presenting stable, useful copy.
 struct PiLinnRPCError: Error, LocalizedError {
+    enum Reason: String {
+        case linnDisconnected = "linn-disconnected"
+        case linnRejected = "linn-rejected"
+        case sourceNotSeekable = "source-not-seekable"
+        case gatewayUnavailable = "gateway-unavailable"
+    }
+
     let code: RPCError.Code
     let message: String
+    let reason: Reason?
+
+    init(code: RPCError.Code, message: String, reason: Reason? = nil) {
+        self.code = code
+        self.message = message
+        self.reason = reason
+    }
+
+    init(_ error: RPCError) {
+        var reasons = error.metadata[stringValues: "louie-error-reason"].makeIterator()
+        self.init(
+            code: error.code,
+            message: error.message,
+            reason: reasons.next().flatMap(Reason.init(rawValue:))
+        )
+    }
 
     var errorDescription: String? {
         switch code {
         case .unavailable: "Can't reach Louie Home Server."
         case .deadlineExceeded: "The Linn request timed out."
-        case .failedPrecondition: "Linn can't perform this action right now."
+        case .failedPrecondition:
+            switch reason {
+            case .linnDisconnected, .gatewayUnavailable: "Louie Home Server can't reach Linn."
+            case .sourceNotSeekable: "This source doesn't support seeking."
+            case .linnRejected: "Linn rejected the request."
+            case nil: "Linn can't perform this action right now."
+            }
         case .invalidArgument: "This request isn't valid."
         case .unauthenticated, .permissionDenied: "Louie Home Server rejected access."
         case .unimplemented: "Louie Home Server needs an update."
