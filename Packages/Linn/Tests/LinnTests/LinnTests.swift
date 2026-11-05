@@ -45,112 +45,6 @@ func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
 
 @Test
 @MainActor
-func nextUsesForwardDirectionAndSuppressesStaleNowPlayingFields() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "One"
-    }
-
-    linn.next()
-
-    #expect(linn.songTransitionDirection == .forward)
-    #expect(linn.currentSong?.title == "Two")
-    #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-
-    #expect(linn.currentSong?.title == "Two")
-    #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 2, titles: titles, position: 9, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-
-    #expect(linn.currentSong?.title == "Two")
-    #expect(linn.timeline?.position == 9)
-    #expect(await gateway.selectedPlaylistIndexes() == [2])
-    #expect(await gateway.nextCallCount() == 0)
-}
-
-@Test
-@MainActor
-func previousUsesBackwardDirectionAndSuppressesStaleNowPlayingFields() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "One"
-    }
-
-    linn.previous()
-
-    #expect(linn.songTransitionDirection == .backward)
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 0, titles: titles, position: 7, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline?.position == 7)
-    #expect(await gateway.selectedPlaylistIndexes() == [0])
-    #expect(await gateway.previousCallCount() == 0)
-}
-
-@Test
-@MainActor
-func previousCanUseCurrentSongCachedFromEarlierUpdates() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles, playlistIndexes: [1, 2]))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.next()
-    #expect(linn.currentSong?.title == "One")
-
-    await gateway.send(nowPlaying(index: 1, titles: titles, playlistIndexes: [2]))
-    try await waitUntil {
-        linn.timeline?.position == 1
-    }
-
-    #expect(linn.playlist.songs.map(\.title) == ["Zero", "One", "Two"])
-    #expect(linn.playlist.currentIndex == 1)
-
-    linn.previous()
-
-    #expect(linn.songTransitionDirection == .backward)
-    #expect(linn.currentSong?.title == "Zero")
-}
-
-@Test
-@MainActor
 func streamQueueIndexMovementUpdatesSongTransitionDirection() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
@@ -232,97 +126,6 @@ func playlistTracksDeviceCurrentIndexAndKeepsPreviousItems() async throws {
     #expect(linn.previousSongs.map(\.title) == ["One", "Zero"])
     #expect(linn.upcomingSongs.map(\.title) == ["Three"])
     #expect(linn.remainingQueueCount == 1)
-}
-
-@Test
-@MainActor
-func rapidPlaylistSelectionsSendOnlyFirstAndLatestPendingTarget() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    await gateway.suspendSelections()
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.next()
-    linn.next()
-    linn.next()
-
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1]
-    }
-
-    await gateway.send(nowPlaying(index: 1, titles: titles))
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1, 3]
-    }
-
-    await gateway.resumeSelections()
-}
-
-@Test
-@MainActor
-func rapidQueueItemSelectionsShowLatestPendingTarget() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.playlist.songs.count == 4
-    }
-
-    let one = try #require(linn.playlist.songs.first { $0.title == "One" })
-    let three = try #require(linn.playlist.songs.first { $0.title == "Three" })
-
-    linn.play(one)
-    linn.play(three)
-
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.pendingQueueIndex == 3)
-    #expect(linn.remainingQueueCount == 0)
-
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1]
-    }
-
-    await gateway.send(nowPlaying(index: 1, titles: titles))
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1, 3]
-    }
-
-    #expect(linn.pendingQueueIndex == 3)
-
-    await gateway.send(nowPlaying(index: 3, titles: titles))
-    try await waitUntil {
-        linn.pendingQueueIndex == nil
-    }
-
-    #expect(linn.currentSong?.title == "Three")
-}
-
-@Test
-@MainActor
-func remainingQueueCountTracksOptimisticSkipPosition() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.remainingQueueCount == 3
-    }
-
-    linn.next()
-
-    #expect(linn.playlist.currentIndex == 1)
-    #expect(linn.remainingQueueCount == 2)
 }
 
 @Test
@@ -841,128 +644,6 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
 
 @Test
 @MainActor
-func startingALibraryTrackShowsItUntilTheDevicePlaysIt() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    let artwork = URL(string: "https://example.com/lunch.jpg")
-    let track = Linn.LibraryItem(
-        id: "track-lunch",
-        kind: "md.track.qobuz",
-        title: "Lunch",
-        album: "HIT ME HARD AND SOFT",
-        artists: ["Billie Eilish"],
-        artworkURL: artwork
-    )
-    linn.play(track, placement: .replace)
-
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.currentSong?.artist == "Billie Eilish")
-    #expect(linn.currentSong?.artworkURL == artwork)
-    #expect(linn.songTransitionDirection == .forward)
-    #expect(linn.timeline == nil)
-
-    // Before acting on the command the device keeps reporting the old song.
-    await gateway.send(nowPlaying(index: 0, titles: titles, position: 5, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.timeline == nil)
-
-    // Then it loads the new queue and reports no song at all.
-    var loading = nowPlaying(index: 0, titles: ["Lunch"], volume: 12)
-    loading.currentItem = nil
-    loading.playback = LinnGatewayData.NowPlaying.Playback(transportState: .buffering)
-    loading.playlist?.contentRevision = 2
-    await gateway.send(loading)
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.playState == .buffering)
-
-    var playing = nowPlaying(index: 0, titles: ["Lunch"], position: 1, volume: 13)
-    playing.playlist?.contentRevision = 2
-    await gateway.send(playing)
-    try await waitUntil {
-        linn.volume == 13
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.currentSong?.artist == "Artist 0")
-    #expect(linn.timeline?.position == 1)
-    #expect(await gateway.selectedMediaItems() == [
-        TestGateway.SelectedMediaItem(mediaID: "track-lunch", room: "Linn", queue: .replace),
-    ])
-}
-
-@Test
-@MainActor
-func startingABrowsedAlbumShowsItsFirstTrack() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let albumArtwork = URL(string: "https://example.com/album.jpg")
-    await gateway.seedMediaPage(
-        LinnGatewayData.MediaPage(
-            id: "album-x",
-            index: 0,
-            count: 2,
-            total: 2,
-            children: [
-                LinnGatewayData.MediaItem(id: "track-1", kind: "md.track.qobuz", name: "Opener", duration: 201),
-                LinnGatewayData.MediaItem(id: "track-2", kind: "md.track.qobuz", name: "Second"),
-            ]
-        ),
-        for: "album-x"
-    )
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"]))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    let album = Linn.LibraryItem(
-        id: "album-x",
-        kind: "md.album.qobuz",
-        title: "Album X",
-        artists: ["The Band"],
-        artworkURL: albumArtwork
-    )
-    _ = try await linn.browse(album)
-    linn.play(album, placement: .replace)
-
-    #expect(linn.currentSong?.title == "Opener")
-    #expect(linn.currentSong?.artist == "The Band")
-    #expect(linn.currentSong?.album == "Album X")
-    #expect(linn.currentSong?.artworkURL == albumArtwork)
-    #expect(linn.currentSong?.duration == 201)
-
-    // Not browsed yet: the album itself stands in until the device reports
-    // its first track.
-    let other = Linn.LibraryItem(id: "album-y", kind: "md.album.qobuz", title: "Album Y", artists: ["Someone"])
-    linn.play(other, placement: .now)
-    #expect(linn.currentSong?.title == "Album Y")
-    #expect(linn.currentSong?.artist == "Someone")
-
-    try await waitUntil { await gateway.selectedMediaPreviews().count == 2 }
-    let previews = await gateway.selectedMediaPreviews()
-    #expect(previews[0]?.id == "album-x")
-    #expect(previews[0]?.kind == "md.album.qobuz")
-    #expect(previews[0]?.childCount == 2)
-    #expect(previews[1]?.id == "album-y")
-    #expect(previews[1]?.childCount == nil)
-}
-
-@Test
-@MainActor
 func enqueueingALibraryItemKeepsTheCurrentSong() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
@@ -983,386 +664,68 @@ func enqueueingALibraryItemKeepsTheCurrentSong() async throws {
 
 @Test
 @MainActor
-func failedLibraryStartFallsBackToTheDevicesSong() async throws {
+func serverPredictionIsReplacedByTheNextServerState() async throws {
     let gateway = TestGateway()
-    await gateway.failMediaSelections()
     let linn = Linn(gateway: gateway)
-
     linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"], position: 42))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
+    await gateway.send(nowPlaying(index: 0, titles: ["Old", "Other"], volume: 10))
+    try await waitUntil { linn.currentSong?.title == "Old" }
 
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .replace)
-    #expect(linn.currentSong?.title == "Lunch")
+    var predicted = nowPlaying(index: 1, titles: ["Old", "Predicted"], position: 0, volume: 10)
+    predicted.pending.currentItem = true
+    predicted.pending.queueIndex = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "Predicted" }
+    #expect(linn.playlist.currentIndex == 1)
 
-    try await waitUntil {
-        linn.lastErrorMessage != nil
-    }
+    await gateway.send(nowPlaying(index: 0, titles: ["Actual", "Other"], position: 7, volume: 10))
+    try await waitUntil { linn.currentSong?.title == "Actual" }
+    #expect(linn.playlist.currentIndex == 0)
+    #expect(linn.timeline?.position == 7)
+}
+
+@Test
+@MainActor
+func doubleSkipIsSentToTheServerWithoutLocalQueuePrediction() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two"]))
+    try await waitUntil { linn.currentSong?.title == "Zero" }
+
+    linn.next()
+    linn.next()
+    try await waitUntil { await gateway.nextCallCount() == 2 }
     #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline?.position == 42)
-    #expect(linn.songTransitionDirection == .backward)
-}
+    #expect(linn.playlist.currentIndex == 0)
 
-@Test
-@MainActor
-func restartingThePlayingSongWaitsForTheReplacedQueue() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"], volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    let sameTrack = Linn.LibraryItem(id: "track-zero", kind: "md.track.qobuz", title: "Zero", artists: ["Artist 0"])
-    linn.play(sameTrack, placement: .replace)
-
-    // The device's report of the same song can't be told apart from the
-    // stale one until the queue was actually replaced.
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"], position: 30, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.timeline == nil)
-
-    var restarted = nowPlaying(index: 0, titles: ["Zero"], position: 0, volume: 12)
-    restarted.playlist?.contentRevision = 2
-    await gateway.send(restarted)
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline?.position == 0)
-}
-
-@Test
-@MainActor
-func skippingAfterStartingALibraryItemReplacesItsPreview() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .replace)
-    #expect(linn.currentSong?.title == "Lunch")
-
-    linn.next()
-    #expect(linn.currentSong?.title == "One")
-
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.currentSong?.title == "One")
-}
-
-@Test
-@MainActor
-func aSupersededSkipLandingDoesNotEndTheLibraryPreview() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.next()
-    linn.next()
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .replace)
-    #expect(linn.currentSong?.title == "Lunch")
-
-    // The first skip was already sent and lands in the old queue.
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    // The second one was still queued and must not follow into the new queue.
-    #expect(await gateway.selectedPlaylistIndexes() == [1])
-
-    var swapped = nowPlaying(index: 0, titles: ["Lunch"], position: 1, volume: 12)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.timeline?.position == 1)
-}
-
-@Test
-@MainActor
-func theNewQueueStartingEarlierStillSlidesForward() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
     await gateway.send(nowPlaying(index: 2, titles: ["Zero", "One", "Two"]))
-    try await waitUntil {
-        linn.currentSong?.title == "Two"
-    }
-
-    linn.play(Linn.LibraryItem(id: "album-y", kind: "md.album.qobuz", title: "Album Y"), placement: .replace)
-    #expect(linn.songTransitionDirection == .forward)
-
-    var swapped = nowPlaying(index: 0, titles: ["Opener", "Second"], volume: 11)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.currentSong?.title == "Opener"
-    }
-    #expect(linn.songTransitionDirection == .forward)
+    try await waitUntil { linn.currentSong?.title == "Two" }
+    #expect(linn.remainingQueueCount == 0)
 }
 
 @Test
 @MainActor
-func replayingTheCurrentAlbumReleasesOnceTheNewQueueConfirmsIt() async throws {
+func queueRowTapShowsLocalPendingMarkerUntilServerConfirms() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
-
     linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"], position: 40))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
+    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two"]))
+    try await waitUntil { linn.currentSong?.title == "Zero" }
 
-    // Not browsed: the preview is the album itself, with no expected title.
-    linn.play(Linn.LibraryItem(id: "album-zero", kind: "md.album.qobuz", title: "Zero's Album"), placement: .replace)
-    #expect(linn.currentSong?.title == "Zero's Album")
+    linn.play(try #require(linn.playlist.songs.first(where: { $0.queueIndex == 2 })))
+    #expect(linn.pendingQueueIndex == 2)
+    #expect(linn.currentSong?.title == "Zero")
+    try await waitUntil { await gateway.selectedPlaylistIndexes() == [2] }
 
-    var swapped = nowPlaying(index: 0, titles: ["Zero", "One"], position: 0)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-    #expect(linn.timeline?.position == 0)
-}
+    var predicted = nowPlaying(index: 2, titles: ["Zero", "One", "Two"])
+    predicted.pending.queueIndex = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "Two" }
+    #expect(linn.pendingQueueIndex == 2)
 
-@Test
-@MainActor
-func tappingThePlayingRowWhileAnotherTapIsInFlightStaysPending() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.playlist.songs.count == 4
-    }
-
-    let zero = try #require(linn.playlist.songs.first { $0.title == "Zero" })
-    let three = try #require(linn.playlist.songs.first { $0.title == "Three" })
-    linn.play(three)
-    linn.play(zero)
-    #expect(linn.pendingQueueIndex == 0)
-
-    // Still on row 0 from before: not a confirmation of the queued tap.
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.pendingQueueIndex == 0)
-
-    await gateway.send(nowPlaying(index: 3, titles: titles, volume: 12))
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [3, 0]
-    }
-    #expect(linn.pendingQueueIndex == 0)
-
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 13))
-    try await waitUntil {
-        linn.pendingQueueIndex == nil
-    }
-}
-
-@Test
-@MainActor
-func addingLibraryItemsCountsThemInTheQueueRightAway() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    await gateway.seedMediaPage(threeTrackAlbumPage, for: "album-x")
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"], volume: 10))
-    try await waitUntil {
-        linn.remainingQueueCount == 1
-    }
-
-    let album = Linn.LibraryItem(id: "album-x", kind: "md.album.qobuz", title: "Album X")
-    _ = try await linn.browse(album)
-    linn.play(album, placement: .last)
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .next)
-    #expect(linn.remainingQueueCount == 5)
-
-    // Stale lengths don't undo it; the device's own count takes over once
-    // it reports the grown queue.
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"], volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.remainingQueueCount == 5)
-
-    let grown = ["Zero", "Lunch", "One", "A", "B", "C"]
-    await gateway.send(nowPlaying(index: 0, titles: grown, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.remainingQueueCount == 5)
-
-    await gateway.send(nowPlaying(index: 1, titles: grown, volume: 13))
-    try await waitUntil {
-        linn.remainingQueueCount == 4
-    }
-}
-
-@Test
-@MainActor
-func replacingTheQueueCountsTheNewTrackListRightAway() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    await gateway.seedMediaPage(threeTrackAlbumPage, for: "album-x")
-    let current = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: current, volume: 10))
-    try await waitUntil {
-        linn.remainingQueueCount == 2
-    }
-
-    let album = Linn.LibraryItem(id: "album-x", kind: "md.album.qobuz", title: "Album X")
-    _ = try await linn.browse(album)
-    await gateway.send(nowPlaying(index: 2, titles: current, volume: 11))
-    try await waitUntil {
-        linn.remainingQueueCount == 0
-    }
-
-    linn.play(album, placement: .replace)
-    #expect(linn.remainingQueueCount == 2)
-
-    // Same length as the old queue: only the new revision proves the swap.
-    await gateway.send(nowPlaying(index: 2, titles: current, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.remainingQueueCount == 2)
-
-    var swapped = nowPlaying(index: 0, titles: ["A", "B", "C"], volume: 13)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.volume == 13
-    }
-    #expect(linn.remainingQueueCount == 2)
-}
-
-@Test
-@MainActor
-func playingAnUnbrowsedAlbumCountsItsReportedTracks() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let current = (0 ..< 50).map { "Song \($0)" }
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: current))
-    try await waitUntil {
-        linn.remainingQueueCount == 49
-    }
-
-    // Shape of a real Qobuz album from the gateway: its track count comes
-    // with the item, no browse needed.
-    let album = Linn.LibraryItem(
-        id: "qobuz-album-a-star-is-born",
-        kind: "md.album.qobuz",
-        title: "A Star Is Born Soundtrack",
-        childCount: 19
-    )
-    linn.play(album, placement: .replace)
-    #expect(linn.remainingQueueCount == 18)
-}
-
-@Test
-@MainActor
-func unknownSizeCommandsLeaveTheCountToTheDevice() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"]))
-    try await waitUntil {
-        linn.remainingQueueCount == 1
-    }
-
-    let artist = Linn.LibraryItem(id: "artist-1", kind: "md.artist.qobuz", title: "Someone")
-    linn.play(artist, placement: .last)
-    #expect(linn.remainingQueueCount == 1)
-
-    // A replace of unknown size voids earlier anticipated additions, and
-    // later ones can't be counted on top of a queue that's about to go.
-    linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
-    #expect(linn.remainingQueueCount == 2)
-    linn.play(artist, placement: .replace)
-    #expect(linn.remainingQueueCount == 1)
-    linn.play(Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"), placement: .last)
-    #expect(linn.remainingQueueCount == 1)
-}
-
-@Test
-@MainActor
-func aFailedAdditionTakesBackOnlyItsOwnTracks() async throws {
-    let gateway = TestGateway()
-    await gateway.failMediaSelections(for: ["track-a"])
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"]))
-    try await waitUntil {
-        linn.remainingQueueCount == 1
-    }
-
-    linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
-    linn.play(Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"), placement: .last)
-    #expect(linn.remainingQueueCount == 3)
-
-    try await waitUntil {
-        linn.lastErrorMessage != nil
-    }
-    #expect(linn.remainingQueueCount == 2)
-}
-
-@Test
-@MainActor
-func aFailedReplaceDoesNotUndoTheNewerOne() async throws {
-    let gateway = TestGateway()
-    await gateway.failMediaSelections(for: ["album-first"])
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two", "Three", "Four"]))
-    try await waitUntil {
-        linn.remainingQueueCount == 4
-    }
-
-    linn.play(Linn.LibraryItem(id: "album-first", kind: "md.album.qobuz", title: "First", childCount: 9), placement: .replace)
-    linn.play(Linn.LibraryItem(id: "album-second", kind: "md.album.qobuz", title: "Second", childCount: 3), placement: .replace)
-    #expect(linn.remainingQueueCount == 2)
-
-    try await waitUntil {
-        linn.lastErrorMessage != nil
-    }
-    #expect(linn.remainingQueueCount == 2)
+    await gateway.send(nowPlaying(index: 2, titles: ["Zero", "One", "Two"]))
+    try await waitUntil { linn.pendingQueueIndex == nil }
 }
 
 private let threeTrackAlbumPage = LinnGatewayData.MediaPage(

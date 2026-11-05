@@ -45,7 +45,6 @@ actor PiLinnGateway: LinnGateway {
             config.connection.keepalive = .init(time: .seconds(20), timeout: .seconds(10), allowWithoutCalls: true)
             config.backoff.max = .seconds(5)
             config.resolverBackoff.max = .seconds(5)
-            config.http2.authority = Self.ipv6Authority(host: host, port: port)
         }
         let transport = try Transport(target: .dns(host: host, port: port), transportSecurity: .plaintext, config: config)
         let grpcClient = GRPCClient(transport: transport)
@@ -54,10 +53,6 @@ actor PiLinnGateway: LinnGateway {
             try? await grpcClient.runConnections()
         }
         return Client(wrapping: grpcClient)
-    }
-
-    static func ipv6Authority(host: String, port: Int) -> String? {
-        host.contains(":") ? "[\(host)]:\(port)" : nil
     }
 
     static func isTerminalStreamError(_ code: RPCError.Code) -> Bool {
