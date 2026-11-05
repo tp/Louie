@@ -16,6 +16,7 @@ func decodesServicesStatusWithQobuzService() throws {
         "index": 0,
         "count": 2,
         "total": 2,
+        "alpha": [0, null, 1],
         "children": [
           { "id": "service-radio", "name": "Radio", "class": "md.service" },
           { "id": "service-qobuz", "name": "Qobuz", "class": "md.service" }
@@ -76,6 +77,7 @@ func decodesMediaBrowseItemsWithFlexibleArtistAndFavouriteState() throws {
     let children = try #require(response.data?.children)
 
     #expect(response.data?.contentRevision == 8)
+    #expect(response.data?.alpha == nil)
     #expect(children[0].artist == ["Nala Sinephro"])
     #expect(children[0].containedClasses == ["md.track.qobuz"])
     #expect(children[0].isFavourite == false)

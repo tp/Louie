@@ -11,6 +11,12 @@ enum GatewayResponseNormalization {
             return data
         }
 
+        // The generator also ignores nullable alphabet entries. This index
+        // is optional, so drop it if individual offsets are unavailable.
+        if let alpha = payload["alpha"] as? [Any], alpha.contains(where: { $0 is NSNull }) {
+            payload.removeValue(forKey: "alpha")
+        }
+
         for index in children.indices {
             if let artist = children[index]["artist"] as? String {
                 children[index]["artist"] = [artist]

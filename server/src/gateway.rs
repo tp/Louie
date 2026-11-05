@@ -666,7 +666,7 @@ fn apply_update(snapshot: &mut StateSnapshot, path: &str, value: &Value) -> bool
                     .map(|item| item.index),
                 items,
                 total: data.total,
-                content_revision: data.content_revision.map(i64::from),
+                content_revision: data.content_revision,
             });
             true
         }

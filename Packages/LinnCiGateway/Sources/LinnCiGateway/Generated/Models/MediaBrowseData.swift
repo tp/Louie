@@ -13,7 +13,7 @@ internal struct MediaBrowseData: Sendable, Codable, Hashable {
     /** The unique identifier for the browsed object */
     internal var id: String?
     /** Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon. */
-    internal var contentRevision: Int?
+    internal var contentRevision: Int64?
     /** Index of first child in the children array. */
     internal var index: Int?
     /** Count of children in the children array. */
@@ -25,7 +25,7 @@ internal struct MediaBrowseData: Sendable, Codable, Hashable {
     /** Array of metadata for children of the browsed item.  May be null if item is not browseable (different from an empty array, when the item is browseable but has no children). */
     internal var children: [ItemMetaData]?
 
-    internal init(id: String? = nil, contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, alpha: [Int]? = nil, children: [ItemMetaData]? = nil) {
+    internal init(id: String? = nil, contentRevision: Int64? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, alpha: [Int]? = nil, children: [ItemMetaData]? = nil) {
         self.id = id
         self.contentRevision = contentRevision
         self.index = index

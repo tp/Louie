@@ -66,6 +66,16 @@ pub fn decode_playlist_item(
 pub fn decode_media_page(
     mut value: Value,
 ) -> Result<models::MediaBrowseResponse, serde_json::Error> {
+    // The gateway may include null alphabet offsets. The Rust generator
+    // ignores x-nullable on array items; this optional index is unused here.
+    if value
+        .pointer("/data/alpha")
+        .and_then(Value::as_array)
+        .is_some_and(|alpha| alpha.iter().any(Value::is_null))
+        && let Some(data) = value.get_mut("data").and_then(Value::as_object_mut)
+    {
+        data.remove("alpha");
+    }
     if let Some(children) = value
         .pointer_mut("/data/children")
         .and_then(Value::as_array_mut)
@@ -123,5 +133,14 @@ mod tests {
         let envelope: Envelope = decode(&json!({"tag": "control-1"})).unwrap();
         assert_eq!(envelope.tag.as_deref(), Some("control-1"));
         assert_eq!(envelope.request_path, None);
+    }
+
+    #[test]
+    fn media_page_accepts_null_alphabet_offsets() {
+        let page = decode_media_page(json!({
+            "data": {"alpha": [0, null, 4], "children": []}
+        }))
+        .unwrap();
+        assert_eq!(page.data.unwrap().alpha, None);
     }
 }

@@ -363,7 +363,7 @@ fn media_page(response: Value) -> Result<pb::MediaPage, Status> {
         .collect();
     Ok(pb::MediaPage {
         id: data.id,
-        content_revision: data.content_revision.map(i64::from),
+        content_revision: data.content_revision,
         index: data.index.unwrap_or(0),
         count: data.count.unwrap_or(children.len() as i32),
         total: data.total,

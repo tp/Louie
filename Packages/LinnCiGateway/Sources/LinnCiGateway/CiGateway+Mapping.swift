@@ -14,7 +14,7 @@ extension CiGateway.MediaPage {
     init(_ data: MediaBrowseData?) {
         self.init(
             id: data?.id,
-            contentRevision: data?.contentRevision,
+            contentRevision: data?.contentRevision.flatMap(Int.init(exactly:)),
             index: data?.index ?? 0,
             count: data?.count ?? data?.children?.count ?? 0,
             total: data?.total,
@@ -110,7 +110,7 @@ extension CiGateway.NowPlaying.Playlist {
             }
             .sorted { $0.index < $1.index } ?? []
 
-        self.init(items: items, total: data.total, contentRevision: data.contentRevision)
+        self.init(items: items, total: data.total, contentRevision: data.contentRevision.flatMap(Int.init(exactly:)))
     }
 }
 

@@ -768,6 +768,7 @@ definitions:
         type: boolean
         description: true if responses from this command should only contain items that have changed since the previous response; false if full information should be returned each time.
       artist: null
+      content_revision: null
   SessionData:
     type: object
     description: Session information.
@@ -781,6 +782,7 @@ definitions:
         items:
           $ref: '#/definitions/FilterSpec'
       artist: null
+      content_revision: null
   SessionResponse:
     type: object
     properties:
@@ -793,6 +795,7 @@ definitions:
       data:
         $ref: '#/definitions/SessionData'
       artist: null
+      content_revision: null
   MediaBrowseResponse:
     type: object
     properties:
@@ -805,6 +808,7 @@ definitions:
       data:
         $ref: '#/definitions/MediaBrowseData'
       artist: null
+      content_revision: null
   MediaBrowseData:
     type: object
     description: Browse data for a given item in the player's browseable content.
@@ -815,6 +819,7 @@ definitions:
       content_revision:
         type: integer
         description: Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon.
+        format: int64
       index:
         description: Index of first child in the children array.
         type: integer
@@ -831,6 +836,7 @@ definitions:
           type: integer
           minItems: 27
           maxItems: 27
+          x-nullable: true
       children:
         description: Array of metadata for children of the browsed item.  May be null if item is not browseable (different from an empty array, when the item is browseable but has no children).
         type: array
@@ -902,6 +908,7 @@ definitions:
       artist_id:
         type: string
         description: Media id of the artist that created this item.
+      content_revision: null
     required:
       - id
       - class
@@ -915,6 +922,7 @@ definitions:
         items:
           type: string
       artist: null
+      content_revision: null
   ParamRoom:
     type: object
     required:
@@ -924,6 +932,7 @@ definitions:
         description: Room ID
         type: string
       artist: null
+      content_revision: null
   ParamSession:
     type: object
     required:
@@ -933,6 +942,7 @@ definitions:
         description: Opaque string, returned in the response.  Fixed for a session.
         type: string
       artist: null
+      content_revision: null
   ParamTag:
     type: object
     properties:
@@ -940,6 +950,7 @@ definitions:
         description: Opaque string, returned in the response. Varies per message.
         type: string
       artist: null
+      content_revision: null
   ParamUpdate:
     type: object
     properties:
@@ -955,6 +966,7 @@ definitions:
         type: integer
         # V2 definitions
       artist: null
+      content_revision: null
   V2TopologyStatusResponse:
     type: object
     properties:
@@ -967,6 +979,7 @@ definitions:
         type: string
         description: Session from the original request that generated this response.
       artist: null
+      content_revision: null
   V2TopologyStatusData:
     type: object
     description: The topology of the house.
@@ -1003,6 +1016,7 @@ definitions:
                 type: string
                 description: Human-readable name of the listening room.
       artist: null
+      content_revision: null
   V2VolumeStatusResponse:
     type: object
     description: The volume status of a room
@@ -1019,6 +1033,7 @@ definitions:
         type: string
         description: The room name for which this response pertains
       artist: null
+      content_revision: null
   V2VolumeStatusData:
     type: object
     description: The volume status of the room.
@@ -1031,6 +1046,7 @@ definitions:
         format: int32
         description: The volume state of the room.
       artist: null
+      content_revision: null
   V2TransportStatusResponse:
     type: object
     description: The transport status of a room
@@ -1047,6 +1063,7 @@ definitions:
         type: string
         description: The room name for which this response pertains
       artist: null
+      content_revision: null
   V2TransportStatusData:
     type: object
     description: The transport status of the room.
@@ -1061,6 +1078,7 @@ definitions:
         type: boolean
         description: The shuffle state of the room (hidden for sources where not relevant)
       artist: null
+      content_revision: null
   V2SeekStatusResponse:
     type: object
     description: The seek status of a room
@@ -1077,6 +1095,7 @@ definitions:
         type: string
         description: The room name for which this response pertains
       artist: null
+      content_revision: null
   V2SeekStatusData:
     type: object
     description: The transport status of the room.
@@ -1093,6 +1112,7 @@ definitions:
         format: int32
         description: Duration in seconds for current media item
       artist: null
+      content_revision: null
   V2MetadataStatusResponse:
     type: object
     description: The metadata status of a room
@@ -1109,6 +1129,7 @@ definitions:
         type: string
         description: The room name for which this response pertains
       artist: null
+      content_revision: null
   V2MetadataStatusData:
     type: object
     description: The metadata status of the room.
@@ -1135,6 +1156,7 @@ definitions:
         type: string
         description: Bit depth for current playback
       artist: null
+      content_revision: null
   V2ServicesStatusResponse:
     type: object
     properties:
@@ -1150,6 +1172,7 @@ definitions:
       data:
         $ref: '#/definitions/V2ServicesStatusData'
       artist: null
+      content_revision: null
   V2ServicesStatusData:
     type: object
     description: Browse data for a given item in the player's browseable content.
@@ -1160,6 +1183,7 @@ definitions:
       content_revision:
         type: integer
         description: Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon.
+        format: int64
       index:
         description: Index of first service in the children array.
         type: integer
@@ -1189,6 +1213,7 @@ definitions:
         type: string
         description: The class of the service
       artist: null
+      content_revision: null
   V2PlaylistBrowseResponse:
     type: object
     properties:
@@ -1204,6 +1229,7 @@ definitions:
       data:
         $ref: '#/definitions/V2PlaylistBrowseData'
       artist: null
+      content_revision: null
   V2PlaylistBrowseData:
     type: object
     description: Browse data for a given item in the player's browseable content.
@@ -1220,6 +1246,7 @@ definitions:
       children:
         $ref: '#/definitions/V2PlaylistBrowseIndex'
       artist: null
+      content_revision: null
   V2PlaylistSubscribeResponse:
     type: object
     properties:
@@ -1235,6 +1262,7 @@ definitions:
       data:
         $ref: '#/definitions/V2PlaylistSubscribeData'
       artist: null
+      content_revision: null
   V2PlaylistSubscribeData:
     type: object
     description: Browse data for a given item in the player's browseable content.
@@ -1242,6 +1270,7 @@ definitions:
       content_revision:
         type: integer
         description: Current revision number for the playlist update. Increments by 1 on every update. If using 'concise' updates an there is a break in update contiguity then client should resubscribe.
+        format: int64
       index:
         description: Index of first child in the children array.
         type: integer
@@ -1259,6 +1288,8 @@ definitions:
     description: Index of a position in a rooms playlist and the item metadata it contains.
     additionalProperties:
       $ref: '#/definitions/V2PlaylistItemMetadata'
+    properties:
+      content_revision: null
   V2PlaylistItemMetadata:
     type: object
     description: Information about an item in the system (e.g. album, track or stream, input)
@@ -1300,6 +1331,7 @@ definitions:
         type: integer
         format: int32
         description: Duration of the item in seconds. 0 if unknown
+      content_revision: null
     required:
       - class
   V2ServicesStatusGetRequest:
@@ -1316,6 +1348,7 @@ definitions:
         type: string
       update:
         type: integer
+      content_revision: null
 responses:
   default:
     description: |

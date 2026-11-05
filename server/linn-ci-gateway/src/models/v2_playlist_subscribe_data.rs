@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 pub struct V2PlaylistSubscribeData {
     /// Current revision number for the playlist update. Increments by 1 on every update. If using 'concise' updates an there is a break in update contiguity then client should resubscribe.
     #[serde(rename = "content_revision", skip_serializing_if = "Option::is_none")]
-    pub content_revision: Option<i32>,
+    pub content_revision: Option<i64>,
     /// Index of first child in the children array.
     #[serde(rename = "index", skip_serializing_if = "Option::is_none")]
     pub index: Option<i32>,

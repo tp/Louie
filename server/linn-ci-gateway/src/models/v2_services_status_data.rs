@@ -19,7 +19,7 @@ pub struct V2ServicesStatusData {
     pub id: Option<String>,
     /// Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon.
     #[serde(rename = "content_revision", skip_serializing_if = "Option::is_none")]
-    pub content_revision: Option<i32>,
+    pub content_revision: Option<i64>,
     /// Index of first service in the children array.
     #[serde(rename = "index", skip_serializing_if = "Option::is_none")]
     pub index: Option<i32>,

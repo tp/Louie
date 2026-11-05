@@ -13,7 +13,7 @@ internal struct V2ServicesStatusData: Sendable, Codable, Hashable {
     /** The name of the room to which the services belong */
     internal var id: String?
     /** Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon. */
-    internal var contentRevision: Int?
+    internal var contentRevision: Int64?
     /** Index of first service in the children array. */
     internal var index: Int?
     /** Count of services in the children array. */
@@ -23,7 +23,7 @@ internal struct V2ServicesStatusData: Sendable, Codable, Hashable {
     /** Array of services */
     internal var children: [V2ServicesStatusItem]?
 
-    internal init(id: String? = nil, contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [V2ServicesStatusItem]? = nil) {
+    internal init(id: String? = nil, contentRevision: Int64? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [V2ServicesStatusItem]? = nil) {
         self.id = id
         self.contentRevision = contentRevision
         self.index = index
