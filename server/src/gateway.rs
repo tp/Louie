@@ -529,7 +529,7 @@ async fn run_connection(
                         }
                     }
                 }
-                if optimism.expire() {
+                if optimism.reconcile(observed) {
                     state.send_replace(optimism.snapshot(observed));
                 }
             }
