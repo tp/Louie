@@ -42,6 +42,16 @@ import Testing
     }
 }
 
+@Test func supersededCancellationUsesReasonCode() {
+    let superseded = RPCError(
+        code: .cancelled,
+        message: "wording may change",
+        metadata: ["louie-error-reason": "superseded"]
+    )
+    #expect(PiLinnGateway.isSuperseded(superseded))
+    #expect(!PiLinnGateway.isSuperseded(RPCError(code: .cancelled, message: "superseded by a newer value")))
+}
+
 private actor ScriptedWatch {
     private var attempts = 0
 

@@ -69,6 +69,10 @@ actor PiLinnGateway: LinnGateway {
         }
     }
 
+    static func isSuperseded(_ error: RPCError) -> Bool {
+        error.code == .cancelled && PiLinnRPCError(error).reason == .superseded
+    }
+
     func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
         // The server currently owns one Linn room and controls its update rate.
         updates(room: room, watch: { [self] receive in
@@ -242,7 +246,7 @@ actor PiLinnGateway: LinnGateway {
         do {
             return try await operation()
         } catch let error as RPCError {
-            if error.code == .cancelled && (Task.isCancelled || error.message.contains("superseded")) {
+            if error.code == .cancelled && (Task.isCancelled || Self.isSuperseded(error)) {
                 throw CancellationError()
             }
             throw PiLinnRPCError(error)
@@ -267,6 +271,7 @@ struct PiLinnRPCError: Error, LocalizedError {
         case linnRejected = "linn-rejected"
         case sourceNotSeekable = "source-not-seekable"
         case gatewayUnavailable = "gateway-unavailable"
+        case superseded
     }
 
     let code: RPCError.Code
@@ -297,6 +302,7 @@ struct PiLinnRPCError: Error, LocalizedError {
             case .linnDisconnected, .gatewayUnavailable: "Louie Home Server can't reach Linn."
             case .sourceNotSeekable: "This source doesn't support seeking."
             case .linnRejected: "Linn rejected the request."
+            case .superseded: "The request was superseded."
             case nil: "Linn can't perform this action right now."
             }
         case .invalidArgument: "This request isn't valid."

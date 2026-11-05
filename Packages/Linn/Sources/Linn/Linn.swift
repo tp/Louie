@@ -1453,6 +1453,9 @@ public final class Linn {
                 guard let self else {
                     return
                 }
+                if let serverError = error as? PiLinnRPCError, serverError.reason == .linnRejected {
+                    Self.logger.error("Linn rejected command: \(serverError.message, privacy: .private)")
+                }
                 if let optimisticState, self.optimisticPlayState?.targetState == optimisticState {
                     self.playState = self.optimisticPlayState?.previousState
                     self.optimisticPlayState = nil
