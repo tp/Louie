@@ -6,8 +6,6 @@ PACKAGE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd -- "${PACKAGE_DIR}/../.." && pwd)"
 
 GENERATOR_IMAGE_TAG="${OPENAPI_GENERATOR_IMAGE_TAG:-v7.22.0}"
-GATEWAY_BASE_URL="${GATEWAY_BASE_URL:-http://192.168.7.218:4100}"
-SPEC_URL="${OPENAPI_SPEC_URL:-${GATEWAY_BASE_URL}/api/swagger.yaml}"
 
 ORIGINAL_SPEC_PATH="${REPO_DIR}/server/linn-ci-gateway/openapi.original.yaml"
 SPEC_PATH="${REPO_DIR}/server/linn-ci-gateway/openapi.yaml"
@@ -31,8 +29,7 @@ fi
 if [[ "${OPENAPI_USE_LOCAL_SPEC:-0}" == "1" ]]; then
     echo "Using checked-in OpenAPI source at ${ORIGINAL_SPEC_PATH}"
 else
-    echo "Downloading OpenAPI document from ${SPEC_URL}"
-    curl --fail --location --silent --show-error "${SPEC_URL}" --output "${ORIGINAL_SPEC_PATH}"
+    bash "${REPO_DIR}/server/linn-ci-gateway/fetch-spec.sh"
 fi
 bash "${REPO_DIR}/server/linn-ci-gateway/normalize.sh"
 
