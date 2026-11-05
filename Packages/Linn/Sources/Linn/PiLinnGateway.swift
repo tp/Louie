@@ -147,12 +147,12 @@ actor PiLinnGateway: LinnGateway {
         _ = try await remapCancellation { try await service().setMuted(request, options: Self.commandOptions) }
     }
 
-    func mediaServices(room: String) async throws -> [LinnGatewayData.MediaService] {
+    func mediaServices(room: String) async throws -> [Linn.LibraryService] {
         let response = try await remapCancellation { try await service().listMediaServices(Google_Protobuf_Empty(), options: Self.commandOptions) }
-        return response.services.map { LinnGatewayData.MediaService(id: $0.id, name: $0.name) }
+        return response.services.map { Linn.LibraryService(id: $0.id, name: $0.name) }
     }
 
-    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> LinnGatewayData.MediaPage {
+    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> Linn.LibraryPage {
         var request = Louie_Linn_V1_BrowseMediaRequest()
         request.mediaID = mediaID
         request.index = Int32(clamping: index)
@@ -161,7 +161,7 @@ actor PiLinnGateway: LinnGateway {
         return PiLinnMapping.mediaPage(try await remapCancellation { try await service().browseMedia(request, options: Self.commandOptions) })
     }
 
-    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> LinnGatewayData.MediaPage {
+    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> Linn.LibraryPage {
         var request = Louie_Linn_V1_SearchMediaRequest()
         request.serviceID = serviceID
         request.query = query
@@ -182,7 +182,7 @@ actor PiLinnGateway: LinnGateway {
         try await selectMedia(mediaID: mediaID, room: room, queue: queue, preview: nil)
     }
 
-    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: LinnGatewayData.MediaItem?) async throws {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws {
         var request = Louie_Linn_V1_SelectMediaRequest()
         request.mediaID = mediaID
         request.queue = switch queue {
@@ -342,18 +342,18 @@ enum PiLinnMapping {
         return result
     }
 
-    static func mediaPage(_ page: Louie_Linn_V1_MediaPage) -> LinnGatewayData.MediaPage {
+    static func mediaPage(_ page: Louie_Linn_V1_MediaPage) -> Linn.LibraryPage {
         .init(
             id: page.hasID ? page.id : nil,
             contentRevision: page.hasContentRevision ? Int(exactly: page.contentRevision) : nil,
             index: Int(page.index),
             count: Int(page.count),
             total: page.hasTotal ? Int(page.total) : nil,
-            children: page.children.map(mediaItem)
+            items: page.children.map(mediaItem)
         )
     }
 
-    private static func mediaItem(_ item: Louie_Linn_V1_MediaItem) -> LinnGatewayData.MediaItem {
+    private static func mediaItem(_ item: Louie_Linn_V1_MediaItem) -> Linn.LibraryItem {
         let fallbackKind: String = switch item.type {
         case .track: "md.track"
         case .album: "md.album"
@@ -364,11 +364,13 @@ enum PiLinnMapping {
         case .container: "md.container"
         default: item.isContainer ? "md.container" : "md.other"
         }
+        let title = item.hasTitle ? item.title : (item.hasName ? item.name : item.id)
+        let subtitle = item.artists.isEmpty ? (item.hasAlbum ? item.album : nil) : item.artists.joined(separator: ", ")
         return .init(
             id: item.id,
             kind: item.hasLinnClass ? item.linnClass : fallbackKind,
-            name: item.hasName ? item.name : nil,
-            title: item.hasTitle ? item.title : nil,
+            title: title.isEmpty ? item.id : title,
+            subtitle: subtitle,
             album: item.hasAlbum ? item.album : nil,
             artists: item.artists,
             artworkURL: item.hasArtworkURL ? URL(string: item.artworkURL) : nil,
@@ -380,7 +382,7 @@ enum PiLinnMapping {
         )
     }
 
-    static func preview(_ item: LinnGatewayData.MediaItem) -> Louie_Linn_V1_MediaItem {
+    static func preview(_ item: Linn.LibraryItem) -> Louie_Linn_V1_MediaItem {
         var preview = Louie_Linn_V1_MediaItem()
         preview.id = item.id
         preview.type = if item.kind.contains("container") { .container }
@@ -395,7 +397,7 @@ enum PiLinnMapping {
         preview.containedClasses = item.containedKinds
         preview.isContainer = item.isContainer
         preview.canFavourite = item.canFavourite
-        if let title = item.title { preview.title = title }
+        preview.title = item.title
         if let album = item.album { preview.album = album }
         preview.artists = item.artists
         if let artworkURL = item.artworkURL { preview.artworkURL = artworkURL.absoluteString }

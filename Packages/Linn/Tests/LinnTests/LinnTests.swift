@@ -1444,18 +1444,18 @@ private actor TestGateway: LinnGateway {
 
     func setMuted(_: Bool, room _: String, group _: Bool) async throws {}
 
-    func mediaServices(room _: String) async throws -> [LinnGatewayData.MediaService] {
+    func mediaServices(room _: String) async throws -> [Linn.LibraryService] {
         if shouldSuspendMediaServices {
             await withCheckedContinuation { continuation in
                 suspendedMediaServices.append(continuation)
             }
         }
-        return services
+        return services.map(Linn.LibraryService.init)
     }
 
-    func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> LinnGatewayData.MediaPage {
+    func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> Linn.LibraryPage {
         browseCounts[mediaID, default: 0] += 1
-        return mediaPages[mediaID] ?? LinnGatewayData.MediaPage(id: mediaID)
+        return Linn.LibraryPage(mediaPages[mediaID] ?? LinnGatewayData.MediaPage(id: mediaID))
     }
 
     func searchMedia(
@@ -1464,20 +1464,20 @@ private actor TestGateway: LinnGateway {
         type _: Linn.SearchType,
         index _: Int,
         count _: Int
-    ) async throws -> LinnGatewayData.MediaPage {
+    ) async throws -> Linn.LibraryPage {
         let allItems = mediaPages.values.flatMap(\.children)
         let matches = allItems.filter {
             ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
                 || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
         }
-        return LinnGatewayData.MediaPage(
+        return Linn.LibraryPage(LinnGatewayData.MediaPage(
             id: "search",
             contentRevision: mediaPages["service-qobuz"]?.contentRevision,
             index: 0,
             count: matches.count,
             total: matches.count,
             children: matches
-        )
+        ))
     }
 
     func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws {

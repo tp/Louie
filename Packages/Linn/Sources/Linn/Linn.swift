@@ -15,16 +15,16 @@ public protocol LinnGateway: Sendable {
     func selectPlaylistItem(at index: Int, room: String) async throws
     func setVolume(_ volume: Int, room: String, group: Bool) async throws
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws
-    func mediaServices(room: String) async throws -> [LinnGatewayData.MediaService]
-    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> LinnGatewayData.MediaPage
-    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> LinnGatewayData.MediaPage
+    func mediaServices(room: String) async throws -> [Linn.LibraryService]
+    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> Linn.LibraryPage
+    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> Linn.LibraryPage
     func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws
-    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: LinnGatewayData.MediaItem?) async throws
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws
     func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws
 }
 
 public extension LinnGateway {
-    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: LinnGatewayData.MediaItem?) async throws {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws {
         try await selectMedia(mediaID: mediaID, room: room, queue: queue)
     }
 
@@ -492,7 +492,7 @@ public final class Linn {
                     count: 50,
                     browseType: ""
                 )
-                let libraryRootPage = LibraryPage(rootPage)
+                let libraryRootPage = rootPage
                 reconcileLibraryRevision(libraryRootPage.contentRevision)
                 cache(libraryRootPage, mediaID: qobuzService.id, browseType: "")
 
@@ -503,7 +503,7 @@ public final class Linn {
                 try Task.checkCancellation()
                 library = Library(
                     availability: .available,
-                    qobuzService: LibraryService(qobuzService),
+                    qobuzService: qobuzService,
                     rootPage: libraryRootPage,
                     sections: sections
                 )
@@ -537,7 +537,7 @@ public final class Linn {
         }
 
         let page = try await ciGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
-        let libraryPage = LibraryPage(page)
+        let libraryPage = page
         reconcileLibraryRevision(libraryPage.contentRevision)
         if index == 0 {
             cache(libraryPage, mediaID: item.id, browseType: browseType)
@@ -566,7 +566,7 @@ public final class Linn {
             index: index,
             count: count
         )
-        return LibraryPage(page)
+        return page
     }
 
     public func play(_ item: LibraryItem, placement: QueuePlacement = .replace) {
@@ -597,9 +597,9 @@ public final class Linn {
         }
     }
 
-    private func mediaSelectionServerPreview(for item: LibraryItem) -> LinnGatewayData.MediaItem? {
+    private func mediaSelectionServerPreview(for item: LibraryItem) -> LibraryItem? {
         guard !item.title.isEmpty else { return nil }
-        let selected: LibraryItem
+        var selected: LibraryItem
         if item.isContainer {
             guard let firstTrack = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: "")]?
                 .items.first(where: { !$0.isContainer && !$0.title.isEmpty }) else {
@@ -609,19 +609,10 @@ public final class Linn {
         } else {
             selected = item
         }
-        return LinnGatewayData.MediaItem(
-            id: selected.id,
-            kind: selected.kind,
-            title: selected.title,
-            album: selected.album ?? (item.isContainer ? item.title : nil),
-            artists: selected.artists,
-            artworkURL: selected.artworkURL ?? item.artworkURL,
-            duration: selected.duration,
-            containedKinds: selected.containedKinds,
-            childCount: item.isContainer ? item.childCount : selected.childCount,
-            isFavourite: selected.isFavourite,
-            canFavourite: selected.canFavourite
-        )
+        selected.album = selected.album ?? (item.isContainer ? item.title : nil)
+        selected.artworkURL = selected.artworkURL ?? item.artworkURL
+        selected.childCount = item.isContainer ? item.childCount : selected.childCount
+        return selected
     }
 
     public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {
@@ -658,7 +649,7 @@ public final class Linn {
         libraryPageCache = [:]
     }
 
-    private static func availableMediaServicesDescription(_ services: [LinnGatewayData.MediaService]) -> String {
+    private static func availableMediaServicesDescription(_ services: [LibraryService]) -> String {
         guard !services.isEmpty else {
             return "none"
         }
@@ -819,7 +810,7 @@ public final class Linn {
         gateway: any LinnGateway
     ) async -> [LibraryItem] {
         let page = try? await gateway.browseMedia(mediaID: item.id, index: 0, count: 50, browseType: "")
-        let libraryPage = page.map(LibraryPage.init)
+        let libraryPage = page
         if let libraryPage {
             reconcileLibraryRevision(libraryPage.contentRevision)
             cache(libraryPage, mediaID: item.id, browseType: "")

@@ -61,7 +61,7 @@ import Testing
     page.children = [folder]
 
     let mapped = PiLinnMapping.mediaPage(page)
-    let libraryItem = Linn.LibraryItem(mapped.children[0])
+    let libraryItem = mapped.items[0]
     #expect(libraryItem.kind == "md.container.qobuz.album")
     #expect(libraryItem.containedKinds == ["md.album.qobuz"])
     #expect(libraryItem.isContainer)

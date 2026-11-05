@@ -213,9 +213,9 @@
             yieldSnapshot()
         }
 
-        public func mediaServices(room _: String) async throws -> [LinnGatewayData.MediaService] {
+        public func mediaServices(room _: String) async throws -> [Linn.LibraryService] {
             [
-                LinnGatewayData.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
+                Linn.LibraryService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
             ]
         }
 
@@ -224,17 +224,17 @@
             index: Int,
             count: Int,
             browseType _: String
-        ) async throws -> LinnGatewayData.MediaPage {
+        ) async throws -> Linn.LibraryPage {
             let children = Self.mediaChildren(for: mediaID)
             let slice = Array(children.dropFirst(index).prefix(count))
-            return LinnGatewayData.MediaPage(
+            return Linn.LibraryPage(LinnGatewayData.MediaPage(
                 id: mediaID,
                 contentRevision: 1,
                 index: index,
                 count: slice.count,
                 total: children.count,
                 children: slice
-            )
+            ))
         }
 
         public func searchMedia(
@@ -243,20 +243,20 @@
             type _: Linn.SearchType,
             index: Int,
             count: Int
-        ) async throws -> LinnGatewayData.MediaPage {
+        ) async throws -> Linn.LibraryPage {
             let matches = Self.demoLibraryAlbums.filter {
                 ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
                     || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
             }
             let slice = Array(matches.dropFirst(index).prefix(count))
-            return LinnGatewayData.MediaPage(
+            return Linn.LibraryPage(LinnGatewayData.MediaPage(
                 id: "qobuz-search",
                 contentRevision: 1,
                 index: index,
                 count: slice.count,
                 total: matches.count,
                 children: slice
-            )
+            ))
         }
 
         public func selectMedia(mediaID: String, room _: String, queue: Linn.QueuePlacement) async throws {
