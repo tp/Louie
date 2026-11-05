@@ -30,5 +30,5 @@ fi
 
 rm -rf "$output"
 cp -R "$scratch/generated/src/models" "$output"
-cargo fmt --manifest-path "$repo_root/server/linn-ci-gateway/Cargo.toml" --all
+(cd "$repo_root/server" && cargo fmt -p linn-ci-gateway)
 echo "Generated Rust models in $output"
