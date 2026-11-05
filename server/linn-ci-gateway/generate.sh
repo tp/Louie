@@ -17,6 +17,7 @@ if [[ -n "${OPENAPI_GENERATOR_JAR:-}" ]]; then
     >/dev/null
 else
   docker run --rm \
+    --user "$(id -u):$(id -g)" \
     --mount "type=bind,source=$(dirname "$spec"),target=/spec,readonly" \
     --mount "type=bind,source=$scratch,target=/out" \
     "$image" generate \
