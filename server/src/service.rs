@@ -335,7 +335,8 @@ fn validated_seek_position(snapshot: &pb::StateSnapshot, mut position: i32) -> R
         .and_then(|state| state.timeline.as_ref())
     {
         if timeline.is_seekable == Some(false) {
-            return Err(Status::failed_precondition(
+            return Err(crate::error::failed_precondition(
+                "source-not-seekable",
                 "current source is not seekable",
             ));
         }

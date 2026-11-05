@@ -129,7 +129,8 @@ impl Gateway {
         first_track: Option<crate::pb::MediaItem>,
     ) -> Result<Value, tonic::Status> {
         if self.state.borrow().connection_status != ConnectionStatus::Connected as i32 {
-            return Err(tonic::Status::failed_precondition(
+            return Err(crate::error::failed_precondition(
+                "linn-disconnected",
                 "Linn gateway is disconnected",
             ));
         }
@@ -146,7 +147,12 @@ impl Gateway {
                 reply,
             })
             .await
-            .map_err(|_| tonic::Status::failed_precondition("Linn gateway worker stopped"))?;
+            .map_err(|_| {
+                crate::error::failed_precondition(
+                    "gateway-unavailable",
+                    "Linn gateway worker stopped",
+                )
+            })?;
         if is_search {
             // The command deadline starts when the serial search lane sends it,
             // not while an older search is still occupying that lane.
@@ -154,7 +160,8 @@ impl Gateway {
         }
         match tokio::time::timeout(Duration::from_secs(5), result).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(tonic::Status::failed_precondition(
+            Ok(Err(_)) => Err(crate::error::failed_precondition(
+                "gateway-unavailable",
                 "Linn gateway connection dropped",
             )),
             Err(_) => Err(tonic::Status::deadline_exceeded(
@@ -216,7 +223,8 @@ async fn run_gateway(
         observed.published_at = Some(now());
         state.send_replace(observed.clone());
         while let Ok(request) = rx.try_recv() {
-            let _ = request.reply.send(Err(tonic::Status::failed_precondition(
+            let _ = request.reply.send(Err(crate::error::failed_precondition(
+                "linn-disconnected",
                 "Linn gateway is disconnected",
             )));
         }
@@ -338,7 +346,7 @@ async fn run_connection(
                     && let Some(waiter) = pending.remove(tag) {
                     debug!(tag, reply = %text, "Linn tagged reply");
                     let result = if let Some(code) = header.error_code {
-                        Err(tonic::Status::failed_precondition(format!("Linn error {code}: {}", header.message.as_deref().unwrap_or("request failed"))))
+                        Err(crate::error::failed_precondition("linn-rejected", format!("Linn error {code}: {}", header.message.as_deref().unwrap_or("request failed"))))
                     } else { Ok(envelope.clone()) };
                     if result.is_ok() {
                         optimism.acknowledged(tag);
@@ -616,12 +624,10 @@ async fn send_request(
     }
     if let Err(error) = socket.send(Message::Text(body.to_string().into())).await {
         if let Some(waiter) = pending.remove(&tag) {
-            let _ = waiter
-                .reply
-                .send(Err(tonic::Status::failed_precondition(format!(
-                    "failed to send {}: {error}",
-                    request.path
-                ))));
+            let _ = waiter.reply.send(Err(crate::error::failed_precondition(
+                "gateway-unavailable",
+                format!("failed to send {}: {error}", request.path),
+            )));
         }
         if let Some(key) = key {
             in_flight.remove(&key);

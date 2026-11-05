@@ -1,3 +1,4 @@
+mod error;
 mod gateway;
 mod optimism;
 mod service;
