@@ -55,10 +55,14 @@ message StateSnapshot {
 
 message PendingState {
   bool playback = 1;
+  // Aggregate retained for older clients.
   bool queue = 2;
   bool timeline = 3;
   bool volume = 4;
   bool mute = 5;
+  bool queue_index = 6;
+  bool queue_total = 7;
+  bool current_item = 8;
 }
 
 message NowPlayingState {

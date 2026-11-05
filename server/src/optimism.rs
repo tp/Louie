@@ -345,6 +345,9 @@ impl Optimism {
             timeline: self.timeline.is_some(),
             volume: self.volume.is_some(),
             mute: self.mute.is_some(),
+            queue_index: self.queue_index.is_some(),
+            queue_total: self.queue_total.is_some(),
+            current_item: self.current_item.is_some(),
         });
         effective.published_at = Some(std::time::SystemTime::now().into());
         effective
