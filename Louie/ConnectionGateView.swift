@@ -175,7 +175,7 @@ struct ConnectionGateView: View {
 
     private var gateOverlay: some View {
         ZStack {
-            Color(white: 0.97)
+            gateBackground
                 .ignoresSafeArea()
 
             Group {
@@ -218,15 +218,23 @@ struct ConnectionGateView: View {
 
     // MARK: - Pieces
 
+    private var gateBackground: Color {
+        #if os(macOS)
+            Color(nsColor: .windowBackgroundColor)
+        #else
+            Color(uiColor: .systemGroupedBackground)
+        #endif
+    }
+
     private var header: some View {
         VStack(spacing: 10) {
             WordmarkViewport(width: 180)
                 .frame(width: 152, alignment: .center)
 
-            Text("Connect to Linn DSM")
+            Text("Connect to Louie Pi")
                 .font(.title2.weight(.semibold))
 
-            Text("Louie talks to your Linn system over its CI Gateway API on your home network.")
+            Text("Louie connects to your Raspberry Pi, which keeps one connection to the Linn system.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -236,7 +244,7 @@ struct ConnectionGateView: View {
     private var addressCard: some View {
         VStack(spacing: 16) {
             VStack(spacing: 0) {
-                TextField("Address, e.g. 192.168.1.50", text: $settings.host)
+                TextField("Address, e.g. louie-pi.local", text: $settings.host)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
                 #if os(iOS)
@@ -259,7 +267,7 @@ struct ConnectionGateView: View {
             }
             .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 12))
 
-            Text("The IP address (or hostname) of the Linn DSM running the CI Gateway. If you use an IP, give the device a DHCP reservation in your router so it doesn't move. Stored only on this device.")
+            Text("The hostname or reserved IP address of your Raspberry Pi. Stored only on this device.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -288,7 +296,7 @@ struct ConnectionGateView: View {
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
 
-                Text("If the system asked about finding devices on your local network, allow it — Louie retries automatically. Also make sure the Linn API is enabled and the address is right.")
+                Text("If asked about local network access, allow it. Check that louie.service is running on the Pi and the address is right.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -299,7 +307,7 @@ struct ConnectionGateView: View {
                 Text("Still connecting to \(displayAddress)…")
                     .font(.headline)
 
-                Text("If the system asks about finding devices on your local network, allow it — that's how Louie reaches your Linn. After enabling the CI Gateway, the device takes a few minutes to come up.")
+                Text("If asked about local network access, allow it. Louie retries while the Pi starts.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -332,7 +340,7 @@ struct ConnectionGateView: View {
         Button {
             isShowingHelp = true
         } label: {
-            Label("How do I enable the Linn API?", systemImage: "questionmark.circle")
+            Label("How do I connect the Pi?", systemImage: "questionmark.circle")
                 .font(.footnote)
         }
         .buttonStyle(.plain)

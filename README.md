@@ -63,6 +63,19 @@ systemctl --user status louie.service
 journalctl --user -u louie.service -f
 ```
 
+### Swift client
+
+The app connects to `louie-pi.local:50051` by default. Its address can be
+changed in the connection screen or through `LOUIE_SERVER_URL` in the local
+developer `.env`. Old direct-DSM connection settings are not reused. The Pi
+owns the Linn connection and broadcasts full state snapshots to the app.
+
+The Swift messages and gRPC client under `Packages/Linn/Sources/Linn/Generated`
+are checked in. Regenerate them locally with
+`bash Packages/Linn/generate-proto.sh` after changing the proto. This builds
+the code generators from the versions pinned in `Packages/Linn/Package.swift`
+and uses a local `protoc`; it does not use Buf Cloud or remote code generation.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/iPad%20Home%20Dark.png">
   <source media="(prefers-color-scheme: light)" srcset="./docs/assets/iPad%20Home%20Light.png">

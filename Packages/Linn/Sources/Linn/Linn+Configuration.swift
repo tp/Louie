@@ -2,10 +2,10 @@ import Foundation
 
 public extension Linn {
     struct Configuration: Sendable {
-        public var ciGatewayWebSocketURL: URL
+        public var serverURL: URL
 
-        public init(ciGatewayWebSocketURL: URL) {
-            self.ciGatewayWebSocketURL = ciGatewayWebSocketURL
+        public init(serverURL: URL) {
+            self.serverURL = serverURL
         }
 
         public static func local(
@@ -14,16 +14,13 @@ public extension Linn {
             currentDirectoryURL: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         ) throws -> Self {
             let values = try DotEnv.load(fileURL: fileURL, currentDirectoryURL: currentDirectoryURL)
-            let urlString = environment["LINN_CI_GATEWAY_WS_URL"] ?? values["LINN_CI_GATEWAY_WS_URL"]
-
-            guard let urlString, !urlString.isEmpty else {
-                throw ConfigurationError.missingValue("LINN_CI_GATEWAY_WS_URL")
-            }
-            guard let url = URL(string: urlString) else {
+            let urlString = environment["LOUIE_SERVER_URL"] ?? values["LOUIE_SERVER_URL"]
+                ?? "http://louie-pi.local:50051"
+            guard let url = URL(string: urlString), url.host() != nil, url.port != nil else {
                 throw ConfigurationError.invalidURL(urlString)
             }
 
-            return Self(ciGatewayWebSocketURL: url)
+            return Self(serverURL: url)
         }
     }
 

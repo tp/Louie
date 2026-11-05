@@ -20,10 +20,15 @@ public protocol LinnGateway: Sendable {
     func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> CiGateway.MediaPage
     func searchMedia(serviceID: String, query: String, type: CiGateway.MediaSearchType, index: Int, count: Int) async throws -> CiGateway.MediaPage
     func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws
+    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement, preview: CiGateway.MediaItem?) async throws
     func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws
 }
 
 public extension LinnGateway {
+    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement, preview: CiGateway.MediaItem?) async throws {
+        try await selectMedia(mediaID: mediaID, room: room, queue: queue)
+    }
+
     func setVolume(_ volume: Int, room: String) async throws {
         try await setVolume(volume, room: room, group: true)
     }
@@ -217,7 +222,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = CiGateway(webSocketURL: configuration.ciGatewayWebSocketURL)
+        ciGateway = PiLinnGateway(serverURL: configuration.serverURL)
         configurationLoadAttempted = true
     }
 
@@ -286,8 +291,8 @@ public final class Linn {
             configurationLoadAttempted = true
             do {
                 let configuration = try Configuration.local()
-                Self.logger.info("Loaded Linn gateway websocket URL \(configuration.ciGatewayWebSocketURL.absoluteString, privacy: .public)")
-                ciGateway = CiGateway(webSocketURL: configuration.ciGatewayWebSocketURL)
+                Self.logger.info("Loaded Louie server URL \(configuration.serverURL.absoluteString, privacy: .public)")
+                ciGateway = PiLinnGateway(serverURL: configuration.serverURL)
             } catch {
                 let message = String(describing: error)
                 Self.logger.error("Failed to load Linn configuration: \(message, privacy: .public)")
@@ -565,7 +570,19 @@ public final class Linn {
             try await ciGateway.selectMedia(
                 mediaID: item.id,
                 room: room,
-                queue: CiGateway.QueuePlacement(placement)
+                queue: CiGateway.QueuePlacement(placement),
+                preview: CiGateway.MediaItem(
+                    id: item.id,
+                    kind: item.kind,
+                    title: item.title,
+                    album: item.album,
+                    artists: item.artists,
+                    artworkURL: item.artworkURL,
+                    duration: item.duration,
+                    childCount: item.childCount,
+                    isFavourite: item.isFavourite,
+                    disabledActions: item.canFavourite ? [] : ["favourite"]
+                )
             )
         }
     }

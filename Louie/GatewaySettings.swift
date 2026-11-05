@@ -2,10 +2,8 @@
 //  GatewaySettings.swift
 //  Louie
 //
-//  Where the CI gateway lives on the home network. The address is stored
-//  locally in UserDefaults — nothing leaves the device. The gateway machine
-//  should keep a fixed IP (static lease / DHCP reservation in the router),
-//  since the app reconnects to the stored address.
+//  The Raspberry Pi server's local address. Kept separate from the former
+//  direct Linn CI Gateway setting so old DSM addresses are not reused.
 //
 
 import Foundation
@@ -15,8 +13,8 @@ import Observation
 @MainActor
 @Observable
 final class GatewaySettings {
-    private static let hostKey = "gateway.host"
-    private static let portKey = "gateway.port"
+    private static let hostKey = "pi.host"
+    private static let portKey = "pi.port"
 
     var host: String {
         didSet {
@@ -31,19 +29,21 @@ final class GatewaySettings {
     }
 
     init() {
-        host = UserDefaults.standard.string(forKey: Self.hostKey) ?? ""
+        let fallback = try? Linn.Configuration.local()
+        host = UserDefaults.standard.string(forKey: Self.hostKey)
+            ?? fallback?.serverURL.host()
+            ?? "louie-pi.local"
         let storedPort = UserDefaults.standard.integer(forKey: Self.portKey)
-        port = storedPort == 0 ? 8088 : storedPort
+        port = storedPort == 0 ? fallback?.serverURL.port ?? 50051 : storedPort
     }
 
-    /// The stored address wins; the developer `.env` fallback
-    /// (`LINN_CI_GATEWAY_WS_URL`) keeps working when nothing is stored.
+    /// The stored address wins over the developer `LOUIE_SERVER_URL` fallback.
     var configuration: Linn.Configuration? {
         let trimmedHost = host.trimmingCharacters(in: .whitespaces)
         if !trimmedHost.isEmpty,
-           let url = URL(string: "ws://\(trimmedHost):\(port)/ws"),
+           let url = URL(string: "http://\(trimmedHost):\(port)"),
            url.host() != nil {
-            return Linn.Configuration(ciGatewayWebSocketURL: url)
+            return Linn.Configuration(serverURL: url)
         }
         return try? Linn.Configuration.local()
     }
