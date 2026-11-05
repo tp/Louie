@@ -31,9 +31,10 @@ The Linn CI Gateway WebSocket payload models live in the separate
 `bash server/linn-ci-gateway/generate.sh`. The script runs a pinned OpenAPI
 Generator image locally and commits only the model output; CI checks that it
 is current. The handwritten `websocket` module handles the live gateway's
-string-or-array `artist` deviation. Set `OPENAPI_USE_LOCAL_SPEC=1` when
-running the Swift spec generator to normalize its checked-in upstream copy
-without downloading a new one.
+string-or-array `artist` deviation. To update from a local gateway, run
+`bash server/linn-ci-gateway/fetch-spec.sh`, then
+`bash server/linn-ci-gateway/normalize.sh` and regenerate both clients. The
+Swift generator uses this same fetch script unless `OPENAPI_USE_LOCAL_SPEC=1`.
 
 If we add Buf for linting or Swift generation later, use only local schema
 inputs and `local:` plugins. Do not add `remote:` plugins or BSR module inputs
