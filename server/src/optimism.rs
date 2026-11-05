@@ -8,6 +8,7 @@ use crate::pb::{
     StateSnapshot, Timeline, Track, TransportState,
 };
 
+#[derive(Clone)]
 struct Pending<T> {
     tag: String,
     value: T,
@@ -41,6 +42,7 @@ struct QueueAdditions {
     deltas: Vec<Pending<i32>>,
 }
 
+#[derive(Clone)]
 enum PreviewRule {
     Row,
     Media {
@@ -53,6 +55,16 @@ enum PreviewRule {
 struct ShuffleTimelineBaseline {
     title: Option<String>,
     index: Option<i32>,
+}
+
+struct ReplaceFallback {
+    active_tag: String,
+    queue_index: Option<Pending<i32>>,
+    current_item: Option<Pending<Option<CurrentItem>>>,
+    current_item_rule: Option<PreviewRule>,
+    timeline: Option<Pending<Option<Timeline>>>,
+    queue_baseline_index: Option<i32>,
+    queue_baseline_direct: bool,
 }
 
 #[derive(Default)]
@@ -70,6 +82,8 @@ pub struct Optimism {
     volume: Option<Pending<i32>>,
     mute: Option<Pending<bool>>,
     replace_revision: Option<Pending<ReplaceBaseline>>,
+    replace_fallback: Option<ReplaceFallback>,
+    last_observed_total: Option<i32>,
 }
 
 impl Optimism {
@@ -85,6 +99,7 @@ impl Optimism {
         let Some(playing) = observed.now_playing.as_ref() else {
             return false;
         };
+        self.last_observed_total = playing.playlist.as_ref().and_then(|p| p.total);
         match path {
             "/V2/transport/play" => {
                 self.transport = Some(Pending::new(tag, TransportState::Playing as i32, 4));
@@ -110,13 +125,13 @@ impl Optimism {
                 else {
                     return false;
                 };
-                self.select_queue(tag, current.saturating_add(step as i32), playing);
+                self.select_queue(tag, current.saturating_add(step as i32), playing, false);
             }
             "/V2/playlist/select" => {
                 let Some(index) = body.get("index").and_then(Value::as_i64) else {
                     return false;
                 };
-                self.select_queue(tag, index as i32, playing);
+                self.select_queue(tag, index as i32, playing, false);
             }
             "/V2/seek/set_position" => {
                 let Some(position) = body.get("position").and_then(Value::as_i64) else {
@@ -154,87 +169,88 @@ impl Optimism {
                     self.timeline = Some(Pending::new(tag, None, 8));
                     self.shuffle_timeline_baseline = None;
                 }
-                if let Some(item) = preview {
-                    let count = queued_track_count(&item);
-                    if placement == "replace" {
-                        self.queue_index = None;
-                        self.queue_total = None;
-                        self.queue_baseline_index = None;
-                        self.queue_baseline_direct = false;
-                        self.queue_additions = None;
-                        self.replace_revision = Some(Pending::new(
-                            tag,
-                            ReplaceBaseline {
-                                revision: playing
-                                    .playlist
-                                    .as_ref()
-                                    .and_then(|p| p.content_revision),
-                                total: playing.playlist.as_ref().and_then(|p| p.total),
-                                current_index: playing
-                                    .playlist
-                                    .as_ref()
-                                    .and_then(|p| p.current_index),
-                            },
-                            8,
-                        ));
-                        if let Some(count) = count {
-                            self.queue_total = Some(Pending::new(tag, count, 8));
-                            self.queue_index = Some(Pending::new(tag, 0, 8));
-                            self.queue_baseline_index = Some(0);
-                            self.queue_baseline_direct = false;
-                        }
-                    } else if let Some(count) = count {
-                        let base_total = self
-                            .queue_total
-                            .as_ref()
-                            .map(|p| p.value)
-                            .or_else(|| playing.playlist.as_ref().and_then(|p| p.total));
-                        if let Some(total) = base_total {
-                            self.queue_additions
-                                .get_or_insert_with(|| QueueAdditions {
-                                    base_total: total,
-                                    deltas: Vec::new(),
-                                })
-                                .deltas
-                                .push(Pending::new(tag, count, 8));
+                let count = preview.as_ref().and_then(queued_track_count);
+                if placement == "replace" {
+                    self.queue_index = None;
+                    self.queue_total = None;
+                    self.queue_baseline_index = None;
+                    self.queue_baseline_direct = false;
+                    self.queue_additions = None;
+                    self.replace_fallback = None;
+                    self.replace_revision = Some(Pending::new(
+                        tag,
+                        ReplaceBaseline {
+                            revision: playing.playlist.as_ref().and_then(|p| p.content_revision),
+                            total: playing.playlist.as_ref().and_then(|p| p.total),
+                            current_index: playing.playlist.as_ref().and_then(|p| p.current_index),
+                        },
+                        8,
+                    ));
+                    if let Some(count) = count {
+                        self.queue_total = Some(Pending::new(tag, count, 8));
+                        self.queue_index = Some(Pending::new(tag, 0, 8));
+                        self.queue_baseline_index = Some(0);
+                    }
+                } else if let Some(count) = count {
+                    let base_total = self.queue_total.as_ref().map(|p| p.value).or_else(|| {
+                        (self.replace_revision.is_none())
+                            .then_some(playing.playlist.as_ref().and_then(|p| p.total))
+                            .flatten()
+                    });
+                    if let Some(total) = base_total {
+                        self.queue_additions
+                            .get_or_insert_with(|| QueueAdditions {
+                                base_total: total,
+                                deltas: Vec::new(),
+                            })
+                            .deltas
+                            .push(Pending::new(tag, count, 8));
+                    }
+                }
+                if matches!(placement, "now" | "replace") {
+                    let mut superseded_titles = match &self.current_item_rule {
+                        Some(PreviewRule::Media {
+                            superseded_titles, ..
+                        }) => superseded_titles.clone(),
+                        _ => Vec::new(),
+                    };
+                    if let Some(previous) =
+                        self.current_item.as_ref().and_then(|p| p.value.as_ref())
+                    {
+                        let previous_title = title(previous);
+                        if !previous_title.is_empty() {
+                            superseded_titles.push(previous_title.to_owned());
                         }
                     }
-                    if matches!(placement, "now" | "replace") {
-                        let mut superseded_titles = match &self.current_item_rule {
-                            Some(PreviewRule::Media {
-                                superseded_titles, ..
-                            }) => superseded_titles.clone(),
-                            _ => Vec::new(),
-                        };
-                        if let Some(previous) =
-                            self.current_item.as_ref().and_then(|p| p.value.as_ref())
-                        {
-                            let previous_title = title(previous);
-                            if !previous_title.is_empty() {
-                                superseded_titles.push(previous_title.to_owned());
-                            }
-                        }
-                        self.current_item = Some(Pending::new(
-                            tag,
+                    self.current_item = Some(Pending::new(
+                        tag,
+                        preview.as_ref().and_then(|item| {
                             first_track
                                 .as_ref()
                                 .and_then(media_preview)
-                                .or_else(|| media_preview(&item)),
-                            8,
-                        ));
-                        self.current_item_rule = Some(PreviewRule::Media {
-                            baseline_title: playing
-                                .current_item
-                                .as_ref()
-                                .map(title)
-                                .map(str::to_owned),
-                            baseline_revision: playing
-                                .playlist
-                                .as_ref()
-                                .and_then(|p| p.content_revision),
-                            superseded_titles,
-                        });
+                                .or_else(|| media_preview(item))
+                        }),
+                        8,
+                    ));
+                    if let Some(expected) = self
+                        .current_item
+                        .as_ref()
+                        .and_then(|p| p.value.as_ref())
+                        .map(title)
+                    {
+                        superseded_titles.retain(|old| !old.eq_ignore_ascii_case(expected));
                     }
+                    if superseded_titles.len() > 8 {
+                        superseded_titles.drain(..superseded_titles.len() - 8);
+                    }
+                    self.current_item_rule = Some(PreviewRule::Media {
+                        baseline_title: playing.current_item.as_ref().map(title).map(str::to_owned),
+                        baseline_revision: playing
+                            .playlist
+                            .as_ref()
+                            .and_then(|p| p.content_revision),
+                        superseded_titles,
+                    });
                 }
             }
             _ => return false,
@@ -242,7 +258,34 @@ impl Optimism {
         true
     }
 
-    fn select_queue(&mut self, tag: &str, index: i32, playing: &NowPlayingState) {
+    pub fn apply_deferred_select(
+        &mut self,
+        tag: &str,
+        body: &Value,
+        observed: &StateSnapshot,
+    ) -> bool {
+        let Some(playing) = observed.now_playing.as_ref() else {
+            return false;
+        };
+        let Some(index) = body
+            .get("index")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+        else {
+            return false;
+        };
+        self.last_observed_total = playing.playlist.as_ref().and_then(|p| p.total);
+        self.select_queue(tag, index, playing, true);
+        true
+    }
+
+    fn select_queue(
+        &mut self,
+        tag: &str,
+        index: i32,
+        playing: &NowPlayingState,
+        prior_select_in_flight: bool,
+    ) {
         if index < 0
             || self
                 .predicted_total(playing.playlist.as_ref().and_then(|p| p.total))
@@ -250,14 +293,34 @@ impl Optimism {
         {
             return;
         }
-        let direct = self.queue_index.is_none() && self.replace_revision.is_none();
-        let baseline = self
-            .queue_baseline_index
-            .or_else(|| playing.playlist.as_ref().and_then(|p| p.current_index));
+        if self.replace_revision.is_some() {
+            if let Some(fallback) = self.replace_fallback.as_mut() {
+                fallback.active_tag = tag.to_owned();
+            } else {
+                self.replace_fallback = Some(ReplaceFallback {
+                    active_tag: tag.to_owned(),
+                    queue_index: self.queue_index.clone(),
+                    current_item: self.current_item.clone(),
+                    current_item_rule: self.current_item_rule.clone(),
+                    timeline: self.timeline.clone(),
+                    queue_baseline_index: self.queue_baseline_index,
+                    queue_baseline_direct: self.queue_baseline_direct,
+                });
+            }
+        }
+        let direct = !prior_select_in_flight
+            && self.queue_index.is_none()
+            && self.replace_revision.is_none();
+        let baseline = self.queue_baseline_index.or_else(|| {
+            (self.replace_revision.is_none() || self.queue_total.is_some())
+                .then_some(playing.playlist.as_ref().and_then(|p| p.current_index))
+                .flatten()
+        });
         self.queue_baseline_index = baseline;
         self.queue_baseline_direct = direct;
         let mut pending = Pending::new(tag, index, 6);
-        pending.saw_different_value = baseline.is_some_and(|current| current != index);
+        pending.saw_different_value =
+            self.replace_revision.is_some() || baseline.is_some_and(|current| current != index);
         self.queue_index = Some(pending);
         self.timeline = Some(Pending::new(tag, None, 6));
         self.shuffle_timeline_baseline = None;
@@ -270,8 +333,10 @@ impl Optimism {
                 .and_then(|p| p.items.iter().find(|item| item.index == index))
                 .and_then(playlist_preview)
         };
-        self.current_item = Some(Pending::new(tag, preview, 6));
-        self.current_item_rule = Some(PreviewRule::Row);
+        if preview.is_some() || self.current_item.is_some() || self.replace_revision.is_some() {
+            self.current_item = Some(Pending::new(tag, preview, 6));
+            self.current_item_rule = Some(PreviewRule::Row);
+        }
     }
 
     pub fn acknowledged(&mut self, tag: &str) {
@@ -287,10 +352,50 @@ impl Optimism {
         self.timeline.is_some()
     }
 
+    pub fn replace_has_unknown_size(&self) -> bool {
+        self.replace_revision.is_some() && self.queue_total.is_none()
+    }
+
+    pub fn promote_surviving_select(&mut self, observed_index: Option<i32>) {
+        if let Some(pending) = self.queue_index.as_mut() {
+            self.queue_baseline_index = observed_index;
+            self.queue_baseline_direct = true;
+            pending.saw_different_value =
+                observed_index.is_some_and(|index| index != pending.value);
+        }
+    }
+
+    pub fn add_superseded_titles(&mut self, titles: Vec<String>) {
+        if let Some(PreviewRule::Media {
+            superseded_titles, ..
+        }) = &mut self.current_item_rule
+        {
+            let expected = self
+                .current_item
+                .as_ref()
+                .and_then(|pending| pending.value.as_ref())
+                .map(title);
+            for title in titles {
+                if !title.trim().is_empty()
+                    && !expected.is_some_and(|value| value.eq_ignore_ascii_case(&title))
+                    && !superseded_titles
+                        .iter()
+                        .any(|old| old.eq_ignore_ascii_case(&title))
+                {
+                    superseded_titles.push(title);
+                }
+            }
+            if superseded_titles.len() > 8 {
+                superseded_titles.drain(..superseded_titles.len() - 8);
+            }
+        }
+    }
+
     pub fn reconcile(&mut self, observed: &StateSnapshot) -> bool {
         let Some(playing) = observed.now_playing.as_ref() else {
             return self.expire();
         };
+        self.last_observed_total = playing.playlist.as_ref().and_then(|p| p.total);
         let before = self.count();
         let before_total = self.predicted_total(None);
         clear_if(&mut self.transport, playing.transport_state);
@@ -298,14 +403,26 @@ impl Optimism {
         if self.replace_revision.as_ref().is_some_and(|pending| {
             let playlist = playing.playlist.as_ref();
             let new_revision = revision.is_some() && revision != pending.value.revision;
+            let total_matches = self.queue_total.as_ref().is_none_or(|total| {
+                let actual = playlist.and_then(|p| p.total);
+                actual == Some(total.value)
+                    || self.queue_additions.as_ref().is_some_and(|additions| {
+                        let mut predicted = additions.base_total;
+                        additions.deltas.iter().any(|delta| {
+                            predicted = predicted.saturating_add(delta.value);
+                            actual == Some(predicted)
+                        })
+                    })
+            });
             let changed_unversioned_queue = pending.value.revision.is_none()
                 && (playlist.and_then(|p| p.total) != pending.value.total
                     || playlist.and_then(|p| p.current_index) != pending.value.current_index);
-            pending.expired() || new_revision || changed_unversioned_queue
+            pending.expired() || (total_matches && (new_revision || changed_unversioned_queue))
         }) && let Some(replace) = self.replace_revision.take()
         {
             clear_tag(&mut self.queue_index, &replace.tag);
             clear_tag(&mut self.queue_total, &replace.tag);
+            self.replace_fallback = None;
         }
         if self.replace_revision.is_none() {
             clear_queue_index(
@@ -321,9 +438,17 @@ impl Optimism {
                 playing.playlist.as_ref().and_then(|p| p.total),
             );
         } else {
+            let expired_select_tag = self
+                .queue_index
+                .as_ref()
+                .filter(|pending| pending.expired())
+                .map(|pending| pending.tag.clone());
             expire(&mut self.queue_index);
             expire(&mut self.queue_total);
             expire_additions(&mut self.queue_additions);
+            if let Some(tag) = expired_select_tag {
+                self.restore_replace_fallback(&tag);
+            }
         }
         if self.queue_index.is_none() {
             self.queue_baseline_index = None;
@@ -374,7 +499,12 @@ impl Optimism {
                                     })
                             })
                         });
-                        !is_stale || expected_song || matches_new_queue
+                        !is_stale
+                            || expected_song
+                            || (matches_new_queue
+                                && !superseded_titles
+                                    .iter()
+                                    .any(|old| old.eq_ignore_ascii_case(incoming_title)))
                     }
                 }),
                 None => false,
@@ -406,6 +536,7 @@ impl Optimism {
             self.timeline = None;
             self.shuffle_timeline_baseline = None;
         }
+        self.drop_out_of_bounds_select();
         before != self.count() || before_total != self.predicted_total(None)
     }
 
@@ -436,14 +567,28 @@ impl Optimism {
             .is_some_and(|pending| pending.tag == tag)
         {
             self.replace_revision = None;
-            self.queue_additions = None;
+            self.replace_fallback = None;
+            if let (Some(additions), Some(total)) =
+                (self.queue_additions.as_mut(), self.last_observed_total)
+            {
+                additions.base_total = total;
+            } else {
+                self.queue_additions = None;
+            }
         }
+        self.restore_replace_fallback(tag);
+        self.drop_out_of_bounds_select();
         before != self.count() || before_total != self.predicted_total(None)
     }
 
     pub fn expire(&mut self) -> bool {
         let before = self.count();
         let before_total = self.predicted_total(None);
+        let expired_select_tag = self
+            .queue_index
+            .as_ref()
+            .filter(|pending| pending.expired())
+            .map(|pending| pending.tag.clone());
         expire(&mut self.transport);
         expire(&mut self.current_item);
         if self.current_item.is_none() {
@@ -463,6 +608,13 @@ impl Optimism {
         expire(&mut self.volume);
         expire(&mut self.mute);
         expire(&mut self.replace_revision);
+        if self.replace_revision.is_none() {
+            self.replace_fallback = None;
+        }
+        if let Some(tag) = expired_select_tag {
+            self.restore_replace_fallback(&tag);
+        }
+        self.drop_out_of_bounds_select();
         before != self.count() || before_total != self.predicted_total(None)
     }
 
@@ -482,6 +634,14 @@ impl Optimism {
         }
         if let Some(p) = &self.queue_index {
             playing.playlist.get_or_insert_default().current_index = Some(p.value);
+        }
+        if self.replace_has_unknown_size() {
+            let playlist = playing.playlist.get_or_insert_default();
+            playlist.total = None;
+            if self.queue_index.is_none() {
+                playlist.current_index = None;
+            }
+            playlist.items.clear();
         }
         if let Some(total) = self.predicted_total(playing.playlist.as_ref().and_then(|p| p.total)) {
             playing.playlist.get_or_insert_default().total = Some(total);
@@ -525,6 +685,9 @@ impl Optimism {
     }
 
     fn predicted_total(&self, observed_total: Option<i32>) -> Option<i32> {
+        if self.replace_has_unknown_size() && self.queue_additions.is_none() {
+            return None;
+        }
         self.queue_additions.as_ref().map_or_else(
             || {
                 self.queue_total
@@ -543,6 +706,45 @@ impl Optimism {
                 )
             },
         )
+    }
+
+    fn restore_replace_fallback(&mut self, tag: &str) {
+        if self.replace_revision.is_some()
+            && self
+                .replace_fallback
+                .as_ref()
+                .is_some_and(|fallback| fallback.active_tag == tag)
+            && let Some(fallback) = self.replace_fallback.take()
+        {
+            self.queue_index = fallback.queue_index;
+            self.current_item = fallback.current_item;
+            self.current_item_rule = fallback.current_item_rule;
+            self.timeline = fallback.timeline;
+            self.queue_baseline_index = fallback.queue_baseline_index;
+            self.queue_baseline_direct = fallback.queue_baseline_direct;
+        }
+    }
+
+    fn drop_out_of_bounds_select(&mut self) {
+        let Some(total) = self.predicted_total(self.last_observed_total) else {
+            return;
+        };
+        if let Some(tag) = self
+            .queue_index
+            .as_ref()
+            .filter(|pending| pending.value >= total)
+            .map(|pending| pending.tag.clone())
+        {
+            clear_tag(&mut self.queue_index, &tag);
+            clear_tag(&mut self.current_item, &tag);
+            clear_tag(&mut self.timeline, &tag);
+            if self.current_item.is_none() {
+                self.current_item_rule = None;
+            }
+            self.queue_baseline_index = None;
+            self.queue_baseline_direct = false;
+            self.restore_replace_fallback(&tag);
+        }
     }
 }
 
@@ -1026,7 +1228,7 @@ mod tests {
         );
         let playing = optimism.snapshot(&observed).now_playing.unwrap();
         assert!(playing.current_item.is_none());
-        assert_eq!(playing.playlist.unwrap().total, Some(3));
+        assert_eq!(playing.playlist.unwrap().total, None);
     }
 
     #[test]
@@ -1320,6 +1522,24 @@ mod tests {
         assert_eq!(playing.playlist.unwrap().current_index, Some(1));
         assert!(playing.current_item.is_none());
         assert!(snapshot.pending.unwrap().current_item);
+        optimism.apply(
+            "out-of-bounds",
+            "/V2/playlist/select",
+            &json!({"index":2}),
+            None,
+            None,
+            &observed,
+        );
+        assert_eq!(
+            optimism
+                .snapshot(&observed)
+                .now_playing
+                .unwrap()
+                .playlist
+                .unwrap()
+                .current_index,
+            Some(1)
+        );
     }
 
     #[test]
@@ -1396,6 +1616,7 @@ mod tests {
                 .total,
             Some(3)
         );
+        assert!(!optimism.snapshot(&observed).pending.unwrap().queue_index);
     }
 
     #[test]
@@ -1550,5 +1771,323 @@ mod tests {
                 .map(title),
             Some("Song B")
         );
+    }
+
+    #[test]
+    fn deferred_select_keeps_inherited_baseline_until_first_command_fails() {
+        let observed = state();
+        let mut optimism = Optimism::default();
+        optimism.apply(
+            "first",
+            "/V2/playlist/select",
+            &json!({"index":0}),
+            None,
+            None,
+            &observed,
+        );
+        optimism.apply_deferred_select("second", &json!({"index":2}), &observed);
+        optimism.fail("second");
+        optimism.apply_deferred_select("third", &json!({"index":1}), &observed);
+        optimism.acknowledged("third");
+        optimism.reconcile(&observed);
+        assert!(optimism.snapshot(&observed).pending.unwrap().queue_index);
+        optimism.fail("first");
+        optimism.promote_surviving_select(Some(1));
+        optimism.acknowledged("third");
+        optimism.reconcile(&observed);
+        assert!(!optimism.snapshot(&observed).pending.unwrap().queue_index);
+    }
+
+    #[test]
+    fn plain_select_without_metadata_keeps_observed_song() {
+        let observed = state();
+        let mut optimism = Optimism::default();
+        optimism.apply(
+            "row",
+            "/V2/playlist/select",
+            &json!({"index":2}),
+            None,
+            None,
+            &observed,
+        );
+        let snapshot = optimism.snapshot(&observed);
+        assert_eq!(
+            snapshot
+                .now_playing
+                .unwrap()
+                .current_item
+                .as_ref()
+                .map(title),
+            Some("Old Song")
+        );
+        assert!(!snapshot.pending.unwrap().current_item);
+    }
+
+    #[test]
+    fn previewless_replace_avoids_old_queue_predictions() {
+        let observed = state();
+        let mut optimism = Optimism::default();
+        optimism.apply(
+            "replace",
+            "/V2/media/select",
+            &json!({"queue":"replace"}),
+            None,
+            None,
+            &observed,
+        );
+        assert!(optimism.replace_has_unknown_size());
+        let snapshot = optimism.snapshot(&observed);
+        let playlist = snapshot.now_playing.unwrap().playlist.unwrap();
+        assert_eq!(playlist.total, None);
+        assert_eq!(playlist.current_index, None);
+        let track = MediaItem {
+            r#type: MediaItemType::Track as i32,
+            ..Default::default()
+        };
+        optimism.apply(
+            "add",
+            "/V2/media/select",
+            &json!({"queue":"next"}),
+            Some(track),
+            None,
+            &observed,
+        );
+        assert!(optimism.queue_additions.is_none());
+        optimism.apply(
+            "row",
+            "/V2/playlist/select",
+            &json!({"index":2}),
+            None,
+            None,
+            &observed,
+        );
+        assert!(
+            optimism
+                .snapshot(&observed)
+                .now_playing
+                .unwrap()
+                .current_item
+                .is_none()
+        );
+        assert_eq!(optimism.queue_baseline_index, None);
+    }
+
+    #[test]
+    fn failed_select_restores_pending_replace_prediction() {
+        let observed = state();
+        let mut optimism = Optimism::default();
+        let album = MediaItem {
+            r#type: MediaItemType::Album as i32,
+            child_count: Some(2),
+            ..Default::default()
+        };
+        optimism.apply(
+            "replace",
+            "/V2/media/select",
+            &json!({"queue":"replace"}),
+            Some(album),
+            None,
+            &observed,
+        );
+        optimism.apply(
+            "row",
+            "/V2/playlist/select",
+            &json!({"index":1}),
+            None,
+            None,
+            &observed,
+        );
+        optimism.fail("row");
+        let snapshot = optimism.snapshot(&observed);
+        let playlist = snapshot.now_playing.unwrap().playlist.unwrap();
+        assert_eq!(playlist.current_index, Some(0));
+        assert_eq!(playlist.total, Some(2));
+        assert!(snapshot.pending.unwrap().queue_index);
+    }
+
+    #[test]
+    fn selecting_zero_during_replace_confirms_with_new_revision() {
+        let mut observed = state();
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap()
+            .content_revision = Some(10);
+        let mut optimism = Optimism::default();
+        let album = MediaItem {
+            r#type: MediaItemType::Album as i32,
+            child_count: Some(2),
+            ..Default::default()
+        };
+        optimism.apply(
+            "replace",
+            "/V2/media/select",
+            &json!({"queue":"replace"}),
+            Some(album),
+            None,
+            &observed,
+        );
+        optimism.apply(
+            "row",
+            "/V2/playlist/select",
+            &json!({"index":0}),
+            None,
+            None,
+            &observed,
+        );
+        optimism.acknowledged("row");
+        let playlist = observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap();
+        playlist.content_revision = Some(11);
+        playlist.total = Some(2);
+        playlist.current_index = Some(0);
+        optimism.reconcile(&observed);
+        assert!(!optimism.snapshot(&observed).pending.unwrap().queue_index);
+    }
+
+    #[test]
+    fn earlier_replace_revision_does_not_settle_newer_replace() {
+        let mut observed = state();
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap()
+            .content_revision = Some(10);
+        let mut optimism = Optimism::default();
+        for (tag, count) in [("first", 1), ("second", 2)] {
+            let album = MediaItem {
+                r#type: MediaItemType::Album as i32,
+                child_count: Some(count),
+                ..Default::default()
+            };
+            optimism.apply(
+                tag,
+                "/V2/media/select",
+                &json!({"queue":"replace"}),
+                Some(album),
+                None,
+                &observed,
+            );
+        }
+        let playlist = observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .playlist
+            .as_mut()
+            .unwrap();
+        playlist.content_revision = Some(11);
+        playlist.total = Some(1);
+        optimism.reconcile(&observed);
+        assert_eq!(
+            optimism
+                .replace_revision
+                .as_ref()
+                .map(|pending| pending.tag.as_str()),
+            Some("second")
+        );
+        assert_eq!(
+            optimism
+                .snapshot(&observed)
+                .now_playing
+                .unwrap()
+                .playlist
+                .unwrap()
+                .total,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn returning_to_a_superseded_title_can_confirm_without_revisions() {
+        let mut observed = state();
+        let mut optimism = Optimism::default();
+        for (tag, song) in [("a1", "Song A"), ("b", "Song B"), ("a2", "Song A")] {
+            let preview = MediaItem {
+                r#type: MediaItemType::Track as i32,
+                title: Some(song.into()),
+                ..Default::default()
+            };
+            optimism.apply(
+                tag,
+                "/V2/media/select",
+                &json!({"queue":"replace"}),
+                Some(preview),
+                None,
+                &observed,
+            );
+        }
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .current_item
+            .as_mut()
+            .unwrap()
+            .track = None;
+        observed
+            .now_playing
+            .as_mut()
+            .unwrap()
+            .current_item
+            .as_mut()
+            .unwrap()
+            .display_name = Some("Song A".into());
+        optimism.reconcile(&observed);
+        assert!(!optimism.snapshot(&observed).pending.unwrap().current_item);
+    }
+
+    #[test]
+    fn failed_replace_rebases_later_addition_on_observed_queue() {
+        let observed = state();
+        let mut optimism = Optimism::default();
+        let album = MediaItem {
+            r#type: MediaItemType::Album as i32,
+            child_count: Some(2),
+            ..Default::default()
+        };
+        let track = MediaItem {
+            r#type: MediaItemType::Track as i32,
+            ..Default::default()
+        };
+        optimism.apply(
+            "replace",
+            "/V2/media/select",
+            &json!({"queue":"replace"}),
+            Some(album),
+            None,
+            &observed,
+        );
+        optimism.apply(
+            "add",
+            "/V2/media/select",
+            &json!({"queue":"last"}),
+            Some(track),
+            None,
+            &observed,
+        );
+        optimism.fail("replace");
+        assert_eq!(
+            optimism
+                .snapshot(&observed)
+                .now_playing
+                .unwrap()
+                .playlist
+                .unwrap()
+                .total,
+            Some(4)
+        );
+        assert!(optimism.queue_additions.is_some());
     }
 }

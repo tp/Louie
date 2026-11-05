@@ -174,9 +174,11 @@ async fn run_gateway(
     let mut delay = Duration::from_millis(500);
     let mut observed = state.borrow().clone();
     let mut last_warning: Option<String> = None;
+    let mut last_warning_at: Option<Instant> = None;
     loop {
         observed.connection_status = ConnectionStatus::Connecting as i32;
         state.send_replace(observed.clone());
+        let attempt_started = Instant::now();
         let result = run_connection(
             &url,
             &requested_room,
@@ -189,12 +191,22 @@ async fn run_gateway(
         let was_connected = state.borrow().connection_status == ConnectionStatus::Connected as i32;
         if was_connected {
             delay = Duration::from_millis(500);
+        }
+        if was_connected && attempt_started.elapsed() >= Duration::from_secs(60) {
             last_warning = None;
         }
         let message = result.err().unwrap_or_else(|| "connection closed".into());
-        if last_warning.as_deref() != Some(&message) {
-            warn!("Linn gateway disconnected: {message}");
+        let warning_changed = last_warning.as_deref() != Some(&message);
+        let warning_due =
+            last_warning_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
+        if last_warning.is_none() || (warning_changed && warning_due) {
+            if was_connected {
+                warn!("Linn gateway disconnected: {message}");
+            } else {
+                warn!("Could not connect to Linn gateway: {message}");
+            }
             last_warning = Some(message.clone());
+            last_warning_at = Some(Instant::now());
         } else {
             info!("Linn gateway still unavailable: {message}");
         }
@@ -331,8 +343,15 @@ async fn run_connection(
                     if result.is_ok() {
                         optimism.acknowledged(tag);
                     }
-                    if result.is_err() && optimism.fail(tag) {
-                        state.send_replace(optimism.snapshot(observed));
+                    if result.is_err() {
+                        let changed = optimism.fail(tag);
+                        if waiter.coalesce_key.is_some_and(|key| key.path == "/V2/playlist/select")
+                            && deferred.contains_key(&CoalesceKey { path: "/V2/playlist/select", group: false }) {
+                            optimism.promote_surviving_select(observed.now_playing.as_ref().and_then(|p| p.playlist.as_ref()).and_then(|p| p.current_index));
+                        }
+                        if changed {
+                            state.send_replace(optimism.snapshot(observed));
+                        }
                     }
                     let _ = waiter.reply.send(result);
                     if let Some(key) = waiter.coalesce_key {
@@ -369,6 +388,9 @@ async fn run_connection(
                     if shuffle {
                         request.path = "/V2/transport/skip_track";
                         request.body = json!({"room": observed.room, "skip_track": step, "shuffle": true});
+                    } else if optimism.replace_has_unknown_size() {
+                        request.path = "/V2/transport/skip_track";
+                        request.body = json!({"room": observed.room, "skip_track": step});
                     } else {
                     let effective = optimism.snapshot(observed);
                     let playlist = effective.now_playing.and_then(|state| state.playlist);
@@ -387,11 +409,21 @@ async fn run_connection(
                     }
                     }
                 }
+                let mut superseded_row_titles = Vec::new();
                 if request.path == "/V2/media/select"
                     && matches!(request.body.get("queue").and_then(Value::as_str), Some("now" | "replace")) {
                     queue_epoch += 1;
+                    let row_title = |index: i32| observed.now_playing.as_ref()
+                        .and_then(|p| p.playlist.as_ref())
+                        .and_then(|p| p.items.iter().find(|item| item.index == index))
+                        .and_then(|item| item.display_name.clone());
+                    superseded_row_titles.extend(pending.values().filter_map(|waiter| waiter.target_index).filter_map(row_title));
                     let select_key = CoalesceKey { path: "/V2/playlist/select", group: false };
                     if let Some(old) = deferred.remove(&select_key) {
+                        if let Some(title) = old.request.body.get("index").and_then(Value::as_i64)
+                            .and_then(|index| i32::try_from(index).ok()).and_then(row_title) {
+                            superseded_row_titles.push(title);
+                        }
                         if optimism.fail(&old.tag) {
                             state.send_replace(optimism.snapshot(observed));
                         }
@@ -403,21 +435,12 @@ async fn run_connection(
                 let key = coalesce_key(&request);
                 if request.path == "/V2/playlist/select"
                     && let Some(key) = key
+                    && !deferred.contains_key(&key)
                     && let Some(index) = request.body.get("index").and_then(Value::as_i64)
-                    && let Some(in_flight_tag) = pending.iter().find_map(|(tag, waiter)|
-                        (waiter.coalesce_key == Some(key)
+                    && pending.values().any(|waiter|
+                        waiter.coalesce_key == Some(key)
                             && waiter.queue_epoch == queue_epoch
-                            && waiter.target_index == i32::try_from(index).ok()).then(|| tag.clone())) {
-                    if let Some(old) = deferred.remove(&key) {
-                        if optimism.fail(&old.tag) {
-                            state.send_replace(optimism.snapshot(observed));
-                        }
-                        let _ = old.request.reply.send(Ok(Value::Null));
-                    }
-                    if optimism.apply(&in_flight_tag, request.path, &request.body,
-                        request.preview.clone(), request.first_track.clone(), observed) {
-                        state.send_replace(optimism.snapshot(observed));
-                    }
+                            && waiter.target_index == i32::try_from(index).ok()) {
                     let _ = request.reply.send(Ok(Value::Null));
                     continue;
                 }
@@ -441,13 +464,19 @@ async fn run_connection(
                         };
                         let _ = old.request.reply.send(result);
                     }
-                    if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
+                    let applied = if key.path == "/V2/playlist/select" {
+                        optimism.apply_deferred_select(&tag, &request.body, observed)
+                    } else {
+                        optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed)
+                    };
+                    if applied {
                         state.send_replace(optimism.snapshot(observed));
                     }
                     deferred.insert(key, TaggedRequest { tag, request, queue_epoch });
                     continue;
                 }
                 if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
+                    optimism.add_superseded_titles(superseded_row_titles);
                     state.send_replace(optimism.snapshot(observed));
                 }
                 let search = request.path == "/V2/services/search";
@@ -464,7 +493,12 @@ async fn run_connection(
                     .map(|(tag, _)| tag.clone()).collect();
                 for tag in expired {
                     if let Some(waiter) = pending.remove(&tag) {
-                        if optimism.fail(&tag) {
+                        let changed = optimism.fail(&tag);
+                        if waiter.coalesce_key.is_some_and(|key| key.path == "/V2/playlist/select")
+                            && deferred.contains_key(&CoalesceKey { path: "/V2/playlist/select", group: false }) {
+                            optimism.promote_surviving_select(observed.now_playing.as_ref().and_then(|p| p.playlist.as_ref()).and_then(|p| p.current_index));
+                        }
+                        if changed {
                             state.send_replace(optimism.snapshot(observed));
                         }
                         let _ = waiter.reply.send(Err(tonic::Status::deadline_exceeded("Linn request timed out")));
@@ -1225,17 +1259,27 @@ mod tests {
                 .is_some_and(|pending| pending.playback)
         })
         .await;
+        state.borrow_and_update();
         let third_gateway = gateway.clone();
         let third = tokio::spawn(async move {
             third_gateway
                 .request("/V2/playlist/select", json!({"room":"Linn", "index":1}))
                 .await
         });
+        tokio::time::timeout(Duration::from_secs(2), state.changed())
+            .await
+            .expect("third selection was not processed")
+            .unwrap();
         release_tx.send(()).unwrap();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
         replace.await.unwrap().unwrap();
-        assert_eq!(selections.recv().await, Some(1));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), selections.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
         third.await.unwrap().unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(100), selections.recv())
