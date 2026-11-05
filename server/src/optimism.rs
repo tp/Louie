@@ -342,7 +342,12 @@ fn media_preview(item: &MediaItem) -> Option<CurrentItem> {
     ) {
         return None;
     }
-    let title = item.title.as_deref().or(item.name.as_deref())?.to_owned();
+    let title = item
+        .title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .or(item.name.as_deref().filter(|name| !name.trim().is_empty()))?
+        .to_owned();
     Some(CurrentItem {
         id: format!("preview:{}", item.id),
         display_name: Some(title.clone()),

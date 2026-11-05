@@ -417,6 +417,8 @@ fn media_item(item: &models::ItemMetaData) -> pb::MediaItem {
         } else {
             pb::MediaProvider::Other as i32
         },
+        linn_class: Some(item.class.clone()),
+        contained_classes: contained,
     }
 }
 
@@ -473,5 +475,19 @@ mod tests {
         assert_eq!(album.is_favourite, Some(true));
         assert!(album.can_favourite);
         assert_eq!(album.r#type, pb::MediaItemType::Album as i32);
+        assert_eq!(album.linn_class.as_deref(), Some("md.qobuz.album"));
+
+        let folder = media_page(json!({
+            "data": {"children": [{
+                "id": "folder:1", "class": "md.container.qobuz.album",
+                "contained_classes": ["md.album.qobuz"]
+            }]}
+        }))
+        .unwrap();
+        assert_eq!(
+            folder.children[0].linn_class.as_deref(),
+            Some("md.container.qobuz.album")
+        );
+        assert_eq!(folder.children[0].contained_classes, ["md.album.qobuz"]);
     }
 }

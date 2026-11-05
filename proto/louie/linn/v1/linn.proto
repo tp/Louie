@@ -223,6 +223,10 @@ message MediaItem {
   bool is_container = 11;
   bool can_favourite = 12;
   MediaProvider provider = 13;
+  // Preserve Linn's precise class for library navigation (for example,
+  // md.container.qobuz.album) rather than reconstructing it from type.
+  optional string linn_class = 14;
+  repeated string contained_classes = 15;
 }
 
 enum QueuePlacement {
