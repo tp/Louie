@@ -10,61 +10,9 @@ Louie is an iOS companion app for the home. It currently supports managing one's
 
 ## Linn server
 
-The Raspberry Pi server is in `server/`; its gRPC schema is in
-`proto/louie/linn/v1/linn.proto`. Build and test it with:
-
-```sh
-cd server
-cargo test --workspace --locked --all-targets
-cargo build --release --locked
-```
-
-`server/rust-toolchain.toml` fixes the Rust version, and `server/Cargo.lock` fixes
-crate versions. `build.rs` generates Rust code locally using the versioned
-`protoc-bin-vendored` crate; no system `protoc` installation or Buf account is
-needed. Cargo downloads dependencies from crates.io on a clean machine, but
-the schema and code-generation inputs are not sent to a hosted generator.
-
-The Linn CI Gateway WebSocket payload models live in the separate
-`server/linn-ci-gateway` crate. They are generated from the normalized local
-`server/linn-ci-gateway/openapi.yaml` by running
-`bash server/linn-ci-gateway/generate.sh`. The script runs a pinned OpenAPI
-Generator Docker image locally and generates only models and their module index;
-Docker is required. The normalized spec includes only the wrapped endpoints
-and related schemas. CI checks regeneration and runs tests and Clippy for both
-workspace crates. Generated models are marked in `.gitattributes` so GitHub
-collapses their diffs by default. The handwritten `websocket` module handles
-the live gateway's string-or-array `artist` deviation. To update from a local gateway, run
-`bash server/linn-ci-gateway/fetch-spec.sh`, then
-`bash server/linn-ci-gateway/normalize.sh`, then regenerate the Rust models
-with `bash server/linn-ci-gateway/generate.sh`.
-The Apple apps use the server's gRPC API and do not compile the CI Gateway
-OpenAPI models.
-
-If we add Buf for linting or Swift generation later, use only local schema
-inputs and `local:` plugins. Do not add `remote:` plugins or BSR module inputs
-to the generation configuration.
-
-### Pi deployment
-
-Run `bash server/deploy/deploy-pi.sh` from the repository root. It builds an
-ARM64 Linux release binary in Docker with the pinned Rust version, copies it
-over SSH, verifies its checksum, restarts `louie.service`, and checks the gRPC
-state stream. The smoke check also works while Linn is offline. It keeps the
-previous binary, check tool, and systemd unit for rollback if the check fails.
-
-The Pi configuration is at `~/.config/louie/server.env`; the initial values are
-in `server/deploy/server.env.example`. The user unit is
-`server/deploy/louie.service`. User lingering is enabled on the Pi so the
-service starts at boot. To inspect it on the Pi:
-
-Set `SENTRY_DSN` in `server.env` to send server warnings, errors, and panics
-to Sentry. The server runs normally without a DSN.
-
-```sh
-systemctl --user status louie.service
-journalctl --user -u louie.service -f
-```
+[Louie Home Server](server/README.md) runs on the Raspberry Pi and owns the
+Linn connection. See its README for architecture, configuration, builds, tests,
+model generation, deployment, and systemd operations.
 
 ### Swift client
 
