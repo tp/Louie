@@ -14,7 +14,8 @@ Apple apps → gRPC → `louie-server` → WebSocket → Linn CI Gateway
 | [`src/main.rs`](src/main.rs) | Configuration, logging, and gRPC listener |
 | [`src/service.rs`](src/service.rs) | gRPC operations, validation, and library mapping |
 | [`src/gateway.rs`](src/gateway.rs) | One Linn socket, subscriptions, reconnects, tagged replies, and command scheduling |
-| [`src/optimism.rs`](src/optimism.rs) | Pending predictions over observed Linn state |
+| [`src/optimism.rs`](src/optimism.rs) | Per-command, per-field predictions over observed Linn state |
+| [`src/scheduler.rs`](src/scheduler.rs) | Playback ordering, compatible supersession, dependencies and deadlines |
 | [`linn-ci-gateway`](linn-ci-gateway) | Generated payload models and handwritten WebSocket normalization |
 | [`linn.proto`](../proto/louie/linn/v1/linn.proto) | Client/server API contract |
 
@@ -25,10 +26,54 @@ separate from observed state confirmation. For row selection, a confirmed queue
 index does not confirm the song: the preview waits for changed, nonempty metadata
 or its timeout. Rejected commands release their own predictions.
 
-The server serializes searches and coalesces pending volume, mute, and row-selection
-commands. It reconnects to Linn automatically and preserves observed state while
-reporting a disconnected status. Shared playback prediction belongs here; Apple
-clients retain immediate feedback for local volume/mute controls and row taps.
+### Command ordering and prediction
+
+Playback has one dispatched command at a time. A gateway acknowledgement completes
+its gRPC call, but the lane remains occupied until the relevant Linn events settle
+its fields, the gateway rejects it, or the confirmation deadline expires. Evidence
+may arrive before the acknowledgement. Playlist, metadata, transport and seek
+updates confirm their own fields independently, in either arrival order.
+
+The bounded waiting queue preserves additions and dependent actions. Only adjacent
+compatible actions replace each other: row selections, seeks, play/pause, and album
+replacements. Replaced calls receive `CANCELLED` with `louie-error-reason: superseded`.
+Sequential skips accumulate against the projected row. Shuffle/unknown destinations
+stay unknown until observed. A→B→A sends A once if A settles successfully.
+
+Volume and mute have independent lanes and keep latest-value-wins dispatch after
+acknowledgement. Library browsing is independent of playback; searches retain their
+existing serial queue. Apple clients project server snapshots and retain immediate
+local volume/mute feedback and row markers.
+
+| Limit | Behaviour |
+|---|---|
+| Waiting queue | At most 8 actions per lane, each with a 15-second lifetime |
+| Gateway acknowledgement | 5 seconds from dispatch |
+| Playback confirmation | 3 seconds after acknowledgement; 5 for track selection/skip, 6 for media changes |
+| Timeout read-back | Up to 3 seconds; missing replies cause reconnect |
+| Swift RPC deadline | 25 seconds, allowing queue wait plus acknowledgement |
+
+Track selection allows for the roughly three-second playlist update delay seen on
+the live Linn, rather than timing out at the edge of that interval.
+
+A playback timeout removes its prediction and reads back transport, metadata,
+position and playlist before dispatching more playback commands. Read-back explicitly
+renews status subscriptions with `update: 1`: live testing showed that omission stops
+pushes, contrary to the vendor spec; `update: 0` cancels them as well. Row/seek targets
+are checked against the current queue contents and limits at dispatch; Linn's
+playlist revision also advances on selection updates, so revision alone is not a
+queue identity. Failed, expired or invalidated commands cancel dependent row/seek
+requests (`command-dependency`); unrelated additions and transport actions survive.
+Standby and disconnect clear pending work; controls are not replayed on reconnect.
+
+Track counts are hints. A changed queue with a mismatching count is displayed as
+observed, while the unconfirmed operation remains bounded by its deadline. No title
+history, fallback prediction stack, or restoration of expired commands is retained.
+
+Linn events have no causal command ID. Serialization and read-back reduce ambiguity
+but cannot prevent an old timed-out command or another controller from changing the
+device later. `pending` identifies predicted fields; settled fields follow observed
+state. This is bounded correction, not a guarantee of causal confirmation.
 
 Gateway connectivity and speaker power are separate: `now_playing.is_standby`
 comes from `/V2/product/status`, is read before the first connected snapshot,
@@ -191,8 +236,7 @@ and the Apple Now Playing integration are follow-up work. The music server does
 not require the Hey Louie/Modal voice backend.
 
 The deployed path is tested with IPv4. The server still accepts general socket
-addresses; IPv4-only validation is not yet enforced. Prediction handling for rare
-overlapping commands remains a simplification follow-up in
-[#27](https://github.com/tp/Louie/issues/27). Linn status frames carry no command ID,
-so pending predictions use observations and bounded timeouts rather than assuming
-an acknowledgement proves playback has changed.
+addresses; IPv4-only validation is not yet enforced. The command scheduler implements
+[#27](https://github.com/tp/Louie/issues/27); its scripted and WebSocket integration
+tests cover common flows and overlapping intentions. Live Linn latency and rare
+late-command behaviour still require hardware validation before deployment.

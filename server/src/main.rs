@@ -1,6 +1,7 @@
 mod error;
 mod gateway;
 mod optimism;
+mod scheduler;
 mod service;
 
 pub mod pb {

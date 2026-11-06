@@ -18,7 +18,8 @@ actor PiLinnGateway: LinnGateway {
     typealias Sleep = @Sendable (Int) async throws -> Void
     private static let commandOptions: CallOptions = {
         var options = CallOptions.defaults
-        options.timeout = .seconds(8)
+        // 15 s bounded server queue + 5 s gateway acknowledgement, with margin.
+        options.timeout = .seconds(25)
         return options
     }()
 
