@@ -407,14 +407,17 @@ enum PiLinnMapping {
             } else {
                 seekableRange = nil
             }
+            // A pending Play still carries the paused timeline. Anchor that
+            // projection at publication, never at the beginning of the pause.
+            let anchor = snapshot.pending.transport
+                ? (snapshot.hasPublishedAt ? snapshot.publishedAt : nil)
+                : (timeline.hasPositionSampledAt ? timeline.positionSampledAt : nil)
             result.timeline = .init(
                 position: position,
                 duration: duration,
                 progress: progress,
                 seekableRange: seekableRange,
-                sampledAtSeconds: timeline.hasPositionSampledAt
-                    ? Double(timeline.positionSampledAt.seconds) + Double(timeline.positionSampledAt.nanos) / 1_000_000_000
-                    : nil
+                sampledAtSeconds: anchor.map { Double($0.seconds) + Double($0.nanos) / 1_000_000_000 }
             )
         }
         let volume = state.roomVolume

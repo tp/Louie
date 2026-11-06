@@ -166,6 +166,18 @@ fn plan(
     now: u64,
 ) -> Option<Value> {
     let attrs = attributes(snapshot, entry, now);
+    // An unknown predicted destination is not an ended session. Wait for
+    // confirmation/expiry, while still honoring stop, standby and disconnect.
+    if attrs["canControlPlayback"] == true
+        && attrs["playback"]["song"].is_null()
+        && snapshot.pending.is_some_and(|pending| pending.current_item)
+        && matches!(
+            attrs["playback"]["state"].as_str(),
+            Some("playing" | "paused" | "buffering")
+        )
+    {
+        return None;
+    }
     let active = attrs["canControlPlayback"] == true
         && !attrs["playback"]["song"].is_null()
         && matches!(
@@ -251,6 +263,7 @@ fn attributes(snapshot: &pb::StateSnapshot, entry: &Registration, now: u64) -> V
     let sampled = state
         .timeline
         .as_ref()
+        .filter(|_| !snapshot.pending.is_some_and(|pending| pending.transport))
         .and_then(|t| t.position_sampled_at.as_ref())
         .map(seconds);
     let timestamp = sampled

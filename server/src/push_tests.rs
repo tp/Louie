@@ -159,3 +159,75 @@ fn payload_matches_the_shared_swift_fixture() {
     .unwrap();
     assert_eq!(attrs, expected);
 }
+
+#[test]
+fn pending_unknown_song_defers_pushes_without_hiding_terminal_states() {
+    let update = registration(2);
+    let mut state = snapshot();
+    let initial = plan(&state, &update, &[], None, 100).unwrap();
+    state.now_playing.as_mut().unwrap().current_item = None;
+    state.now_playing.as_mut().unwrap().timeline = None;
+    state.pending = Some(pb::PendingState {
+        current_item: true,
+        ..Default::default()
+    });
+    assert!(plan(&state, &update, &[], Some(&initial), 101).is_none());
+    assert!(plan(&state, &registration(1), &[], None, 101).is_none());
+    let mut terminal = state.clone();
+    terminal.pending.as_mut().unwrap().current_item = false;
+    assert_eq!(
+        plan(&terminal, &update, &[], Some(&initial), 102).unwrap()["aps"]["event"],
+        "end"
+    );
+    terminal = state.clone();
+    terminal.now_playing.as_mut().unwrap().transport_state =
+        Some(pb::TransportState::Stopped as i32);
+    assert_eq!(
+        plan(&terminal, &update, &[], Some(&initial), 102).unwrap()["aps"]["event"],
+        "end"
+    );
+    terminal = state.clone();
+    terminal.now_playing.as_mut().unwrap().is_standby = Some(true);
+    assert_eq!(
+        plan(&terminal, &update, &[], Some(&initial), 102).unwrap()["aps"]["event"],
+        "end"
+    );
+    terminal = state;
+    terminal.connection_status = pb::ConnectionStatus::Disconnected as i32;
+    assert_eq!(
+        plan(&terminal, &update, &[], Some(&initial), 102).unwrap()["aps"]["event"],
+        "end"
+    );
+    let recovered = snapshot();
+    assert_eq!(
+        plan(&recovered, &update, &[], None, 103).unwrap()["aps"]["event"],
+        "update"
+    );
+}
+
+#[test]
+fn predicted_resume_anchors_at_publication_not_the_start_of_the_pause() {
+    let mut state = snapshot();
+    state
+        .now_playing
+        .as_mut()
+        .unwrap()
+        .timeline
+        .as_mut()
+        .unwrap()
+        .position_seconds = Some(42);
+    state.published_at.as_mut().unwrap().seconds = 700;
+    state.pending = Some(pb::PendingState {
+        transport: true,
+        ..Default::default()
+    });
+    let attrs = attributes(&state, &registration(2), 701);
+    assert_eq!(attrs["timestampSeconds"], 700.0);
+    assert_eq!(attrs["playback"]["timeline"]["position"], 42);
+    // A confirmed playing sample must retain its clock for mid-song subscribers.
+    state.pending = None;
+    assert_eq!(
+        attributes(&state, &registration(2), 701)["timestampSeconds"],
+        100.0
+    );
+}

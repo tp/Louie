@@ -1,5 +1,5 @@
 import Foundation
-import Linn
+@testable import Linn
 @testable import LinnNowPlaying
 import Testing
 
@@ -88,4 +88,32 @@ func serverClockAnchorSurvivesNetworkDelayAndLocalNetworkLoss() {
     }
     model.receive(Linn.Snapshot(connectionState: .linnUnavailable(nil)))
     #expect(!model.attributes.hasContent)
+}
+
+@Test @MainActor
+func predictedResumeUsesPublicationTimeForAppAndExtension() throws {
+    var frame = Louie_Linn_V1_StateSnapshot()
+    frame.connectionStatus = .connected
+    frame.publishedAt.seconds = 700
+    frame.nowPlaying.transportState = .playing
+    frame.nowPlaying.currentItem.id = "song"
+    frame.nowPlaying.currentItem.track.title = "Song"
+    frame.nowPlaying.timeline.positionSeconds = 42
+    frame.nowPlaying.timeline.durationSeconds = 900
+    frame.nowPlaying.timeline.positionSampledAt.seconds = 100
+    frame.pending.transport = true
+    let mapped = PiLinnMapping.nowPlaying(frame)
+    #expect(mapped.timeline?.sampledAtSeconds == 700)
+    let linn = Linn(mockRoom: "Linn", currentSong: mapped.currentSong, playState: .playing, timeline: mapped.timeline)
+    let attributes = LinnSessionAttributes(linn: linn, serverURL: URL(string: "http://louie-pi.local:50051")!)
+    #expect(attributes.timestamp.timeIntervalSince1970 == 700)
+    let model = LinnMediaSession(attributes: attributes)
+    model.receive(mapped)
+    let position = try #require(model.attributes.playback.timeline?.position)
+    #expect(Double(position) + 701 - model.attributes.timestamp.timeIntervalSince1970 == 43)
+    frame.pending.transport = false
+    #expect(PiLinnMapping.nowPlaying(frame).timeline?.sampledAtSeconds == 100)
+    frame.pending.transport = true
+    frame.clearPublishedAt()
+    #expect(PiLinnMapping.nowPlaying(frame).timeline?.sampledAtSeconds == nil)
 }
