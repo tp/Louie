@@ -7,27 +7,34 @@
 
 import Foundation
 
-struct V2MediaFavouritePostRequest: Sendable, Codable, Hashable {
-    var tag: String?
-    var session: String
-    var mediaId: String
-    var favourite: Bool
+internal struct V2MediaFavouritePostRequest: Sendable, Codable, Hashable {
 
-    init(tag: String? = nil, session: String, mediaId: String, favourite: Bool) {
+    /** Opaque string, returned in the response. Varies per message. */
+    internal var tag: String?
+    /** Opaque string, returned in the response.  Fixed for a session. */
+    internal var session: String
+    /** Identifier of the item to mark or unmark as a favourite. */
+    internal var mediaId: String
+    /** True to set as favourite, false to clear. */
+    internal var favourite: Bool
+
+    internal init(tag: String? = nil, session: String, mediaId: String, favourite: Bool) {
         self.tag = tag
         self.session = session
         self.mediaId = mediaId
         self.favourite = favourite
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case tag
         case session
         case mediaId = "media_id"
         case favourite
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(tag, forKey: .tag)
         try container.encode(session, forKey: .session)

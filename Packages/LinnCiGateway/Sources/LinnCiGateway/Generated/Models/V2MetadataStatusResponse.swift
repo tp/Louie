@@ -42,4 +42,3 @@ internal struct V2MetadataStatusResponse: Sendable, Codable, Hashable {
         try container.encodeIfPresent(room, forKey: .room)
     }
 }
-

@@ -47,4 +47,3 @@ internal struct V2VolumeSetMutePostRequest: Sendable, Codable, Hashable {
         try container.encodeIfPresent(group, forKey: .group)
     }
 }
-

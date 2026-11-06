@@ -37,4 +37,3 @@ internal struct V2TransportPlayPostRequest: Sendable, Codable, Hashable {
         try container.encode(room, forKey: .room)
     }
 }
-

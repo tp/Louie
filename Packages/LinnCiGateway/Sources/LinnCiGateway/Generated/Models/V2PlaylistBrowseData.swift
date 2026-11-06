@@ -43,4 +43,3 @@ internal struct V2PlaylistBrowseData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(children, forKey: .children)
     }
 }
-

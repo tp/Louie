@@ -37,4 +37,3 @@ internal struct FilterSpec: Sendable, Codable, Hashable {
         try container.encodeIfPresent(incremental, forKey: .incremental)
     }
 }
-

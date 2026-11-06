@@ -27,4 +27,3 @@ internal struct ParamTag: Sendable, Codable, Hashable {
         try container.encodeIfPresent(tag, forKey: .tag)
     }
 }
-

@@ -58,4 +58,3 @@ internal struct V2MetadataStatusData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(bitDepth, forKey: .bitDepth)
     }
 }
-

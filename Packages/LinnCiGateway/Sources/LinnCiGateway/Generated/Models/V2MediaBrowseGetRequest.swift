@@ -7,15 +7,22 @@
 
 import Foundation
 
-struct V2MediaBrowseGetRequest: Sendable, Codable, Hashable {
-    var tag: String?
-    var session: String
-    var mediaId: String
-    var index: Int
-    var count: Int
-    var browseType: String
+internal struct V2MediaBrowseGetRequest: Sendable, Codable, Hashable {
 
-    init(tag: String? = nil, session: String, mediaId: String, index: Int, count: Int, browseType: String) {
+    /** Opaque string, returned in the response. Varies per message. */
+    internal var tag: String?
+    /** Opaque string, returned in the response.  Fixed for a session. */
+    internal var session: String
+    /** Identifier of the item in the browse hierarchy for which to return browse information. */
+    internal var mediaId: String
+    /** Zero-based offset into the list of children for the item from which to return information. */
+    internal var index: Int
+    /** Number of child items to return. */
+    internal var count: Int
+    /** Type required only when browsing media servers. */
+    internal var browseType: String
+
+    internal init(tag: String? = nil, session: String, mediaId: String, index: Int, count: Int, browseType: String) {
         self.tag = tag
         self.session = session
         self.mediaId = mediaId
@@ -24,7 +31,7 @@ struct V2MediaBrowseGetRequest: Sendable, Codable, Hashable {
         self.browseType = browseType
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case tag
         case session
         case mediaId = "media_id"
@@ -33,7 +40,9 @@ struct V2MediaBrowseGetRequest: Sendable, Codable, Hashable {
         case browseType = "browse_type"
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(tag, forKey: .tag)
         try container.encode(session, forKey: .session)

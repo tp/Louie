@@ -37,4 +37,3 @@ internal struct V2TransportPlayPost200Response: Sendable, Codable, Hashable {
         try container.encodeIfPresent(session, forKey: .session)
     }
 }
-

@@ -7,22 +7,23 @@
 
 import Foundation
 
-/** Browse data for a given item in the player's browseable content. */
-struct V2ServicesStatusData: Sendable, Codable, Hashable {
-    /** The name of the room to which the services belong. */
-    var id: String?
-    /** Current revision number for the content library. */
-    var contentRevision: Int?
-    /** Index of first service in the children array. */
-    var index: Int?
-    /** Count of services in the children array. */
-    var count: Int?
-    /** Total number of services that are available to be fetched. */
-    var total: Int?
-    /** Array of services. */
-    var children: [V2ServicesStatusItem]?
+/** Browse data for a given item in the player&#39;s browseable content. */
+internal struct V2ServicesStatusData: Sendable, Codable, Hashable {
 
-    init(id: String? = nil, contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [V2ServicesStatusItem]? = nil) {
+    /** The name of the room to which the services belong */
+    internal var id: String?
+    /** Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon. */
+    internal var contentRevision: Int64?
+    /** Index of first service in the children array. */
+    internal var index: Int?
+    /** Count of services in the children array. */
+    internal var count: Int?
+    /** Total number of services that are available to be fetched. */
+    internal var total: Int?
+    /** Array of services */
+    internal var children: [V2ServicesStatusItem]?
+
+    internal init(id: String? = nil, contentRevision: Int64? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [V2ServicesStatusItem]? = nil) {
         self.id = id
         self.contentRevision = contentRevision
         self.index = index
@@ -31,7 +32,7 @@ struct V2ServicesStatusData: Sendable, Codable, Hashable {
         self.children = children
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case id
         case contentRevision = "content_revision"
         case index
@@ -40,7 +41,9 @@ struct V2ServicesStatusData: Sendable, Codable, Hashable {
         case children
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(id, forKey: .id)
         try container.encodeIfPresent(contentRevision, forKey: .contentRevision)
@@ -50,3 +53,6 @@ struct V2ServicesStatusData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(children, forKey: .children)
     }
 }
+
+
+extension V2ServicesStatusData: Identifiable {}

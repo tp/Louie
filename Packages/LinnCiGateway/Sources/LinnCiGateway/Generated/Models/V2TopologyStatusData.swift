@@ -28,4 +28,3 @@ internal struct V2TopologyStatusData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(rooms, forKey: .rooms)
     }
 }
-

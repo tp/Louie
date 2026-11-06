@@ -7,31 +7,30 @@
 
 import Foundation
 
-struct V2ServicesStatusGetRequest: Sendable, Codable, Hashable {
-    /** Opaque string, returned in the response. Varies per message. */
-    var tag: String?
-    /** Opaque string, returned in the response.  Fixed for a session. */
-    var session: String
-    /** Room ID */
-    var room: String
-    /** If non-zero, gateway sends asynchronous updates. */
-    var update: Int?
+internal struct V2ServicesStatusGetRequest: Sendable, Codable, Hashable {
 
-    init(tag: String? = nil, session: String, room: String, update: Int? = nil) {
+    internal var tag: String?
+    internal var session: String
+    internal var room: String
+    internal var update: Int?
+
+    internal init(tag: String? = nil, session: String, room: String, update: Int? = nil) {
         self.tag = tag
         self.session = session
         self.room = room
         self.update = update
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case tag
         case session
         case room
         case update
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(tag, forKey: .tag)
         try container.encode(session, forKey: .session)

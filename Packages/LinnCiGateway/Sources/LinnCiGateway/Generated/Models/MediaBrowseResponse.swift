@@ -7,24 +7,29 @@
 
 import Foundation
 
-struct MediaBrowseResponse: Sendable, Codable, Hashable {
-    var session: String?
-    var tag: String?
-    var data: MediaBrowseData?
+internal struct MediaBrowseResponse: Sendable, Codable, Hashable {
 
-    init(session: String? = nil, tag: String? = nil, data: MediaBrowseData? = nil) {
+    /** Session from the original request that generated this response. */
+    internal var session: String?
+    /** Tag from the original request that generated this response. */
+    internal var tag: String?
+    internal var data: MediaBrowseData?
+
+    internal init(session: String? = nil, tag: String? = nil, data: MediaBrowseData? = nil) {
         self.session = session
         self.tag = tag
         self.data = data
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case session
         case tag
         case data
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(session, forKey: .session)
         try container.encodeIfPresent(tag, forKey: .tag)

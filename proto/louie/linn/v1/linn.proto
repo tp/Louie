@@ -1,0 +1,276 @@
+syntax = "proto3";
+
+package louie.linn.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// The Pi owns one Linn gateway connection and observes its configured room.
+service Linn {
+  rpc GetState(google.protobuf.Empty) returns (StateSnapshot);
+
+  // The first message is the current complete snapshot. Every later message
+  // is also complete; clients never need to merge partial Linn events.
+  rpc WatchState(google.protobuf.Empty) returns (stream StateSnapshot);
+
+  rpc Play(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc Pause(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc Previous(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc Next(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc Seek(SeekRequest) returns (google.protobuf.Empty);
+  rpc SelectPlaylistItem(SelectPlaylistItemRequest) returns (google.protobuf.Empty);
+  rpc SetVolume(SetVolumeRequest) returns (google.protobuf.Empty);
+  rpc SetMuted(SetMutedRequest) returns (google.protobuf.Empty);
+
+  rpc ListMediaServices(google.protobuf.Empty) returns (MediaServicesResponse);
+  rpc BrowseMedia(BrowseMediaRequest) returns (MediaPage);
+  rpc SearchMedia(SearchMediaRequest) returns (MediaPage);
+  rpc SelectMedia(SelectMediaRequest) returns (google.protobuf.Empty);
+  rpc SetMediaFavourite(SetMediaFavouriteRequest) returns (google.protobuf.Empty);
+
+  // NowPlaying-specific APNs tokens, not ordinary alert-notification tokens.
+  rpc RegisterNowPlayingToken(RegisterNowPlayingTokenRequest) returns (google.protobuf.Empty);
+  rpc RemoveNowPlayingToken(RemoveNowPlayingTokenRequest) returns (google.protobuf.Empty);
+}
+
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_CONNECTING = 1;
+  CONNECTION_STATUS_CONNECTED = 2;
+  CONNECTION_STATUS_DISCONNECTED = 3;
+}
+
+message StateSnapshot {
+  string room = 1;
+  google.protobuf.Timestamp published_at = 2;
+  ConnectionStatus connection_status = 3;
+  optional string connection_error = 4;
+  // Last known state may be stale while disconnected.
+  NowPlayingState now_playing = 5;
+  // Stable across Pi restarts; used for the Apple remote media session.
+  string now_playing_session_id = 6;
+  // Fields currently predicted by the Pi while waiting for Linn to confirm.
+  PendingState pending = 7;
+}
+
+message PendingState {
+  bool playback = 1;
+  // Aggregate retained for older clients.
+  bool queue = 2;
+  bool timeline = 3;
+  bool volume = 4;
+  bool mute = 5;
+  bool queue_index = 6;
+  bool queue_total = 7;
+  bool current_item = 8;
+  bool transport = 9;
+}
+
+message NowPlayingState {
+  optional TransportState transport_state = 1;
+  CurrentItem current_item = 2;
+  Playlist playlist = 3;
+  Timeline timeline = 4;
+  RoomVolume room_volume = 5;
+}
+
+enum TransportState {
+  TRANSPORT_STATE_UNSPECIFIED = 0;
+  TRANSPORT_STATE_STOPPED = 1;
+  TRANSPORT_STATE_PLAYING = 2;
+  TRANSPORT_STATE_PAUSED = 3;
+  TRANSPORT_STATE_BUFFERING = 4;
+  TRANSPORT_STATE_WAITING = 5;
+  TRANSPORT_STATE_UNKNOWN = 6;
+}
+
+message CurrentItem {
+  string id = 1;
+  optional string display_name = 2;
+  optional string artwork_url = 3;
+  Track track = 4;
+}
+
+message Track {
+  optional string title = 1;
+  optional string album = 2;
+  optional string artist = 3;
+}
+
+message Playlist {
+  repeated PlaylistItem items = 1;
+  optional int32 current_index = 2; // Zero-based; absent until known.
+  optional int32 total = 3;
+  optional int64 content_revision = 4;
+}
+
+message PlaylistItem {
+  int32 index = 1; // Zero-based queue index.
+  optional string display_name = 2;
+  optional string album = 3;
+  optional string artist = 4;
+  optional int32 duration_seconds = 5;
+  optional string artwork_url = 6;
+  bool is_current = 7;
+}
+
+message Timeline {
+  optional int32 position_seconds = 1;
+  optional int32 duration_seconds = 2;
+  optional bool is_seekable = 3;
+  optional int32 seek_lower_bound_seconds = 4;
+  optional int32 seek_upper_bound_seconds = 5;
+  // Anchor for extrapolating elapsed time without a push every second.
+  google.protobuf.Timestamp position_sampled_at = 6;
+}
+
+message RoomVolume {
+  optional int32 volume = 1; // Linn scale, 0..100.
+  optional bool is_muted = 2;
+  int32 maximum_volume = 3; // Server-enforced ceiling for commands.
+}
+
+message SeekRequest {
+  int32 position_seconds = 1; // Absolute position, not a relative offset.
+}
+
+message SelectPlaylistItemRequest {
+  int32 index = 1; // Zero-based.
+}
+
+enum VolumeScope {
+  VOLUME_SCOPE_UNSPECIFIED = 0;
+  VOLUME_SCOPE_GROUP = 1;
+  VOLUME_SCOPE_ROOM = 2;
+}
+
+message SetVolumeRequest {
+  int32 volume = 1; // 0..100.
+  VolumeScope scope = 2;
+}
+
+message SetMutedRequest {
+  bool is_muted = 1;
+  VolumeScope scope = 2;
+}
+
+message MediaService {
+  string id = 1;
+  string name = 2;
+}
+
+message MediaServicesResponse {
+  repeated MediaService services = 1;
+}
+
+message BrowseMediaRequest {
+  string media_id = 1;
+  int32 index = 2; // Zero-based page start.
+  int32 count = 3;
+  string browse_type = 4; // Linn gateway browse type; empty for default.
+}
+
+enum MediaSearchType {
+  MEDIA_SEARCH_TYPE_UNSPECIFIED = 0;
+  MEDIA_SEARCH_TYPE_ALBUMS = 1;
+  MEDIA_SEARCH_TYPE_ARTISTS = 2;
+  MEDIA_SEARCH_TYPE_TRACKS = 3;
+  MEDIA_SEARCH_TYPE_PLAYLISTS = 4;
+  MEDIA_SEARCH_TYPE_COMPOSERS = 5;
+  MEDIA_SEARCH_TYPE_STATIONS = 6;
+}
+
+message SearchMediaRequest {
+  string service_id = 1;
+  string query = 2;
+  MediaSearchType type = 3;
+  int32 index = 4;
+  int32 count = 5;
+}
+
+message MediaPage {
+  optional string id = 1;
+  optional int64 content_revision = 2;
+  int32 index = 3;
+  int32 count = 4;
+  optional int32 total = 5;
+  repeated MediaItem children = 6;
+}
+
+enum MediaItemType {
+  MEDIA_ITEM_TYPE_UNSPECIFIED = 0;
+  MEDIA_ITEM_TYPE_TRACK = 1;
+  MEDIA_ITEM_TYPE_ALBUM = 2;
+  MEDIA_ITEM_TYPE_ARTIST = 3;
+  MEDIA_ITEM_TYPE_PLAYLIST = 4;
+  MEDIA_ITEM_TYPE_STATION = 5;
+  MEDIA_ITEM_TYPE_CONTAINER = 6;
+  MEDIA_ITEM_TYPE_OTHER = 7;
+}
+
+enum MediaProvider {
+  MEDIA_PROVIDER_UNSPECIFIED = 0;
+  MEDIA_PROVIDER_QOBUZ = 1;
+  MEDIA_PROVIDER_OTHER = 2;
+}
+
+message MediaItem {
+  string id = 1;
+  MediaItemType type = 2;
+  optional string name = 3;
+  optional string title = 4;
+  optional string album = 5;
+  repeated string artists = 6;
+  optional string artwork_url = 7;
+  optional int32 duration_seconds = 8;
+  optional int32 child_count = 9;
+  optional bool is_favourite = 10;
+  bool is_container = 11;
+  bool can_favourite = 12;
+  MediaProvider provider = 13;
+  // Preserve Linn's precise class for library navigation (for example,
+  // md.container.qobuz.album) rather than reconstructing it from type.
+  optional string linn_class = 14;
+  repeated string contained_classes = 15;
+}
+
+enum QueuePlacement {
+  QUEUE_PLACEMENT_UNSPECIFIED = 0;
+  QUEUE_PLACEMENT_NOW = 1;
+  QUEUE_PLACEMENT_NEXT = 2;
+  QUEUE_PLACEMENT_LAST = 3;
+  QUEUE_PLACEMENT_REPLACE = 4;
+}
+
+message SelectMediaRequest {
+  string media_id = 1;
+  QueuePlacement queue = 2;
+  // Optional UI metadata so the Pi can broadcast the selection immediately.
+  MediaItem preview = 3;
+}
+
+message SetMediaFavouriteRequest {
+  string media_id = 1;
+  bool is_favourite = 2;
+}
+
+enum NowPlayingTokenKind {
+  NOW_PLAYING_TOKEN_KIND_UNSPECIFIED = 0;
+  NOW_PLAYING_TOKEN_KIND_PUSH_TO_START = 1;
+  NOW_PLAYING_TOKEN_KIND_SESSION_UPDATE = 2;
+}
+
+message RegisterNowPlayingTokenRequest {
+  // Stable per app installation; shared with the Now Playing extension.
+  string installation_id = 1;
+  NowPlayingTokenKind kind = 2;
+  bytes token = 3;
+  // Required for SESSION_UPDATE, empty for PUSH_TO_START.
+  string session_id = 4;
+}
+
+message RemoveNowPlayingTokenRequest {
+  string installation_id = 1;
+  NowPlayingTokenKind kind = 2;
+  string session_id = 3;
+}

@@ -16,6 +16,7 @@ func decodesServicesStatusWithQobuzService() throws {
         "index": 0,
         "count": 2,
         "total": 2,
+        "alpha": [0, null, 1],
         "children": [
           { "id": "service-radio", "name": "Radio", "class": "md.service" },
           { "id": "service-qobuz", "name": "Qobuz", "class": "md.service" }
@@ -71,10 +72,12 @@ func decodesMediaBrowseItemsWithFlexibleArtistAndFavouriteState() throws {
     }
     """
 
-    let response = try JSONDecoder().decode(MediaBrowseResponse.self, from: Data(json.utf8))
+    let normalized = try GatewayResponseNormalization.mediaBrowse(Data(json.utf8))
+    let response = try JSONDecoder().decode(MediaBrowseResponse.self, from: normalized)
     let children = try #require(response.data?.children)
 
     #expect(response.data?.contentRevision == 8)
+    #expect(response.data?.alpha == nil)
     #expect(children[0].artist == ["Nala Sinephro"])
     #expect(children[0].containedClasses == ["md.track.qobuz"])
     #expect(children[0].isFavourite == false)
@@ -92,7 +95,7 @@ func encodesMediaSelectAndFavouriteRequests() throws {
         session: "s.01",
         room: "Main Room",
         mediaId: "album-1",
-        queue: "replace"
+        queue: .replace
     )
     let favourite = V2MediaFavouritePostRequest(
         tag: "command-2",

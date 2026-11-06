@@ -27,4 +27,3 @@ internal struct ParamRoom: Sendable, Codable, Hashable {
         try container.encode(room, forKey: .room)
     }
 }
-

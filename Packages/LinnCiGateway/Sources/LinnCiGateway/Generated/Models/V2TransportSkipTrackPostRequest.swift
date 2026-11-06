@@ -42,4 +42,3 @@ internal struct V2TransportSkipTrackPostRequest: Sendable, Codable, Hashable {
         try container.encodeIfPresent(skipTrack, forKey: .skipTrack)
     }
 }
-

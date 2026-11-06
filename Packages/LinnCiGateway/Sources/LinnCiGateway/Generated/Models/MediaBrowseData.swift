@@ -7,17 +7,25 @@
 
 import Foundation
 
-/** Browse data for a given item in the player's browseable content. */
-struct MediaBrowseData: Sendable, Codable, Hashable {
-    var id: String?
-    var contentRevision: Int?
-    var index: Int?
-    var count: Int?
-    var total: Int?
-    var alpha: [Int?]?
-    var children: [ItemMetaData]?
+/** Browse data for a given item in the player&#39;s browseable content. */
+internal struct MediaBrowseData: Sendable, Codable, Hashable {
 
-    init(id: String? = nil, contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, alpha: [Int?]? = nil, children: [ItemMetaData]? = nil) {
+    /** The unique identifier for the browsed object */
+    internal var id: String?
+    /** Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon. */
+    internal var contentRevision: Int64?
+    /** Index of first child in the children array. */
+    internal var index: Int?
+    /** Count of children in the children array. */
+    internal var count: Int?
+    /** Total number of children that are available to be fetched. */
+    internal var total: Int?
+    /** Array of 27 indicies into the child content corresponding to where content starts for each letter in the alphabet plus other non-alpha content.  Can be null if no index is available (e.g. unsorted content). */
+    internal var alpha: [Int]?
+    /** Array of metadata for children of the browsed item.  May be null if item is not browseable (different from an empty array, when the item is browseable but has no children). */
+    internal var children: [ItemMetaData]?
+
+    internal init(id: String? = nil, contentRevision: Int64? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, alpha: [Int]? = nil, children: [ItemMetaData]? = nil) {
         self.id = id
         self.contentRevision = contentRevision
         self.index = index
@@ -27,7 +35,7 @@ struct MediaBrowseData: Sendable, Codable, Hashable {
         self.children = children
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case id
         case contentRevision = "content_revision"
         case index
@@ -37,7 +45,9 @@ struct MediaBrowseData: Sendable, Codable, Hashable {
         case children
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(id, forKey: .id)
         try container.encodeIfPresent(contentRevision, forKey: .contentRevision)
@@ -48,3 +58,6 @@ struct MediaBrowseData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(children, forKey: .children)
     }
 }
+
+
+extension MediaBrowseData: Identifiable {}

@@ -11,7 +11,7 @@ import Foundation
 internal struct V2PlaylistSubscribeData: Sendable, Codable, Hashable {
 
     /** Current revision number for the playlist update. Increments by 1 on every update. If using 'concise' updates an there is a break in update contiguity then client should resubscribe. */
-    internal var contentRevision: Int?
+    internal var contentRevision: Int64?
     /** Index of first child in the children array. */
     internal var index: Int?
     /** Count of children in the children array. */
@@ -21,7 +21,7 @@ internal struct V2PlaylistSubscribeData: Sendable, Codable, Hashable {
     /** Index of a position in a rooms playlist and the item metadata it contains. */
     internal var children: [String: V2PlaylistItemMetadata]?
 
-    internal init(contentRevision: Int? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [String: V2PlaylistItemMetadata]? = nil) {
+    internal init(contentRevision: Int64? = nil, index: Int? = nil, count: Int? = nil, total: Int? = nil, children: [String: V2PlaylistItemMetadata]? = nil) {
         self.contentRevision = contentRevision
         self.index = index
         self.count = count
@@ -48,4 +48,3 @@ internal struct V2PlaylistSubscribeData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(children, forKey: .children)
     }
 }
-

@@ -33,4 +33,3 @@ internal struct V2VolumeStatusData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(volume, forKey: .volume)
     }
 }
-

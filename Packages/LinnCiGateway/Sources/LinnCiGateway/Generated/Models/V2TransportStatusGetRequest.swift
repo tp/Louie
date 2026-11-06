@@ -42,4 +42,3 @@ internal struct V2TransportStatusGetRequest: Sendable, Codable, Hashable {
         try container.encodeIfPresent(update, forKey: .update)
     }
 }
-

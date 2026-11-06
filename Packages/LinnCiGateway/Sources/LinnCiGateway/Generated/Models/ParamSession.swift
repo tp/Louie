@@ -27,4 +27,3 @@ internal struct ParamSession: Sendable, Codable, Hashable {
         try container.encode(session, forKey: .session)
     }
 }
-

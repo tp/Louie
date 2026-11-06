@@ -232,6 +232,33 @@ paths:
             $ref: '#/definitions/V2SeekStatusResponse'
         default:
           $ref: '#/responses/default'
+  /V2/seek/set_position:
+    post:
+      summary: Skip to absolute position in currently playing item
+      description: |
+        Skips to absolute position in the currently playing item if relevant to active source
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - $ref: '#/definitions/ParamRoom'
+              - type: object
+                properties:
+                  position:
+                    description: If specified, absolute position to change to
+                    type: integer
+                    format: int32
+      tags:
+        - API V2
+      responses:
+        '200':
+          $ref: '#/responses/success_room'
+        default:
+          $ref: '#/responses/default'
   /V2/metadata/status:
     get:
       summary: Query metadata status of room
@@ -428,6 +455,305 @@ paths:
           $ref: '#/responses/success_room'
         default:
           $ref: '#/responses/default'
+  /V2/services/status:
+    get:
+      summary: Query serivces status of room
+      description: |
+        Returns the services available to the room
+
+        If the client sets `update` > 0, an update will be sent to the client every update period with the up-to-date service status
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            $ref: '#/definitions/V2ServicesStatusGetRequest'
+      tags:
+        - API V2 - Services
+      responses:
+        '200':
+          description: List of the available services for a room.
+          schema:
+            $ref: '#/definitions/V2ServicesStatusResponse'
+        default:
+          $ref: '#/responses/default'
+  /V2/services/search:
+    get:
+      summary: Search a service by type and a search argument
+      description: "Returns descriptions of available media items that match the search argument, including references that allow them to be played on the media player or browsed further.\n\nA search type must also be specified. Available types depending on the service, \"albums\", \"artists\", \"tracks\", \"playlists\", \"composers\", \"stations\" \n"
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - type: object
+                required:
+                  - media_id
+                  - class
+                  - search
+                  - index
+                  - count
+                properties:
+                  media_id:
+                    type: string
+                    description: Identifier of the service you wish to search.
+                  search_arg:
+                    type: string
+                    description: Search argument used to find results.
+                  search_type:
+                    type: string
+                    description: Type of search results to be returned.
+                  index:
+                    type: integer
+                    description: Zero-based offset into the matching items from which to return information.
+                  count:
+                    type: integer
+                    description: Number of child items to return.
+      tags:
+        - API V2 - Services
+      responses:
+        '200':
+          description: Browse content for the given identifier
+          schema:
+            $ref: '#/definitions/MediaBrowseResponse'
+        default:
+          $ref: '#/responses/default'
+  /V2/media/browse:
+    get:
+      summary: Browse media content
+      description: |
+        Returns descriptions of available media items, including references that allow them to be played on the media player.
+
+        When browsing a media server the "type" must also be specified ('albums', 'artists' or 'genres'). Otherwise type can be null.
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - type: object
+                required:
+                  - media_id
+                  - index
+                  - count
+                  - browse_type
+                properties:
+                  media_id:
+                    type: string
+                    description: Identifier of the item in the browse hierarchy for which to return browse information.
+                  index:
+                    type: integer
+                    description: Zero-based offset into the list of children for the item from which to return information.
+                  count:
+                    type: integer
+                    description: Number of child items to return.
+                  browse_type:
+                    type: string
+                    description: Type required only when browsing media servers.
+      tags:
+        - API V2 - Media
+      responses:
+        '200':
+          description: Browse content for the given identifier
+          schema:
+            $ref: '#/definitions/MediaBrowseResponse'
+        default:
+          $ref: '#/responses/default'
+  #  /V2/media/subscribe:
+  #    get:
+
+  #      summary: Subscribe to media content
+
+  #      description: |
+
+  #        Returns descriptions of available media items, including references that allow them to be played on the media player.
+
+  #
+
+  #        Gives updates whenever the media content changes. To unsubscribe, enter the media identifier into the unsubscribe endpoint.
+
+  #      parameters:
+
+  #        - name: body
+
+  #          required: true
+
+  #          in: body
+
+  #          schema:
+
+  #            allOf:
+
+  #            - $ref: '#/definitions/ParamTag'
+
+  #            - type: object
+
+  #              required:
+
+  #              - media_id
+
+  #              - index
+
+  #              - count
+
+  #              properties:
+
+  #                media_id:
+
+  #                  type: string
+
+  #                  description: Identifier of the item in the browse hierarchy for which to return browse information.
+
+  #                index:
+
+  #                  type: integer
+
+  #                  description: Zero-based offset into the list of children for the item from which to return information.
+
+  #                count:
+
+  #                  type: integer
+
+  #                  description: Number of child items to return.
+
+  #      tags:
+
+  #        - API V2 - Media
+
+  #      responses:
+
+  #        '200':
+
+  #          description: Browse content for the given identifier
+
+  #          schema:
+
+  #            $ref: '#/definitions/MediaBrowseResponse'
+
+  #        default:
+
+  #          $ref: '#/responses/default'
+
+  #  /V2/media/unsubscribe:
+
+  #    post:
+
+  #      summary: Remove subscription to media content
+
+  #      description: Enter a media identifier that is currently pushing updates and stop further updates.
+
+  #      parameters:
+
+  #        - name: body
+
+  #          required: true
+
+  #          in: body
+
+  #          schema:
+
+  #            allOf:
+
+  #            - $ref: '#/definitions/ParamTag'
+
+  #            - type: object
+
+  #              required:
+
+  #              - media_id
+
+  #              properties:
+
+  #                media_id:
+
+  #                  type: string
+
+  #                  description: Identifier of the subscribed media item.
+
+  #      tags:
+
+  #        - API V2 - Media
+
+  #      responses:
+
+  #        '200':
+
+  #          $ref: '#/responses/success'
+
+  #        default:
+
+  #          $ref: '#/responses/default'
+  /V2/media/select:
+    post:
+      summary: Select media content for playback
+      description: |
+        Selects some media item for playback in the given room.
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - $ref: '#/definitions/ParamRoom'
+              - type: object
+                required:
+                  - media_id
+                properties:
+                  media_id:
+                    description: Identifier that specifies what should be played.  The id is obtained either through a browse/link/match/search request or from the current play queue.
+                    type: string
+                  queue:
+                    description: If the item is queueable, specifies how it should modify the play queue.  If not specified, last is assumed.  If the item is not queueable, this parameter is ignored. `now` places the item(s) before what is currently playing, stops play and starts playing the new items. `next` places the item(s) after the currently playing item; `last` places the item(s) at the end of the queue; `replace` replaces the whole queue with the given item(s).
+                    type: string
+                    enum:
+                      - now
+                      - next
+                      - last
+                      - replace
+      tags:
+        - API V2 - Media
+      responses:
+        '200':
+          $ref: '#/responses/success_room'
+        default:
+          $ref: '#/responses/default'
+  /V2/media/favourite:
+    post:
+      summary: Set or clear favourite flag for a media item
+      description: Marks or unmarks a media item as a favourite.
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - type: object
+                required:
+                  - media_id
+                  - favourite
+                properties:
+                  media_id:
+                    type: string
+                    description: Identifier of the item to mark or unmark as a favourite.
+                  favourite:
+                    type: boolean
+                    description: True to set as favourite, false to clear.
+      tags:
+        - API V2 - Media
+      responses:
+        '200':
+          $ref: '#/responses/success'
+        default:
+          $ref: '#/responses/default'
 definitions:
   FilterSpec:
     type: object
@@ -441,7 +767,6 @@ definitions:
       incremental:
         type: boolean
         description: true if responses from this command should only contain items that have changed since the previous response; false if full information should be returned each time.
-      artist: null
   SessionData:
     type: object
     description: Session information.
@@ -454,7 +779,6 @@ definitions:
         type: array
         items:
           $ref: '#/definitions/FilterSpec'
-      artist: null
   SessionResponse:
     type: object
     properties:
@@ -466,7 +790,117 @@ definitions:
         description: Tag from the original request that generated this response.
       data:
         $ref: '#/definitions/SessionData'
-      artist: null
+  MediaBrowseResponse:
+    type: object
+    properties:
+      session:
+        type: string
+        description: Session from the original request that generated this response.
+      tag:
+        type: string
+        description: Tag from the original request that generated this response.
+      data:
+        $ref: '#/definitions/MediaBrowseData'
+  MediaBrowseData:
+    type: object
+    description: Browse data for a given item in the player's browseable content.
+    properties:
+      id:
+        type: string
+        description: The unique identifier for the browsed object
+      content_revision:
+        type: integer
+        description: Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon.
+        format: int64
+      index:
+        description: Index of first child in the children array.
+        type: integer
+      count:
+        description: Count of children in the children array.
+        type: integer
+      total:
+        description: Total number of children that are available to be fetched.
+        type: integer
+      alpha:
+        description: Array of 27 indicies into the child content corresponding to where content starts for each letter in the alphabet plus other non-alpha content.  Can be null if no index is available (e.g. unsorted content).
+        type: array
+        items:
+          type: integer
+          minItems: 27
+          maxItems: 27
+      children:
+        description: Array of metadata for children of the browsed item.  May be null if item is not browseable (different from an empty array, when the item is browseable but has no children).
+        type: array
+        items:
+          $ref: '#/definitions/ItemMetaData'
+  ItemMetaData:
+    type: object
+    description: Information about an item in the system (e.g. album, track or stream, input)
+    properties:
+      id:
+        type: string
+        description: The unique identifier for the browsed object.  Can be used to browse children or play the item.
+      class:
+        type: string
+        description: A class id that defines the type of item, which in turn defines what operations it supports.
+      buffering:
+        type: boolean
+        description: true if the item is being buffered to play.  false if not.  Not present (null) if metadata is not for an item in a room's playlist.
+      playing:
+        type: boolean
+        description: true if the item is being played.  false if not.  Not present (null) if metadata is not for an item in a room's playlist.
+      selected:
+        type: boolean
+        description: true if the item is selected for play.  false if not.  Not present (null) if metadata is not for an item in a room's playlist.
+      name:
+        type: string
+        description: Title of the item.  What this is will vary according to the item type, but the intention is that this should be the string that best represents the item if it is the only string displayed for it.
+      art_uri:
+        type: string
+        description: URL for associated logo/album art for item. Can be null.
+      disabledActions:
+        type: array
+        description: |
+          List of action ids of actions that are valid for this item's class but which this particular item does not currently support (e.g. can't favourite a curerntly favourited item).
+        items:
+          type: string
+          description: Action id of disabled action
+      title:
+        type: string
+        description: Track title
+      album:
+        type: string
+        description: Album name
+      artist:
+        type: array
+        items:
+          type: string
+        description: Artist name
+      duration:
+        type: integer
+        format: int32
+        description: Duration of the item in seconds. 0 if unknown
+      contained_classes:
+        type: array
+        items:
+          type: string
+        description: Array of class ids indicating the type(s) of the content of this item.
+      count:
+        type: integer
+        format: int32
+        description: Number of direct children of the container. -1 if unknown
+      isFavourite:
+        type: boolean
+        description: True if favourited, false if not. The presence of this attribute indicates that the item can be marked as a favourite.
+      album_id:
+        type: string
+        description: Media id of the album from which this item comes.
+      artist_id:
+        type: string
+        description: Media id of the artist that created this item.
+    required:
+      - id
+      - class
   # Parameter definitions for the body of the POST request
   ParamFilter:
     type: object
@@ -476,7 +910,6 @@ definitions:
         type: array
         items:
           type: string
-      artist: null
   ParamRoom:
     type: object
     required:
@@ -485,7 +918,6 @@ definitions:
       room:
         description: Room ID
         type: string
-      artist: null
   ParamSession:
     type: object
     required:
@@ -494,14 +926,12 @@ definitions:
       session:
         description: Opaque string, returned in the response.  Fixed for a session.
         type: string
-      artist: null
   ParamTag:
     type: object
     properties:
       tag:
         description: Opaque string, returned in the response. Varies per message.
         type: string
-      artist: null
   ParamUpdate:
     type: object
     properties:
@@ -516,7 +946,6 @@ definitions:
           If a tag is specified, this will be returned with every asynchronous response.
         type: integer
         # V2 definitions
-      artist: null
   V2TopologyStatusResponse:
     type: object
     properties:
@@ -528,7 +957,6 @@ definitions:
       session:
         type: string
         description: Session from the original request that generated this response.
-      artist: null
   V2TopologyStatusData:
     type: object
     description: The topology of the house.
@@ -564,7 +992,6 @@ definitions:
               items:
                 type: string
                 description: Human-readable name of the listening room.
-      artist: null
   V2VolumeStatusResponse:
     type: object
     description: The volume status of a room
@@ -580,7 +1007,6 @@ definitions:
       room:
         type: string
         description: The room name for which this response pertains
-      artist: null
   V2VolumeStatusData:
     type: object
     description: The volume status of the room.
@@ -592,7 +1018,6 @@ definitions:
         type: integer
         format: int32
         description: The volume state of the room.
-      artist: null
   V2TransportStatusResponse:
     type: object
     description: The transport status of a room
@@ -608,7 +1033,6 @@ definitions:
       room:
         type: string
         description: The room name for which this response pertains
-      artist: null
   V2TransportStatusData:
     type: object
     description: The transport status of the room.
@@ -622,7 +1046,6 @@ definitions:
       repeat:
         type: boolean
         description: The shuffle state of the room (hidden for sources where not relevant)
-      artist: null
   V2SeekStatusResponse:
     type: object
     description: The seek status of a room
@@ -638,7 +1061,6 @@ definitions:
       room:
         type: string
         description: The room name for which this response pertains
-      artist: null
   V2SeekStatusData:
     type: object
     description: The transport status of the room.
@@ -654,7 +1076,6 @@ definitions:
         type: integer
         format: int32
         description: Duration in seconds for current media item
-      artist: null
   V2MetadataStatusResponse:
     type: object
     description: The metadata status of a room
@@ -670,7 +1091,6 @@ definitions:
       room:
         type: string
         description: The room name for which this response pertains
-      artist: null
   V2MetadataStatusData:
     type: object
     description: The metadata status of the room.
@@ -696,7 +1116,58 @@ definitions:
       bit_depth:
         type: string
         description: Bit depth for current playback
-      artist: null
+  V2ServicesStatusResponse:
+    type: object
+    properties:
+      session:
+        type: string
+        description: Session from the original request that generated this response.
+      tag:
+        type: string
+        description: Tag from the original request that generated this response.
+      room:
+        type: string
+        description: Room to which this response corresponds.
+      data:
+        $ref: '#/definitions/V2ServicesStatusData'
+  V2ServicesStatusData:
+    type: object
+    description: Browse data for a given item in the player's browseable content.
+    properties:
+      id:
+        type: string
+        description: The name of the room to which the services belong
+      content_revision:
+        type: integer
+        description: Current revision number for the content library.  If this has changed since the previous browse response, the structure of the library has changed in some way and cached values should not be relied upon.
+        format: int64
+      index:
+        description: Index of first service in the children array.
+        type: integer
+      count:
+        description: Count of services in the children array.
+        type: integer
+      total:
+        description: Total number of services that are available to be fetched.
+        type: integer
+      children:
+        description: Array of services
+        type: array
+        items:
+          $ref: '#/definitions/V2ServicesStatusItem'
+  V2ServicesStatusItem:
+    type: object
+    description: Data of a service
+    properties:
+      id:
+        type: string
+        description: The ID used to further query the service
+      name:
+        type: string
+        description: The name of the service
+      class:
+        type: string
+        description: The class of the service
   V2PlaylistBrowseResponse:
     type: object
     properties:
@@ -711,7 +1182,6 @@ definitions:
         description: The room name for which this response pertains
       data:
         $ref: '#/definitions/V2PlaylistBrowseData'
-      artist: null
   V2PlaylistBrowseData:
     type: object
     description: Browse data for a given item in the player's browseable content.
@@ -727,7 +1197,6 @@ definitions:
         type: integer
       children:
         $ref: '#/definitions/V2PlaylistBrowseIndex'
-      artist: null
   V2PlaylistSubscribeResponse:
     type: object
     properties:
@@ -742,7 +1211,6 @@ definitions:
         description: The room name for which this response pertains
       data:
         $ref: '#/definitions/V2PlaylistSubscribeData'
-      artist: null
   V2PlaylistSubscribeData:
     type: object
     description: Browse data for a given item in the player's browseable content.
@@ -750,6 +1218,7 @@ definitions:
       content_revision:
         type: integer
         description: Current revision number for the playlist update. Increments by 1 on every update. If using 'concise' updates an there is a break in update contiguity then client should resubscribe.
+        format: int64
       index:
         description: Index of first child in the children array.
         type: integer
@@ -761,7 +1230,6 @@ definitions:
         type: integer
       children:
         $ref: '#/definitions/V2PlaylistBrowseIndex'
-      artist: null
   V2PlaylistBrowseIndex:
     type: object
     description: Index of a position in a rooms playlist and the item metadata it contains.
@@ -770,7 +1238,6 @@ definitions:
   V2PlaylistItemMetadata:
     type: object
     description: Information about an item in the system (e.g. album, track or stream, input)
-    discriminator: class
     properties:
       class:
         type: string
@@ -797,20 +1264,34 @@ definitions:
         items:
           type: string
           description: Action id of disabled action
+      album:
+        type: string
+        description: Album name
       artist:
         type: array
         items:
           type: string
         description: Artist name
-      album:
-        type: string
-        description: Album name
       duration:
         type: integer
         format: int32
         description: Duration of the item in seconds. 0 if unknown
     required:
       - class
+  V2ServicesStatusGetRequest:
+    type: object
+    required:
+      - session
+      - room
+    properties:
+      tag:
+        type: string
+      session:
+        type: string
+      room:
+        type: string
+      update:
+        type: integer
 responses:
   default:
     description: |

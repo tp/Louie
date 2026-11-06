@@ -7,30 +7,33 @@
 
 import Foundation
 
-struct V2ServicesStatusResponse: Sendable, Codable, Hashable {
-    /** Session from the original request that generated this response. */
-    var session: String?
-    /** Tag from the original request that generated this response. */
-    var tag: String?
-    /** Room to which this response corresponds. */
-    var room: String?
-    var data: V2ServicesStatusData?
+internal struct V2ServicesStatusResponse: Sendable, Codable, Hashable {
 
-    init(session: String? = nil, tag: String? = nil, room: String? = nil, data: V2ServicesStatusData? = nil) {
+    /** Session from the original request that generated this response. */
+    internal var session: String?
+    /** Tag from the original request that generated this response. */
+    internal var tag: String?
+    /** Room to which this response corresponds. */
+    internal var room: String?
+    internal var data: V2ServicesStatusData?
+
+    internal init(session: String? = nil, tag: String? = nil, room: String? = nil, data: V2ServicesStatusData? = nil) {
         self.session = session
         self.tag = tag
         self.room = room
         self.data = data
     }
 
-    enum CodingKeys: String, CodingKey, CaseIterable {
+    internal enum CodingKeys: String, CodingKey, CaseIterable {
         case session
         case tag
         case room
         case data
     }
 
-    func encode(to encoder: Encoder) throws {
+    // Encodable protocol methods
+
+    internal func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(session, forKey: .session)
         try container.encodeIfPresent(tag, forKey: .tag)

@@ -73,4 +73,3 @@ internal struct V2PlaylistItemMetadata: Sendable, Codable, Hashable {
         try container.encodeIfPresent(duration, forKey: .duration)
     }
 }
-

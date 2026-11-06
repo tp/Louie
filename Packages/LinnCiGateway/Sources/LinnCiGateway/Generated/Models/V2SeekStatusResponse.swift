@@ -42,4 +42,3 @@ internal struct V2SeekStatusResponse: Sendable, Codable, Hashable {
         try container.encodeIfPresent(room, forKey: .room)
     }
 }
-

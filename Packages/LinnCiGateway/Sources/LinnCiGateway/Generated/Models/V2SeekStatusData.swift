@@ -38,4 +38,3 @@ internal struct V2SeekStatusData: Sendable, Codable, Hashable {
         try container.encodeIfPresent(duration, forKey: .duration)
     }
 }
-

@@ -1,0 +1,8 @@
+.DS_Store
+.vscode/
+**/xcuserdata/
+*.xcuserstate
+DerivedData/
+**/.build/
+server/target/
+**/.env
