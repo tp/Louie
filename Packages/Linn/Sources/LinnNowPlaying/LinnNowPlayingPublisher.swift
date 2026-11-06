@@ -23,17 +23,20 @@ public final class LinnNowPlayingPublisher {
 
     public func run(linn: Linn, configuration: Linn.Configuration) async {
         let snapshots = Observations {
-            (linn.connectionState, LinnSessionAttributes(linn: linn, serverURL: configuration.serverURL), self.isForeground)
+            (linn.connectionState, LinnSessionAttributes(linn: linn, serverURL: configuration.serverURL), linn.isCurrentSongPending, self.isForeground)
         }
         var previous: LinnSessionAttributes?
         var wasForeground = false
-        for await (connection, observed, foreground) in snapshots {
+        for await (connection, observed, songPending, foreground) in snapshots {
             if Task.isCancelled { break }
             var attributes = observed
             if attributes.playback == previous?.playback {
                 attributes.timestamp = previous!.timestamp
             }
             do {
+                // An unknown shuffle destination is temporary, not a stopped session.
+                if songPending && attributes.canControlPlayback
+                    && [.playing, .paused, .buffering, .loading].contains(attributes.playback.state) { continue }
                 guard connection == .connected, attributes.hasContent else {
                     try await end()
                     previous = nil

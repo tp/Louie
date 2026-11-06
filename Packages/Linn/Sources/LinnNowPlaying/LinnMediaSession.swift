@@ -44,6 +44,11 @@ public final class LinnMediaSession {
     }
 
     func receive(_ update: Linn.Snapshot) {
+        // Keep the existing system session until the server resolves an unknown song.
+        // Authoritative stop, standby and disconnection still take effect immediately.
+        if update.connectionState == .connected && !update.isStandby
+            && update.currentSong == nil && update.pending.currentItem
+            && [.playing, .paused, .buffering, .loading].contains(update.playState) { return }
         let previous = attributes.playback
         // Home Server sends complete projections, including cleared fields.
         attributes.canControlPlayback = update.connectionState == .connected && !update.isStandby
@@ -137,9 +142,15 @@ public final class LinnMediaSession {
         }
     }
 
+    private var effectiveMaximumVolume: Int { max(0, min(70, attributes.maximumVolume)) }
+
+    var normalizedVolume: Float? {
+        attributes.volume.map { min(1, max(0, Float($0) / Float(max(1, effectiveMaximumVolume)))) }
+    }
+
     func setVolume(_ level: Float) async throws {
         guard attributes.canControlPlayback, level.isFinite else { throw CommandError.unavailable }
-        let volume = min(70, attributes.maximumVolume, Int((min(1, max(0, level)) * 100).rounded()))
+        let volume = Int((min(1, max(0, level)) * Float(effectiveMaximumVolume)).rounded())
         try await gateway.setVolume(volume, room: attributes.room, group: false)
     }
 }
@@ -150,8 +161,8 @@ extension LinnMediaSession: MediaSessionRepresentable {}
 extension LinnMediaSession: RemoteMediaSessionRepresentable {
     public var devices: [MediaDevice] {
         guard attributes.canControlPlayback else { return [] }
-        let capabilities: [MediaDevice.Capability] = attributes.volume.map { volume in
-            [.absoluteVolume(Float(volume) / 100) { level in
+        let capabilities: [MediaDevice.Capability] = normalizedVolume.map { volume in
+            [.absoluteVolume(volume) { level in
                 try await self.setVolume(level)
             }]
         } ?? []

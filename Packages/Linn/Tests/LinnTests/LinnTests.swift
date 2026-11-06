@@ -1516,3 +1516,23 @@ func seekForwardsClampedSecondsAndRejectsRadio() async throws {
     await #expect(throws: Linn.SeekError.unavailable) { try await linn.seek(to: 10) }
     #expect(await gateway.seekPositions == [45, 150])
 }
+
+@Test @MainActor
+func unknownPredictedSongIsPendingOnlyUntilTheServerResolvesIt() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    defer { linn.stop() }
+    var snapshot = nowPlaying(index: 0, titles: ["First"], position: 45)
+    await gateway.send(snapshot)
+    try await waitUntil { linn.currentSong != nil }
+    snapshot.currentSong = nil
+    snapshot.pending.currentItem = true
+    await gateway.send(snapshot)
+    try await waitUntil { linn.isCurrentSongPending }
+    #expect(linn.currentSong == nil)
+    snapshot.pending.currentItem = false
+    await gateway.send(snapshot)
+    try await waitUntil { !linn.isCurrentSongPending }
+    #expect(linn.currentSong == nil)
+}

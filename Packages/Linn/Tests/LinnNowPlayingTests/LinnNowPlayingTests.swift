@@ -200,3 +200,61 @@ func speakerVolumeUsesRoomScopeAndLatestServerLimit() async throws {
     await #expect(throws: LinnMediaSession.CommandError.unavailable) { try await model.setVolume(.nan) }
     #expect(await gateway.calls == ["volume:70:Main Room:false", "volume:45:Main Room:false", "volume:0:Main Room:false"])
 }
+
+@Test @MainActor
+func pendingUnknownSongKeepsSessionUntilResolutionOrExpiry() {
+    let linn = Linn(mockRoom: "Main Room", currentSong: .init(id: "old", title: "Old Song"), playState: .playing)
+    let model = LinnMediaSession(attributes: .init(linn: linn, serverURL: URL(string: "http://louie-pi.local:50051")!))
+    let previous = model.attributes
+    var pending = Linn.Snapshot()
+    pending.playState = .playing
+    pending.pending.currentItem = true
+    pending.pending.queueIndex = true
+    model.receive(pending)
+    #expect(model.attributes == previous)
+    #expect(model.content != nil)
+    pending.currentSong = .init(id: "next", title: "Next Song")
+    pending.pending.currentItem = false
+    model.receive(pending)
+    #expect(model.attributes.playback.song?.title == "Next Song")
+    pending.currentSong = nil
+    model.receive(pending)
+    #expect(model.content == nil)
+}
+
+@Test @MainActor
+func pendingUnknownSongDoesNotHideStopStandbyOrDisconnection() {
+    let linn = Linn(mockRoom: "Main Room", currentSong: .init(id: "old", title: "Old Song"), playState: .playing)
+    let initial = LinnSessionAttributes(linn: linn, serverURL: URL(string: "http://louie-pi.local:50051")!)
+    var pending = Linn.Snapshot()
+    pending.playState = .playing
+    pending.pending.currentItem = true
+    for reason in 0..<3 {
+        let model = LinnMediaSession(attributes: initial)
+        var update = pending
+        if reason == 0 { update.playState = .stopped }
+        if reason == 1 { update.isStandby = true }
+        if reason == 2 { update.connectionState = .linnUnavailable(nil) }
+        model.receive(update)
+        #expect(model.content == nil)
+    }
+}
+
+@Test @MainActor
+func systemVolumeUsesTheEffectiveLimitInBothDirections() async throws {
+    let gateway = RecordingGateway()
+    let linn = Linn(mockRoom: "Main Room", currentSong: .init(id: "song", title: "Title"), playState: .playing)
+    let model = LinnMediaSession(attributes: .init(linn: linn, serverURL: URL(string: "http://louie-pi.local:50051")!), gateway: gateway)
+    try await model.setVolume(0.5)
+    var update = Linn.Snapshot()
+    update.volume = 35
+    update.maximumVolume = 70
+    model.receive(update)
+    #expect(model.normalizedVolume == 0.5)
+    update.volume = 15
+    update.maximumVolume = 30
+    model.receive(update)
+    #expect(model.normalizedVolume == 0.5)
+    try await model.setVolume(0.5)
+    #expect(await gateway.calls == ["volume:35:Main Room:false", "volume:15:Main Room:false"])
+}

@@ -47,6 +47,7 @@ public final class Linn {
     public private(set) var connectionState: ConnectionState = .idle
     public private(set) var library = Library()
     public private(set) var currentSong: Song?
+    public private(set) var isCurrentSongPending = false
     public private(set) var playlist = Playlist()
     public private(set) var playState: PlayState?
     public private(set) var volume: Int?
@@ -861,6 +862,7 @@ public final class Linn {
             updateSongTransitionDirection(incomingQueueIndex: update.playlist.currentIndex)
         }
         currentSong = update.currentSong
+        isCurrentSongPending = update.currentSong == nil && update.pending.currentItem
         playlist = update.playlist
         timeline = update.timeline
         if let pendingQueueIndex,
