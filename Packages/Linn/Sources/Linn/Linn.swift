@@ -6,7 +6,7 @@ public protocol LinnGateway: Sendable {
     func nowPlayingUpdates(
         room: String?,
         updateInterval: Int
-    ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>
+    ) async -> AsyncThrowingStream<Linn.Snapshot, Error>
 
     func play(room: String) async throws
     func pause(room: String) async throws
@@ -107,8 +107,6 @@ public final class Linn {
 
     private var linnGateway: (any LinnGateway)?
     private var configurationLoadAttempted = false
-    private var playlistContentRevision: Int?
-    private var playlistSongsByIndex: [Int: Song] = [:]
     private var pendingQueueExpiresAt: Date?
     private var optimisticVolume: OptimisticVolume?
     private var optimisticMute: OptimisticMute?
@@ -242,17 +240,8 @@ public final class Linn {
             do {
                 let updates = await linnGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
                 for try await update in updates {
-                    guard update.connectionStatus == .connected else {
-                        switch update.connectionStatus {
-                        case .serverUnreachable:
-                            connectionState = .serverUnreachable
-                        case .disconnected:
-                            connectionState = .linnUnavailable(update.connectionError)
-                        case .connecting:
-                            connectionState = update.connectionError.map { .linnUnavailable($0) } ?? .connecting
-                        case .connected:
-                            break
-                        }
+                    guard update.connectionState == .connected else {
+                        connectionState = update.connectionState
                         loadLibraryOnConnection = true
                         continue
                     }
@@ -809,56 +798,36 @@ public final class Linn {
         }
     }
 
-    private func apply(_ update: LinnGatewayData.NowPlaying) {
-        isStandby = update.isStandby ?? false
+    private func apply(_ update: Linn.Snapshot) {
+        isStandby = update.isStandby
         if isStandby {
             pendingQueueIndex = nil
             pendingQueueExpiresAt = nil
             optimisticVolume = nil
             optimisticMute = nil
         }
-        playState = PlayState(update.playback)
-        playlist.total = update.queue?.length
-        if let playlist = update.playlist {
-            if let contentRevision = playlist.contentRevision, contentRevision != playlistContentRevision {
-                playlistSongsByIndex = [:]
-                playlistContentRevision = contentRevision
-            }
-
-            for item in playlist.items {
-                playlistSongsByIndex[item.index] = Song(item)
-            }
-        }
-
-        var incomingCurrentSong = Song(update.currentItem)
-        if let incomingQueueIndex = update.queue?.index {
-            incomingCurrentSong?.queueIndex = incomingQueueIndex
-        }
+        playState = update.playState
         if update.pending.queueTotal && update.pending.currentItem {
             // A new queue starts at its first row even when its index is
             // numerically lower than the old queue's playing row.
             songTransitionDirection = .forward
         } else {
-            updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
+            updateSongTransitionDirection(incomingQueueIndex: update.playlist.currentIndex)
         }
-        currentSong = incomingCurrentSong
-        playlist.currentIndex = update.queue?.index
-        timeline = Timeline(update.timeline)
-        if !update.pending.currentItem && !update.pending.queueIndex,
-           let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
-            playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
-        }
+        currentSong = update.currentSong
+        playlist = update.playlist
+        timeline = update.timeline
         if let pendingQueueIndex,
            (pendingQueueExpiresAt.map({ Date() >= $0 }) ?? true
-            || (!update.pending.queueIndex && update.queue?.index == pendingQueueIndex)) {
+            || (!update.pending.queueIndex && update.playlist.currentIndex == pendingQueueIndex)) {
             self.pendingQueueIndex = nil
             pendingQueueExpiresAt = nil
         }
-        updatePlaylistSongs()
-        if let serverMaximum = update.roomState?.maximumVolume, serverMaximum > 0 {
+        assignStableQueueSongIDs()
+        if let serverMaximum = update.maximumVolume, serverMaximum > 0 {
             maximumVolume = serverMaximum
         }
-        let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
+        let incomingVolume = update.volume.map { min($0, maximumVolume) }
         volume = reconcileOptimistic(
             &optimisticVolume,
             target: \.target,
@@ -867,7 +836,7 @@ public final class Linn {
             confirmed: !update.pending.volume,
             matches: { $0 == $1 }
         ) ?? incomingVolume
-        let incomingMuted = update.roomState?.isMuted
+        let incomingMuted = update.isMuted
         isMuted = reconcileOptimistic(
             &optimisticMute,
             target: \.target,
@@ -938,18 +907,18 @@ public final class Linn {
         return target(current)
     }
 
-    private func updatePlaylistSongs() {
+    private func assignStableQueueSongIDs() {
         // Content-based identity instead of the positional "playlist-<index>"
         // ids the gateway mapping produces. Positional ids make SwiftUI treat
         // a reorder as N in-place content swaps (wrong animations, broken
         // drag-to-reorder). Duplicate tracks get an occurrence ordinal, so
         // identity stays stable as long as their relative order holds.
-        // Duration is deliberately excluded: playlist items carry it but
-        // now-playing metadata doesn't, and the two sources must agree.
+        // Metadata enrichment (such as a newly available duration) must not
+        // change row identity.
         var occurrences: [String: Int] = [:]
-        playlist.songs = playlistSongsByIndex
-            .sorted { $0.key < $1.key }
-            .map { _, song in
+        playlist.songs = playlist.songs
+            .sorted { ($0.queueIndex ?? 0) < ($1.queueIndex ?? 0) }
+            .map { song in
                 var song = song
                 let base = "\(song.title)|\(song.artist ?? "")|\(song.album ?? "")"
                 let ordinal = occurrences[base, default: 0]
@@ -993,29 +962,29 @@ public final class Linn {
 
     #if DEBUG
         private func installMockPlaylist(previousSongs: [Song], currentSong: Song?) {
-            playlistSongsByIndex = [:]
+            playlist.songs = []
 
             for (index, song) in previousSongs.reversed().enumerated() {
                 var indexedSong = song
                 indexedSong.queueIndex = index
-                playlistSongsByIndex[index] = indexedSong
+                playlist.songs.append(indexedSong)
             }
 
             if var currentSong {
                 let currentIndex = previousSongs.count
                 currentSong.queueIndex = currentIndex
                 self.currentSong = currentSong
-                playlistSongsByIndex[currentIndex] = currentSong
+                playlist.songs.append(currentSong)
                 playlist.currentIndex = currentIndex
                 playlist.total = currentIndex + 1
             }
 
-            updatePlaylistSongs()
+            assignStableQueueSongIDs()
         }
 
         /// Preview/mock-only adapter from button availability flags to the internal queue shape.
         ///
-        /// Production state comes from `LinnGatewayData.NowPlaying.Queue`, where `hasPrevious`
+        /// Production state comes from `Linn.Playlist`, where `hasPrevious`
         /// and `hasNext` are derived from the playlist current index and total. The debug mock
         /// initializer accepts direct booleans because previews usually care about the
         /// visible button states, not a realistic queue position.

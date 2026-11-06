@@ -68,9 +68,9 @@ actor PiLinnGateway: LinnGateway {
         error.code == .cancelled && PiLinnRPCError(error).reason == .superseded
     }
 
-    func nowPlayingUpdates(room: String?, updateInterval: Int) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
+    func nowPlayingUpdates(room _: String?, updateInterval _: Int) async -> AsyncThrowingStream<Linn.Snapshot, Error> {
         // The server currently owns one Linn room and controls its update rate.
-        updates(room: room, watch: { [self] receive in
+        updates(watch: { [self] receive in
             let client = try await service()
             _ = try await client.watchState(Google_Protobuf_Empty()) { response in
                 for try await snapshot in response.messages {
@@ -83,7 +83,7 @@ actor PiLinnGateway: LinnGateway {
         })
     }
 
-    func updates(room: String?, watch: @escaping Watch, sleep: @escaping Sleep) -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
+    func updates(watch: @escaping Watch, sleep: @escaping Sleep) -> AsyncThrowingStream<Linn.Snapshot, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var retrySeconds = 1
@@ -93,21 +93,10 @@ actor PiLinnGateway: LinnGateway {
                         try await watch { snapshot in
                             guard !Task.isCancelled else { return }
                             await attempt.markSnapshotReceived()
-                            switch snapshot.connectionStatus {
-                            case .connected:
-                                continuation.yield(PiLinnMapping.nowPlaying(snapshot))
-                            case .connecting, .disconnected, .unspecified:
-                                // Linn can drop while the home server stays available.
-                                // Keep the stream alive for its next connected snapshot.
-                                continuation.yield(PiLinnMapping.connectionUpdate(snapshot))
-                            default:
-                                break
-                            }
+                            continuation.yield(PiLinnMapping.nowPlaying(snapshot))
                         }
                         guard !Task.isCancelled else { break }
-                        var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
-                        update.connectionStatus = .serverUnreachable
-                        continuation.yield(update)
+                        continuation.yield(Linn.Snapshot(connectionState: .serverUnreachable))
                     } catch is CancellationError {
                         break
                     } catch let error as PiLinnError {
@@ -119,16 +108,12 @@ actor PiLinnGateway: LinnGateway {
                             continuation.finish(throwing: PiLinnRPCError(error))
                             return
                         }
-                        var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
-                        update.connectionStatus = .serverUnreachable
-                        continuation.yield(update)
+                        continuation.yield(Linn.Snapshot(connectionState: .serverUnreachable))
                     } catch {
                         // A Pi restart or network transition closes WatchState. Resume
                         // from its next complete snapshot on the same gRPC client.
                         guard !Task.isCancelled else { break }
-                        var update = LinnGatewayData.NowPlaying(room: room ?? "Linn", session: "")
-                        update.connectionStatus = .serverUnreachable
-                        continuation.yield(update)
+                        continuation.yield(Linn.Snapshot(connectionState: .serverUnreachable))
                     }
                     if await attempt.hasReceivedSnapshot() { retrySeconds = 1 }
                     do {
@@ -314,98 +299,79 @@ struct PiLinnRPCError: Error, LocalizedError {
 }
 
 enum PiLinnMapping {
-    static func connectionUpdate(_ snapshot: Louie_Linn_V1_StateSnapshot) -> LinnGatewayData.NowPlaying {
-        var update = LinnGatewayData.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
-        update.connectionStatus = snapshot.connectionStatus == .disconnected ? .disconnected : .connecting
-        update.connectionError = snapshot.hasConnectionError ? snapshot.connectionError : nil
-        return update
-    }
-
-    static func nowPlaying(_ snapshot: Louie_Linn_V1_StateSnapshot) -> LinnGatewayData.NowPlaying {
-        var result = LinnGatewayData.NowPlaying(room: snapshot.room, session: snapshot.nowPlayingSessionID)
-        if snapshot.hasPending {
-            result.pending = .init(
-                playback: snapshot.pending.playback,
-                transport: snapshot.pending.transport,
-                queue: snapshot.pending.queue,
-                queueIndex: snapshot.pending.queueIndex,
-                queueTotal: snapshot.pending.queueTotal,
-                currentItem: snapshot.pending.currentItem,
-                timeline: snapshot.pending.timeline,
-                volume: snapshot.pending.volume,
-                mute: snapshot.pending.mute
-            )
+    static func nowPlaying(_ snapshot: Louie_Linn_V1_StateSnapshot) -> Linn.Snapshot {
+        let error = snapshot.hasConnectionError ? snapshot.connectionError : nil
+        let connection: Linn.ConnectionState = switch snapshot.connectionStatus {
+        case .connected: .connected
+        case .disconnected: .linnUnavailable(error)
+        default: error.map { .linnUnavailable($0) } ?? .connecting
         }
-        guard snapshot.hasNowPlaying else { return result }
+        var result = Linn.Snapshot(connectionState: connection)
+        result.pending.queueIndex = snapshot.pending.queueIndex
+        result.pending.queueTotal = snapshot.pending.queueTotal
+        result.pending.currentItem = snapshot.pending.currentItem
+        result.pending.volume = snapshot.pending.volume
+        result.pending.mute = snapshot.pending.mute
         let state = snapshot.nowPlaying
-        result.isStandby = state.hasIsStandby ? state.isStandby : nil
+        result.isStandby = state.isStandby
         if state.hasTransportState {
-            let transport: LinnGatewayData.NowPlaying.TransportState = switch state.transportState {
-            case .playing: .play
-            case .paused: .pause
-            case .stopped: .stop
-            case .buffering: .buffering
-            case .waiting: .waiting
-            default: .unknown
+            result.playState = switch state.transportState {
+            case .playing: .playing
+            case .paused: .paused
+            case .buffering, .waiting: .buffering
+            default: .stopped
             }
-            result.playback = .init(transportState: transport)
         }
+        let playlist = state.playlist
+        result.playlist = .init(
+            songs: playlist.items.compactMap { item in
+                guard item.hasDisplayName, !item.displayName.isEmpty else { return nil }
+                return Linn.Song(
+                    id: "playlist-\(item.index)",
+                    title: item.displayName,
+                    artist: item.hasArtist ? item.artist : nil,
+                    album: item.hasAlbum ? item.album : nil,
+                    duration: item.hasDurationSeconds ? Int(item.durationSeconds) : nil,
+                    artworkURL: item.hasArtworkURL ? URL(string: item.artworkURL) : nil,
+                    queueIndex: Int(item.index)
+                )
+            },
+            currentIndex: playlist.hasCurrentIndex ? Int(playlist.currentIndex) : nil,
+            total: playlist.hasTotal ? Int(playlist.total) : nil
+        )
         if state.hasCurrentItem {
             let item = state.currentItem
-            result.currentItem = .init(
-                id: item.id,
-                kind: "track",
-                displayName: item.hasDisplayName ? item.displayName : nil,
-                artworkURL: item.hasArtworkURL ? URL(string: item.artworkURL) : nil,
-                track: item.hasTrack ? .init(
-                    title: item.track.hasTitle ? item.track.title : nil,
+            let title = item.track.hasTitle ? item.track.title : item.displayName
+            if !title.isEmpty {
+                result.currentSong = .init(
+                    id: item.id,
+                    title: title,
+                    artist: item.track.hasArtist ? item.track.artist : nil,
                     album: item.track.hasAlbum ? item.track.album : nil,
-                    artist: item.track.hasArtist ? item.track.artist : nil
-                ) : nil
-            )
-        }
-        if state.hasPlaylist {
-            let playlist = state.playlist
-            result.queue = .init(
-                index: playlist.hasCurrentIndex ? Int(playlist.currentIndex) : nil,
-                length: playlist.hasTotal ? Int(playlist.total) : nil
-            )
-            result.playlist = .init(
-                items: playlist.items.map { item in
-                    .init(
-                        index: Int(item.index),
-                        displayName: item.hasDisplayName ? item.displayName : nil,
-                        album: item.hasAlbum ? item.album : nil,
-                        artist: item.hasArtist ? item.artist : nil,
-                        duration: item.hasDurationSeconds ? Int(item.durationSeconds) : nil,
-                        artworkURL: item.hasArtworkURL ? URL(string: item.artworkURL) : nil,
-                        isCurrent: item.isCurrent
-                    )
-                },
-                total: playlist.hasTotal ? Int(playlist.total) : nil,
-                contentRevision: playlist.hasContentRevision ? Int(exactly: playlist.contentRevision) : nil
-            )
+                    artworkURL: item.hasArtworkURL ? URL(string: item.artworkURL) : nil,
+                    queueIndex: result.playlist.currentIndex
+                )
+            }
         }
         if state.hasTimeline {
             let timeline = state.timeline
+            let position = timeline.hasPositionSeconds ? Int(timeline.positionSeconds) : nil
+            let duration = timeline.hasDurationSeconds ? Int(timeline.durationSeconds) : nil
+            let progress: Double? = if let position, let duration, duration > 0 {
+                Double(position) / Double(duration)
+            } else {
+                nil
+            }
             result.timeline = .init(
-                position: timeline.hasPositionSeconds ? Int(timeline.positionSeconds) : nil,
-                duration: timeline.hasDurationSeconds ? Int(timeline.durationSeconds) : nil,
-                seekableRange: timeline.hasIsSeekable && timeline.isSeekable
-                    ? .init(
-                        lowerBound: timeline.hasSeekLowerBoundSeconds ? Int(timeline.seekLowerBoundSeconds) : nil,
-                        upperBound: timeline.hasSeekUpperBoundSeconds ? Int(timeline.seekUpperBoundSeconds) : nil
-                    ) : nil
+                position: position,
+                duration: duration,
+                progress: progress
             )
         }
-        if state.hasRoomVolume {
-            let volume = state.roomVolume
-            result.roomState = .init(
-                volume: volume.hasVolume ? Int(volume.volume) : nil,
-                isMuted: volume.hasIsMuted ? volume.isMuted : nil,
-                maximumVolume: volume.maximumVolume > 0 ? Int(volume.maximumVolume) : nil
-            )
-        }
+        let volume = state.roomVolume
+        result.volume = volume.hasVolume ? Int(volume.volume) : nil
+        result.isMuted = volume.hasIsMuted ? volume.isMuted : nil
+        result.maximumVolume = volume.maximumVolume > 0 ? Int(volume.maximumVolume) : nil
         return result
     }
 

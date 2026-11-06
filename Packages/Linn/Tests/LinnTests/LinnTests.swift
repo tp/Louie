@@ -13,11 +13,8 @@ func predictedSongClearsThePreviousTrackTimeline() async throws {
 
     var predicted = nowPlaying(index: 1, titles: ["First", "Second"], position: 0)
     predicted.timeline = nil
-    predicted.pending.playback = true
-    predicted.pending.queue = true
     predicted.pending.queueIndex = true
     predicted.pending.currentItem = true
-    predicted.pending.timeline = true
     await gateway.send(predicted)
     try await waitUntil { linn.currentSong?.title == "Second" }
     #expect(linn.timeline == nil)
@@ -33,8 +30,8 @@ func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
     await gateway.send(nowPlaying(index: 0, titles: ["First"], volume: 10))
     try await waitUntil { linn.connectionState == .connected }
 
-    var disconnected = LinnGatewayData.NowPlaying(room: "Linn", session: "")
-    disconnected.connectionStatus = .disconnected
+    var disconnected = Linn.Snapshot()
+    disconnected.connectionState = .linnUnavailable(nil)
     await gateway.send(disconnected)
     try await waitUntil { linn.connectionState == .linnUnavailable(nil) }
     #expect(linn.currentSong?.title == "First")
@@ -242,7 +239,7 @@ func qobuzRootFoldersExposeSectionsWithoutBrowsingMediaItems() async throws {
 func libraryReportsAvailableServicesWhenQobuzIsMissing() async throws {
     let gateway = TestGateway()
     await gateway.seedMediaServices([
-        LinnGatewayData.MediaService(id: "service-airable", name: "Airable", kind: "md.airable"),
+        Linn.LibraryService(id: "service-airable", name: "Airable", kind: "md.airable"),
     ])
     let linn = Linn(gateway: gateway)
 
@@ -345,23 +342,23 @@ func demoGatewayReplaceEmitsImmediateCountThenDelayedObservedQueue() async throw
     var iterator = updates.makeAsyncIterator()
 
     let initial = try #require(try await iterator.next())
-    #expect(initial.queue?.length == 1)
+    #expect(initial.playlist.total == 1)
 
     let command = Task {
         try await gateway.selectMedia(mediaID: "qobuz-album-hit-me-hard-and-soft", room: "Linn", queue: .replace)
     }
 
     let immediate = try #require(try await iterator.next())
-    #expect(immediate.queue?.length == 10)
-    #expect(immediate.currentItem?.track?.title == "Initial")
+    #expect(immediate.playlist.total == 10)
+    #expect(immediate.currentSong?.title == "Initial")
 
     let observed = try #require(try await iterator.next())
     try await command.value
 
-    #expect(observed.queue?.index == 0)
-    #expect(observed.queue?.length == 10)
-    #expect(observed.playlist?.items.count == 10)
-    #expect(observed.currentItem?.track?.title == "SKINNY")
+    #expect(observed.playlist.currentIndex == 0)
+    #expect(observed.playlist.total == 10)
+    #expect(observed.playlist.songs.count == 10)
+    #expect(observed.currentSong?.title == "SKINNY")
 }
 
 @Test
@@ -383,16 +380,16 @@ func demoGatewayLastAppendsAfterDelayWhileKeepingCurrentItem() async throws {
     }
 
     let immediate = try #require(try await iterator.next())
-    #expect(immediate.queue?.length == 3)
-    #expect(immediate.currentItem?.track?.title == "Zero")
+    #expect(immediate.playlist.total == 3)
+    #expect(immediate.currentSong?.title == "Zero")
 
     let observed = try #require(try await iterator.next())
     try await command.value
 
-    #expect(observed.queue?.index == 0)
-    #expect(observed.queue?.length == 3)
-    #expect(observed.currentItem?.track?.title == "Zero")
-    #expect(observed.playlist?.items.map(\.displayName) == ["Zero", "One", "LUNCH"])
+    #expect(observed.playlist.currentIndex == 0)
+    #expect(observed.playlist.total == 3)
+    #expect(observed.currentSong?.title == "Zero")
+    #expect(observed.playlist.songs.map(\.title) == ["Zero", "One", "LUNCH"])
 }
 
 @Test
@@ -414,14 +411,14 @@ func demoGatewayNextInsertsAfterCurrentWithoutChangingCurrentItem() async throws
     }
 
     let immediate = try #require(try await iterator.next())
-    #expect(immediate.queue?.length == 3)
+    #expect(immediate.playlist.total == 3)
 
     let observed = try #require(try await iterator.next())
     try await command.value
 
-    #expect(observed.queue?.index == 0)
-    #expect(observed.currentItem?.track?.title == "Zero")
-    #expect(observed.playlist?.items.map(\.displayName) == ["Zero", "LUNCH", "One"])
+    #expect(observed.playlist.currentIndex == 0)
+    #expect(observed.currentSong?.title == "Zero")
+    #expect(observed.playlist.songs.map(\.title) == ["Zero", "LUNCH", "One"])
 }
 
 @Test
@@ -443,16 +440,16 @@ func demoGatewayNowInsertsAfterCurrentAndSelectsInsertedItemAfterDelay() async t
     }
 
     let immediate = try #require(try await iterator.next())
-    #expect(immediate.queue?.length == 3)
-    #expect(immediate.queue?.index == 0)
-    #expect(immediate.currentItem?.track?.title == "Zero")
+    #expect(immediate.playlist.total == 3)
+    #expect(immediate.playlist.currentIndex == 0)
+    #expect(immediate.currentSong?.title == "Zero")
 
     let observed = try #require(try await iterator.next())
     try await command.value
 
-    #expect(observed.queue?.index == 1)
-    #expect(observed.currentItem?.track?.title == "LUNCH")
-    #expect(observed.playlist?.items.map(\.displayName) == ["Zero", "LUNCH", "One"])
+    #expect(observed.playlist.currentIndex == 1)
+    #expect(observed.currentSong?.title == "LUNCH")
+    #expect(observed.playlist.songs.map(\.title) == ["Zero", "LUNCH", "One"])
 }
 
 @Test
@@ -470,26 +467,26 @@ func demoGatewayNextMarksPendingPlaylistItemBeforeObservedCurrentIndexChanges() 
     var iterator = updates.makeAsyncIterator()
 
     let initial = try #require(try await iterator.next())
-    #expect(initial.queue?.index == 0)
-    #expect(initial.playlist?.items.first(where: \.isCurrent)?.index == 0)
+    #expect(initial.playlist.currentIndex == 0)
+    #expect(!initial.pending.queueIndex)
 
     let command = Task {
         try await gateway.next(room: "Linn")
     }
 
     let pending = try #require(try await iterator.next())
-    #expect(pending.queue?.index == 0)
-    #expect(pending.currentItem?.track?.title == "Zero")
-    #expect(pending.playback?.transportState == .buffering)
-    #expect(pending.playlist?.items.first(where: \.isCurrent)?.index == 1)
+    #expect(pending.playlist.currentIndex == 0)
+    #expect(pending.currentSong?.title == "Zero")
+    #expect(pending.playState == .buffering)
+    #expect(pending.pending.queueIndex)
 
     let observed = try #require(try await iterator.next())
     try await command.value
 
-    #expect(observed.queue?.index == 1)
-    #expect(observed.currentItem?.track?.title == "One")
-    #expect(observed.playback?.transportState == .play)
-    #expect(observed.playlist?.items.first(where: \.isCurrent)?.index == 1)
+    #expect(observed.playlist.currentIndex == 1)
+    #expect(observed.currentSong?.title == "One")
+    #expect(observed.playState == .playing)
+    #expect(!observed.pending.queueIndex)
 }
 
 @Test
@@ -543,32 +540,19 @@ func rapidCommandsRunIndependentlyWithoutCancellingEachOther() async throws {
 @Test
 @MainActor
 func queueSongIdentityIsContentBasedAndStableAcrossSources() async throws {
-    func update(index: Int, volume: Int) -> LinnGatewayData.NowPlaying {
-        let names = ["Same", "Same", "Other"]
-        var nowPlaying = LinnGatewayData.NowPlaying(room: "Linn", session: "test-session")
-        nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: .play)
-        nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: index, length: 3)
-        nowPlaying.currentItem = LinnGatewayData.NowPlaying.CurrentItem(
-            id: "media-\(index)",
-            kind: "md.track",
-            displayName: names[index],
-            track: LinnGatewayData.NowPlaying.Track(title: names[index], album: "Album", artist: "Artist")
-        )
-        nowPlaying.playlist = LinnGatewayData.NowPlaying.Playlist(
-            items: names.indices.map { i in
-                LinnGatewayData.NowPlaying.PlaylistItem(
-                    index: i,
-                    displayName: names[i],
-                    album: "Album",
-                    artist: "Artist",
-                    duration: 200
-                )
-            },
-            total: 3,
-            contentRevision: 1
-        )
-        nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: false)
-        return nowPlaying
+    func update(index: Int, volume: Int) -> Linn.Snapshot {
+        var snapshot = nowPlaying(index: index, titles: ["Same", "Same", "Other"], volume: volume)
+        snapshot.playlist.songs = snapshot.playlist.songs.map { song in
+            var song = song
+            song.artist = "Artist"
+            song.album = "Album"
+            song.duration = 200
+            return song
+        }
+        snapshot.currentSong = snapshot.playlist.songs[index]
+        snapshot.currentSong?.id = "media-\(index)"
+        snapshot.currentSong?.duration = nil
+        return snapshot
     }
 
     let gateway = TestGateway()
@@ -647,7 +631,8 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
     #expect(linn.isMuted == true)
 
     var stale = nowPlaying(index: 0, titles: titles, position: 2, volume: 10)
-    stale.roomState = LinnGatewayData.NowPlaying.RoomState(volume: 10, isMuted: false)
+    stale.volume = 10
+    stale.isMuted = false
     await gateway.send(stale)
     try await waitUntil {
         linn.timeline?.position == 2
@@ -655,7 +640,8 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
     #expect(linn.isMuted == true)
 
     var confirmed = nowPlaying(index: 0, titles: titles, position: 3, volume: 10)
-    confirmed.roomState = LinnGatewayData.NowPlaying.RoomState(volume: 10, isMuted: true)
+    confirmed.volume = 10
+    confirmed.isMuted = true
     await gateway.send(confirmed)
     try await waitUntil {
         linn.timeline?.position == 3
@@ -663,7 +649,8 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
     #expect(linn.isMuted == true)
 
     var unmuted = nowPlaying(index: 0, titles: titles, position: 4, volume: 10)
-    unmuted.roomState = LinnGatewayData.NowPlaying.RoomState(volume: 10, isMuted: false)
+    unmuted.volume = 10
+    unmuted.isMuted = false
     await gateway.send(unmuted)
     try await waitUntil {
         linn.isMuted == false
@@ -712,6 +699,44 @@ func serverPredictionIsReplacedByTheNextServerState() async throws {
     #expect(linn.playlist.currentIndex == 0)
     #expect(linn.timeline?.position == 7)
     #expect(linn.songTransitionDirection == .backward)
+}
+
+@Test
+@MainActor
+func completeSnapshotsReplaceQueueRowsWithoutRetainingOrInventingSongs() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: ["Old", "Removed"]))
+    try await waitUntil { linn.playlist.songs.count == 2 }
+
+    // Metadata and queue position settle separately. Never write the current
+    // title into a queue row: that row already belongs to the new song.
+    var snapshot = nowPlaying(index: 0, titles: ["New"])
+    snapshot.currentSong = .init(id: "old", title: "Old", queueIndex: 0)
+    await gateway.send(snapshot)
+    try await waitUntil { linn.playlist.total == 1 }
+    #expect(linn.currentSong?.title == "Old")
+    #expect(linn.playlist.songs.map(\.title) == ["New"])
+
+    // A replace with unknown contents can deliberately clear all rows while
+    // keeping a predicted current song. A previous snapshot must not refill it.
+    snapshot.playlist = .init()
+    snapshot.pending.currentItem = true
+    snapshot.pending.queueTotal = true
+    snapshot.timeline = nil
+    await gateway.send(snapshot)
+    try await waitUntil { linn.playlist.total == nil }
+    #expect(linn.playlist.songs.isEmpty)
+    #expect(linn.playlist.currentIndex == nil)
+    #expect(linn.timeline == nil)
+    #expect(linn.currentSong?.title == "Old")
+
+    await gateway.send(Linn.Snapshot())
+    try await waitUntil { linn.currentSong == nil }
+    #expect(linn.playState == nil)
+    #expect(linn.volume == nil)
+    #expect(linn.isMuted == nil)
 }
 
 @Test
@@ -775,15 +800,15 @@ func queueRowTapShowsLocalPendingMarkerUntilServerConfirms() async throws {
     try await waitUntil { linn.pendingQueueIndex == nil }
 }
 
-private let threeTrackAlbumPage = LinnGatewayData.MediaPage(
+private let threeTrackAlbumPage = Linn.LibraryPage(
     id: "album-x",
     index: 0,
     count: 3,
     total: 3,
-    children: [
-        LinnGatewayData.MediaItem(id: "track-a", kind: "md.track.qobuz", name: "A"),
-        LinnGatewayData.MediaItem(id: "track-b", kind: "md.track.qobuz", name: "B"),
-        LinnGatewayData.MediaItem(id: "track-c", kind: "md.track.qobuz", name: "C"),
+    items: [
+        Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"),
+        Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"),
+        Linn.LibraryItem(id: "track-c", kind: "md.track.qobuz", title: "C"),
     ]
 )
 
@@ -801,8 +826,8 @@ private actor TestGateway: LinnGateway {
         var isFavourite: Bool
     }
 
-    private let stream: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>
-    private let continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
+    private let stream: AsyncThrowingStream<Linn.Snapshot, Error>
+    private let continuation: AsyncThrowingStream<Linn.Snapshot, Error>.Continuation
     private var selectedIndexes: [Int] = []
     private var selectedMedia: [SelectedMediaItem] = []
     private var mediaPreviews: [Linn.LibraryItem?] = []
@@ -817,12 +842,12 @@ private actor TestGateway: LinnGateway {
     private var failingMediaIDs: Set<String> = []
     private var shouldSuspendMediaServices = false
     private var suspendedMediaServices: [CheckedContinuation<Void, Never>] = []
-    private var services: [LinnGatewayData.MediaService] = []
-    private var mediaPages: [String: LinnGatewayData.MediaPage] = [:]
+    private var services: [Linn.LibraryService] = []
+    private var mediaPages: [String: Linn.LibraryPage] = [:]
     private var browseCounts: [String: Int] = [:]
 
     init() {
-        let source = AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.makeStream()
+        let source = AsyncThrowingStream<Linn.Snapshot, Error>.makeStream()
         stream = source.stream
         continuation = source.continuation
     }
@@ -830,7 +855,7 @@ private actor TestGateway: LinnGateway {
     func nowPlayingUpdates(
         room _: String?,
         updateInterval _: Int
-    ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
+    ) async -> AsyncThrowingStream<Linn.Snapshot, Error> {
         stream
     }
 
@@ -869,12 +894,12 @@ private actor TestGateway: LinnGateway {
                 suspendedMediaServices.append(continuation)
             }
         }
-        return services.map(Linn.LibraryService.init)
+        return services
     }
 
     func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> Linn.LibraryPage {
         browseCounts[mediaID, default: 0] += 1
-        return Linn.LibraryPage(mediaPages[mediaID] ?? LinnGatewayData.MediaPage(id: mediaID))
+        return mediaPages[mediaID] ?? Linn.LibraryPage(id: mediaID)
     }
 
     func searchMedia(
@@ -884,19 +909,19 @@ private actor TestGateway: LinnGateway {
         index _: Int,
         count _: Int
     ) async throws -> Linn.LibraryPage {
-        let allItems = mediaPages.values.flatMap(\.children)
+        let allItems = mediaPages.values.flatMap(\.items)
         let matches = allItems.filter {
-            ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
+            $0.title.localizedCaseInsensitiveContains(query)
                 || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
         }
-        return Linn.LibraryPage(LinnGatewayData.MediaPage(
+        return Linn.LibraryPage(
             id: "search",
             contentRevision: mediaPages["service-qobuz"]?.contentRevision,
             index: 0,
             count: matches.count,
             total: matches.count,
-            children: matches
-        ))
+            items: matches
+        )
     }
 
     func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws {
@@ -919,7 +944,7 @@ private actor TestGateway: LinnGateway {
         shouldFailMediaSelections = true
     }
 
-    func seedMediaPage(_ page: LinnGatewayData.MediaPage, for mediaID: String) {
+    func seedMediaPage(_ page: Linn.LibraryPage, for mediaID: String) {
         mediaPages[mediaID] = page
     }
 
@@ -927,7 +952,7 @@ private actor TestGateway: LinnGateway {
         favourites.append(FavouriteRequest(mediaID: mediaID, isFavourite: isFavourite))
     }
 
-    func send(_ update: LinnGatewayData.NowPlaying) {
+    func send(_ update: Linn.Snapshot) {
         continuation.yield(update)
     }
 
@@ -951,7 +976,7 @@ private actor TestGateway: LinnGateway {
         browseCounts[mediaID] ?? 0
     }
 
-    func seedMediaServices(_ services: [LinnGatewayData.MediaService]) {
+    func seedMediaServices(_ services: [Linn.LibraryService]) {
         self.services = services
     }
 
@@ -999,56 +1024,57 @@ private actor TestGateway: LinnGateway {
 
     func seedQobuzLibrary(contentRevision: Int) {
         services = [
-            LinnGatewayData.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
+            Linn.LibraryService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
         ]
         mediaPages = [
-            "service-qobuz": LinnGatewayData.MediaPage(
+            "service-qobuz": Linn.LibraryPage(
                 id: "service-qobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
-                children: [
-                    LinnGatewayData.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    LinnGatewayData.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    LinnGatewayData.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                items: [
+                    Linn.LibraryItem(id: "qobuz-discover", kind: "md.qobuz.discover", title: "Discover"),
+                    Linn.LibraryItem(id: "qobuz-genres", kind: "md.qobuz.genres", title: "Genres"),
+                    Linn.LibraryItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", title: "My Qobuz"),
                 ]
             ),
-            "qobuz-myqobuz": LinnGatewayData.MediaPage(
+            "qobuz-myqobuz": Linn.LibraryPage(
                 id: "qobuz-myqobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
-                children: [
-                    LinnGatewayData.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    LinnGatewayData.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    LinnGatewayData.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                items: [
+                    Linn.LibraryItem(id: "qobuz-favourites", kind: "md.container", title: "Favourites"),
+                    Linn.LibraryItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", title: "My Playlists"),
+                    Linn.LibraryItem(id: "qobuz-purchased", kind: "md.container", title: "Purchased"),
                 ]
             ),
-            "qobuz-favourites": LinnGatewayData.MediaPage(
+            "qobuz-favourites": Linn.LibraryPage(
                 id: "qobuz-favourites",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
-                children: [
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                items: [
+                    Linn.LibraryItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", title: "Albums"),
+                    Linn.LibraryItem(id: "qobuz-favourite-artists", kind: "md.container", title: "Artist"),
+                    Linn.LibraryItem(id: "qobuz-favourite-playlists", kind: "md.container", title: "Playlists"),
                 ]
             ),
-            "qobuz-favourite-albums": LinnGatewayData.MediaPage(
+            "qobuz-favourite-albums": Linn.LibraryPage(
                 id: "qobuz-favourite-albums",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 2,
                 total: 2,
-                children: [
-                    LinnGatewayData.MediaItem(
+                items: [
+                    Linn.LibraryItem(
                         id: "qobuz-album-happy-christmas",
                         kind: "md.album.qobuz",
-                        name: "Happy Christmas",
+                        title: "Happy Christmas",
+                        subtitle: "Frank Sinatra",
                         album: "Happy Christmas",
                         artists: ["Frank Sinatra"],
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/25/04/3610152050425_230.jpg"),
@@ -1057,97 +1083,102 @@ private actor TestGateway: LinnGateway {
                         isFavourite: true,
                         canFavourite: true
                     ),
-                    LinnGatewayData.MediaItem(
+                    Linn.LibraryItem(
                         id: "qobuz-album-shostakovich-quartets",
                         kind: "md.album.qobuz",
-                        name: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                        title: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                        subtitle: "Cuarteto Casals",
                         album: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
                         artists: ["Cuarteto Casals"],
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/ob/zn/wozp8tpq0znob_230.jpg"),
                         containedKinds: ["md.track.qobuz"],
                         childCount: 30,
-                        isFavourite: true
+                        isFavourite: true,
+                        canFavourite: true
                     ),
                 ]
             ),
-            "qobuz-favourite-artists": LinnGatewayData.MediaPage(
+            "qobuz-favourite-artists": Linn.LibraryPage(
                 id: "qobuz-favourite-artists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 1,
                 total: 1,
-                children: [
-                    LinnGatewayData.MediaItem(
+                items: [
+                    Linn.LibraryItem(
                         id: "qobuz-artist-qrion",
                         kind: "md.artist.qobuz",
-                        name: "Qrion",
+                        title: "Qrion",
+                        subtitle: "Qrion",
                         artists: ["Qrion"],
                         artworkURL: URL(string: "https://static.qobuz.com/images/artists/covers/small/afd716d782ba6b056d5a311b0bed0573.jpg"),
-                        isFavourite: true
+                        isFavourite: true,
+                        canFavourite: true
                     ),
                 ]
             ),
-            "qobuz-favourite-playlists": LinnGatewayData.MediaPage(
+            "qobuz-favourite-playlists": Linn.LibraryPage(
                 id: "qobuz-favourite-playlists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 2,
                 total: 2,
-                children: [
-                    LinnGatewayData.MediaItem(
+                items: [
+                    Linn.LibraryItem(
                         id: "qobuz-playlist-willkommen",
                         kind: "md.playlist.qobuz",
-                        name: "Willkommen bei Qobuz",
+                        title: "Willkommen bei Qobuz",
                         artworkURL: URL(string: "https://static.qobuz.com/images/playlists/1285072_2bc9b2d5023757d1a8b10db915efd367_rectangle.jpg"),
                         containedKinds: ["md.track.qobuz"],
                         childCount: 125
                     ),
-                    LinnGatewayData.MediaItem(
+                    Linn.LibraryItem(
                         id: "qobuz-playlist-true-sound-covers",
                         kind: "md.playlist.qobuz",
-                        name: "True Sound Covers",
+                        title: "True Sound Covers",
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/13/05/0093624980513_300.jpg"),
                         containedKinds: ["md.track.qobuz"],
                         childCount: 50
                     ),
                 ]
             ),
-            "qobuz-my-playlists": LinnGatewayData.MediaPage(
+            "qobuz-my-playlists": Linn.LibraryPage(
                 id: "qobuz-my-playlists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 2,
                 total: 2,
-                children: [
-                    LinnGatewayData.MediaItem(
+                items: [
+                    Linn.LibraryItem(
                         id: "qobuz-playlist-demo",
                         kind: "md.playlist.qobuz",
-                        name: "Demo",
+                        title: "Demo",
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/09/32/0088807203209_300.jpg"),
                         containedKinds: ["md.track.qobuz"],
                         childCount: 17
                     ),
-                    LinnGatewayData.MediaItem(
+                    Linn.LibraryItem(
                         id: "qobuz-playlist-cello-henry-bedtime",
                         kind: "md.playlist.qobuz",
-                        name: "\"Cello\" (Henry bedtime)",
+                        title: "\"Cello\" (Henry bedtime)",
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/43/80/0884977868043_300.jpg"),
                         containedKinds: ["md.track.qobuz"],
                         childCount: 8
                     ),
                 ]
             ),
-            "qobuz-purchased": LinnGatewayData.MediaPage(
+            "qobuz-purchased": Linn.LibraryPage(
                 id: "qobuz-purchased",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 1,
                 total: 1,
-                children: [
-                    LinnGatewayData.MediaItem(
+                items: [
+                    Linn.LibraryItem(
                         id: "qobuz-album-hit-me-hard-and-soft",
                         kind: "md.album.qobuz",
-                        name: "HIT ME HARD AND SOFT",
+                        title: "HIT ME HARD AND SOFT",
+                        subtitle: "Billie Eilish",
                         album: "HIT ME HARD AND SOFT",
                         artists: ["Billie Eilish"],
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg"),
@@ -1163,96 +1194,98 @@ private actor TestGateway: LinnGateway {
 
     func seedNestedQobuzLibrary(contentRevision: Int) {
         services = [
-            LinnGatewayData.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.qobuz"),
+            Linn.LibraryService(id: "service-qobuz", name: "Qobuz", kind: "md.qobuz"),
         ]
         mediaPages = [
-            "service-qobuz": LinnGatewayData.MediaPage(
+            "service-qobuz": Linn.LibraryPage(
                 id: "service-qobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
-                children: [
-                    LinnGatewayData.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    LinnGatewayData.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    LinnGatewayData.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                items: [
+                    Linn.LibraryItem(id: "qobuz-discover", kind: "md.qobuz.discover", title: "Discover"),
+                    Linn.LibraryItem(id: "qobuz-genres", kind: "md.qobuz.genres", title: "Genres"),
+                    Linn.LibraryItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", title: "My Qobuz"),
                 ]
             ),
-            "qobuz-myqobuz": LinnGatewayData.MediaPage(
+            "qobuz-myqobuz": Linn.LibraryPage(
                 id: "qobuz-myqobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
-                children: [
-                    LinnGatewayData.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    LinnGatewayData.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    LinnGatewayData.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                items: [
+                    Linn.LibraryItem(id: "qobuz-favourites", kind: "md.container", title: "Favourites"),
+                    Linn.LibraryItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", title: "My Playlists"),
+                    Linn.LibraryItem(id: "qobuz-purchased", kind: "md.container", title: "Purchased"),
                 ]
             ),
-            "qobuz-favourites": LinnGatewayData.MediaPage(
+            "qobuz-favourites": Linn.LibraryPage(
                 id: "qobuz-favourites",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
-                children: [
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                items: [
+                    Linn.LibraryItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", title: "Albums"),
+                    Linn.LibraryItem(id: "qobuz-favourite-artists", kind: "md.container", title: "Artist"),
+                    Linn.LibraryItem(id: "qobuz-favourite-playlists", kind: "md.container", title: "Playlists"),
                 ]
             ),
-            "qobuz-favourite-albums": LinnGatewayData.MediaPage(
+            "qobuz-favourite-albums": Linn.LibraryPage(
                 id: "qobuz-favourite-albums",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 1,
                 total: 1,
-                children: [
-                    LinnGatewayData.MediaItem(
+                items: [
+                    Linn.LibraryItem(
                         id: "qobuz-album-chopin-nocturnes",
                         kind: "md.album.qobuz",
-                        name: "Chopin: The Complete Nocturnes",
+                        title: "Chopin: The Complete Nocturnes",
+                        subtitle: "Tom Hicks",
                         album: "Chopin: The Complete Nocturnes",
                         artists: ["Tom Hicks"],
                         artworkURL: URL(string: "https://static.qobuz.com/images/covers/yc/ag/nuuxf36hoagyc_230.jpg"),
                         containedKinds: ["md.track.qobuz"],
                         childCount: 21,
-                        isFavourite: true
+                        isFavourite: true,
+                        canFavourite: true
                     ),
                 ]
             ),
-            "qobuz-favourite-artists": LinnGatewayData.MediaPage(
+            "qobuz-favourite-artists": Linn.LibraryPage(
                 id: "qobuz-favourite-artists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 0,
                 total: 0,
-                children: []
+                items: []
             ),
-            "qobuz-favourite-playlists": LinnGatewayData.MediaPage(
+            "qobuz-favourite-playlists": Linn.LibraryPage(
                 id: "qobuz-favourite-playlists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 0,
                 total: 0,
-                children: []
+                items: []
             ),
-            "qobuz-my-playlists": LinnGatewayData.MediaPage(
+            "qobuz-my-playlists": Linn.LibraryPage(
                 id: "qobuz-my-playlists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 0,
                 total: 0,
-                children: []
+                items: []
             ),
-            "qobuz-purchased": LinnGatewayData.MediaPage(
+            "qobuz-purchased": Linn.LibraryPage(
                 id: "qobuz-purchased",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 0,
                 total: 0,
-                children: []
+                items: []
             ),
         ]
     }
@@ -1264,38 +1297,29 @@ private func nowPlaying(
     playlistIndexes: [Int]? = nil,
     position: Int = 1,
     volume: Int = 10
-) -> LinnGatewayData.NowPlaying {
-    let title = titles[index]
-    let playlistIndexes = playlistIndexes ?? Array(titles.indices)
-    var nowPlaying = LinnGatewayData.NowPlaying(room: "Linn", session: "test-session")
-    nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: .play)
-    nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: index, length: titles.count)
-    nowPlaying.currentItem = LinnGatewayData.NowPlaying.CurrentItem(
-        id: "song-\(index)",
-        kind: "md.track",
-        displayName: title,
-        track: LinnGatewayData.NowPlaying.Track(
-            title: title,
+) -> Linn.Snapshot {
+    func song(at index: Int) -> Linn.Song {
+        .init(
+            id: "song-\(index)",
+            title: titles[index],
+            artist: "Artist \(index)",
             album: "Album \(index)",
-            artist: "Artist \(index)"
+            duration: 180 + index,
+            queueIndex: index
         )
+    }
+    var snapshot = Linn.Snapshot()
+    snapshot.playState = .playing
+    snapshot.currentSong = song(at: index)
+    snapshot.playlist = .init(
+        songs: (playlistIndexes ?? Array(titles.indices)).map { song(at: $0) },
+        currentIndex: index,
+        total: titles.count
     )
-    nowPlaying.playlist = LinnGatewayData.NowPlaying.Playlist(
-        items: playlistIndexes.map { index in
-            LinnGatewayData.NowPlaying.PlaylistItem(
-                index: index,
-                displayName: titles[index],
-                album: "Album \(index)",
-                artist: "Artist \(index)",
-                duration: 180 + index
-            )
-        },
-        total: titles.count,
-        contentRevision: 1
-    )
-    nowPlaying.timeline = LinnGatewayData.NowPlaying.Timeline(position: position, duration: 180)
-    nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: false)
-    return nowPlaying
+    snapshot.timeline = .init(position: position, duration: 180, progress: Double(position) / 180)
+    snapshot.volume = volume
+    snapshot.isMuted = false
+    return snapshot
 }
 
 @MainActor
