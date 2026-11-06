@@ -54,8 +54,9 @@ local volume/mute feedback and row markers.
 | Swift RPC deadline | 25 seconds, allowing queue wait plus acknowledgement |
 
 A playback timeout removes its prediction and reads back transport, metadata,
-position and playlist before dispatching more playback commands. Read-back omits
-`update`, preserving subscriptions (`update: 0` would cancel them). Row/seek targets
+position and playlist before dispatching more playback commands. Read-back explicitly
+renews status subscriptions with `update: 1`: live testing showed that omission stops
+pushes, contrary to the vendor spec; `update: 0` cancels them as well. Row/seek targets
 are checked against the current queue contents and limits at dispatch; Linn's
 playlist revision also advances on selection updates, so revision alone is not a
 queue identity. Failed, expired or invalidated commands cancel dependent row/seek

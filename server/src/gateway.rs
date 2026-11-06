@@ -532,6 +532,7 @@ async fn run_connection(
                     return Err("Linn did not answer playback read-back after a command timeout".into());
                 }
                 if scheduler.tick(now) {
+                    info!("Playback confirmation timed out; refreshing Linn subscriptions");
                     // A timeout is not cancellation. Refresh before sending more;
                     // no read-back can promise an older command won't execute late.
                     let mut remaining = HashMap::new();
@@ -543,8 +544,9 @@ async fn run_connection(
                         let tag = format!("refresh-{next_tag}");
                         body["tag"] = json!(tag);
                         body["requestPath"] = json!(path);
-                        // Omitting update preserves the subscription; zero cancels it.
-                        body.as_object_mut().unwrap().remove("update");
+                        // The live gateway stops status pushes when update is
+                        // omitted, contrary to its spec. Retain update=1 from
+                        // subscriptions() so read-back also renews observation.
                         let encoded = websocket::encode_request(path, body).map_err(|e| e.to_string())?;
                         socket
                             .send(Message::Text(encoded.to_string().into()))

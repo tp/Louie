@@ -229,7 +229,7 @@ async fn a_b_a_cancels_b_but_does_not_restart_confirmed_a() {
 }
 
 #[tokio::test]
-async fn timeout_reads_back_without_unsubscribing_before_sending_waiting_command() {
+async fn timeout_renews_subscriptions_before_sending_waiting_command() {
     let mut wire = Wire::new().await;
     let first = wire.row(1);
     let request = wire.next().await;
@@ -240,10 +240,12 @@ async fn timeout_reads_back_without_unsubscribing_before_sending_waiting_command
     for _ in 0..4 {
         let request = wire.next().await;
         assert!(request["tag"].as_str().unwrap().starts_with("refresh-"));
-        assert!(
-            request.get("update").is_none(),
-            "update=0 would cancel the live subscription"
-        );
+        if request["requestPath"] != "/V2/playlist/subscribe" {
+            assert_eq!(
+                request["update"], 1,
+                "the live gateway needs explicit renewal during read-back"
+            );
+        }
         refreshes.push(request);
     }
     wire.quiet().await;
