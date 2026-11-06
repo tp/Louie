@@ -10,7 +10,7 @@ public extension Linn {
         case failed(String)
     }
 
-    enum PlayState: Sendable, Equatable, Codable {
+    enum PlayState: String, Sendable, Equatable, Codable {
         case stopped
         case playing
         case paused
@@ -61,12 +61,14 @@ public extension Linn {
         public var duration: Int?
         public var progress: Double?
         public var seekableRange: ClosedRange<Int>?
+        public var sampledAtSeconds: TimeInterval?
 
-        public init(position: Int? = nil, duration: Int? = nil, progress: Double? = nil, seekableRange: ClosedRange<Int>? = nil) {
+        public init(position: Int? = nil, duration: Int? = nil, progress: Double? = nil, seekableRange: ClosedRange<Int>? = nil, sampledAtSeconds: TimeInterval? = nil) {
             self.position = position
             self.duration = duration
             self.progress = progress
             self.seekableRange = seekableRange
+            self.sampledAtSeconds = sampledAtSeconds
         }
 
         public func seekPosition(for position: TimeInterval) throws -> Int {

@@ -1,0 +1,18 @@
+{
+  "id": "http://louie-pi.local:50051|Linn",
+  "serverURL": "http://louie-pi.local:50051",
+  "room": "Linn",
+  "maximumVolume": 70,
+  "playback": {
+    "song": {"id":"song-1", "title":"Song", "artist":null, "album":null, "artworkURL":null, "queueIndex":1},
+    "state": "playing",
+    "timeline": {"position":20, "duration":180, "progress":0.1111111111111111, "seekableRange":[0,180], "sampledAtSeconds":100.0}
+  },
+  "timestampSeconds": 100.0,
+  "hasPrevious": true,
+  "hasNext": true,
+  "volume": 13,
+  "canControlPlayback": true,
+  "installationID":"test-install",
+  "pushEnvironment":"sandbox"
+}

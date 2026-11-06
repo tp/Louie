@@ -13,9 +13,9 @@ Paused sessions remain available. Stopping playback, standby, losing connection,
 
 ## Background limits
 
-The iOS extension is not a permanently running service. It keeps state current while scheduled, but updates after both processes are suspended (or playback starting without opening Louie) need Apple's NowPlaying APNs start/update/end integration. The server's token RPCs are currently placeholders; this PR does not register tokens or implement push delivery. Distribution through TestFlight or the App Store does not itself add background updates.
+The iOS extension is not a permanently running service. The optional [APNs integration](now-playing-push.md) registers push-to-start tokens from the app and session-update tokens from the extension. The home server sends start/update/end notifications while both processes are suspended. Apple controls delivery and presentation; real signed-device verification remains necessary.
 
-The extension needs network access to the configured home server. This implementation is LAN-only. It does not add a Watch app or make the server externally accessible.
+The extension needs access to the home server for commands and token registration. APNs delivery itself only needs internet access. Losing the phone's LAN connection preserves server-managed Now Playing content; an authoritative Linn standby/disconnection update removes it. No standalone Watch app or internet-accessible control endpoint is added.
 
 ## Verification
 

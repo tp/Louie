@@ -17,6 +17,7 @@ use crate::{
 #[derive(Clone)]
 pub struct LinnService {
     gateway: Gateway,
+    push: Option<crate::push::PushService>,
     first_tracks: Arc<Mutex<HashMap<String, pb::MediaItem>>>,
 }
 
@@ -24,8 +25,14 @@ impl LinnService {
     pub fn new(gateway: Gateway) -> Self {
         Self {
             gateway,
+            push: None,
             first_tracks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_push(mut self, push: Option<crate::push::PushService>) -> Self {
+        self.push = push;
+        self
     }
 
     async fn command(&self, path: &'static str, body: Value) -> Result<Response<()>, Status> {
@@ -295,20 +302,26 @@ impl Linn for LinnService {
 
     async fn register_now_playing_token(
         &self,
-        _: Request<pb::RegisterNowPlayingTokenRequest>,
+        request: Request<pb::RegisterNowPlayingTokenRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented(
-            "Now Playing push registration is not enabled yet",
-        ))
+        let push = self
+            .push
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Now Playing APNs is not configured"))?;
+        push.register(request.into_inner()).await?;
+        Ok(Response::new(()))
     }
 
     async fn remove_now_playing_token(
         &self,
-        _: Request<pb::RemoveNowPlayingTokenRequest>,
+        request: Request<pb::RemoveNowPlayingTokenRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented(
-            "Now Playing push registration is not enabled yet",
-        ))
+        let push = self
+            .push
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Now Playing APNs is not configured"))?;
+        push.remove(request.into_inner()).await?;
+        Ok(Response::new(()))
     }
 }
 
