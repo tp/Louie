@@ -129,6 +129,14 @@ actor PiLinnGateway: LinnGateway {
         }
     }
 
+    func wake(room _: String) async throws {
+        var options = Self.commandOptions
+        // Physical startup took ~13 seconds on the real Linn; the server waits
+        // up to 30 seconds for observed standby=false, not just its command ack.
+        options.timeout = .seconds(35)
+        _ = try await remapCancellation { try await service().wake(Google_Protobuf_Empty(), options: options) }
+    }
+
     func play(room: String) async throws {
         _ = try await remapCancellation { try await service().play(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }

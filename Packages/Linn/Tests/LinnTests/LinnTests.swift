@@ -70,6 +70,103 @@ func standbyDisablesControlsOnFreshClientsAndLiveUpdates(startConnected: Bool) a
 
 @Test
 @MainActor
+func wakeShowsProgressWithoutPredictingPowerOrStartingPlayback() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    var standby = Linn.Snapshot()
+    standby.isStandby = true
+    await gateway.send(standby)
+    linn.start()
+    try await waitUntil { linn.canWake }
+    linn.turnOn()
+    linn.turnOn()
+    #expect(linn.isWaking)
+    #expect(linn.isStandby)
+    #expect(!linn.canControlPlayback)
+    #expect(linn.canBrowseLibrary)
+    try await waitUntil { await gateway.wakeCallCount() == 1 }
+    #expect(await gateway.playCallCount() == 0)
+    await gateway.send(Linn.Snapshot())
+    await gateway.finishWake()
+    try await waitUntil { !linn.isWaking && linn.canControlPlayback }
+}
+
+@Test
+@MainActor
+func failedWakeCanRetryAndDisconnectCancelsProgress() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    var standby = Linn.Snapshot()
+    standby.isStandby = true
+    await gateway.send(standby)
+    linn.start()
+    try await waitUntil { linn.canWake }
+    linn.turnOn()
+    try await waitUntil { await gateway.wakeCallCount() == 1 }
+    await gateway.finishWake(fail: true)
+    try await waitUntil { linn.canWake && linn.lastErrorMessage != nil }
+    linn.turnOn()
+    try await waitUntil { await gateway.wakeCallCount() == 2 }
+    await gateway.send(.init(connectionState: .linnUnavailable(nil)))
+    try await waitUntil { !linn.isWaking }
+    #expect(!linn.canWake && !linn.canControlPlayback && !linn.canBrowseLibrary)
+    await gateway.finishWake() // Late completion must not change availability.
+    #expect(linn.connectionState == .linnUnavailable(nil))
+}
+
+@Test(arguments: [Linn.ConnectionState.linnUnavailable(nil), .serverUnreachable])
+@MainActor
+func disconnectInvalidatesLibraryAndBlocksCachedBrowse(connection: Linn.ConnectionState) async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.library.availability == .available }
+    let source = try #require(linn.library.qobuz.favouriteAlbums?.source)
+    _ = try await linn.browse(source)
+    let before = await gateway.browseCallCount(mediaID: source.id)
+    await gateway.send(.init(connectionState: connection))
+    try await waitUntil { !linn.canBrowseLibrary }
+    #expect(linn.library.availability == .unavailable)
+    do {
+        _ = try await linn.browse(source)
+        Issue.record("Offline browse must not return a cached page")
+    } catch {}
+    do {
+        _ = try await linn.searchLibrary(query: "Happy")
+        Issue.record("Offline search must fail")
+    } catch {}
+    linn.refreshLibrary()
+    #expect(await gateway.browseCallCount(mediaID: source.id) == before)
+    var standby = Linn.Snapshot()
+    standby.isStandby = true
+    await gateway.send(standby)
+    try await waitUntil { linn.library.availability == .available }
+    #expect(linn.canBrowseLibrary && !linn.canControlPlayback)
+    #expect(try await linn.browse(source).items.count > 0)
+}
+
+@Test
+@MainActor
+func disconnectDuringLibraryLoadCannotPublishStaleAvailability() async throws {
+    let gateway = TestGateway()
+    await gateway.seedQobuzLibrary(contentRevision: 1)
+    await gateway.suspendMediaServices()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.library.availability == .loading }
+    await gateway.send(.init(connectionState: .linnUnavailable(nil)))
+    try await waitUntil { !linn.canBrowseLibrary }
+    await gateway.resumeMediaServices()
+    await gateway.send(.init(connectionState: .serverUnreachable))
+    try await waitUntil { linn.connectionState == .serverUnreachable }
+    #expect(linn.library.availability == .unavailable)
+    await gateway.send(.init())
+    try await waitUntil { linn.library.availability == .available }
+}
+
+@Test
+@MainActor
 func streamQueueIndexMovementUpdatesSongTransitionDirection() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
@@ -159,6 +256,8 @@ func libraryDiscoversQobuzAndUsesCachedBrowsedSections() async throws {
     let gateway = TestGateway()
     await gateway.seedQobuzLibrary(contentRevision: 1)
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -200,6 +299,8 @@ func libraryLoadUsesAvailableLibraryCache() async throws {
     let gateway = TestGateway()
     await gateway.seedQobuzLibrary(contentRevision: 1)
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -218,6 +319,8 @@ func qobuzRootFoldersExposeSectionsWithoutBrowsingMediaItems() async throws {
     let gateway = TestGateway()
     await gateway.seedNestedQobuzLibrary(contentRevision: 1)
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -242,6 +345,8 @@ func libraryReportsAvailableServicesWhenQobuzIsMissing() async throws {
         Linn.LibraryService(id: "service-airable", name: "Airable", kind: "md.airable"),
     ])
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -264,6 +369,8 @@ func libraryRefreshInvalidatesCacheWhenContentRevisionChanges() async throws {
     let gateway = TestGateway()
     await gateway.seedQobuzLibrary(contentRevision: 1)
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -287,6 +394,8 @@ func librarySearchResultsReplaceAndMediaItemsCanBeSelected() async throws {
     let gateway = TestGateway()
     await gateway.seedQobuzLibrary(contentRevision: 1)
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -314,6 +423,8 @@ func libraryFavouriteUpdatesSupportedItems() async throws {
     let gateway = TestGateway()
     await gateway.seedQobuzLibrary(contentRevision: 1)
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -496,6 +607,8 @@ func stopDuringLibraryLoadDoesNotStrandLoadingState() async throws {
     await gateway.seedQobuzLibrary(contentRevision: 1)
     await gateway.suspendMediaServices()
     let linn = Linn(gateway: gateway)
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
 
     linn.loadLibrary()
     try await waitUntil {
@@ -506,6 +619,8 @@ func stopDuringLibraryLoadDoesNotStrandLoadingState() async throws {
     #expect(linn.library.availability == .unavailable)
 
     await gateway.resumeMediaServices()
+    linn.start()
+    try await waitUntil { linn.canBrowseLibrary }
     linn.loadLibrary()
     try await waitUntil {
         linn.library.availability == .available
@@ -826,8 +941,12 @@ private actor TestGateway: LinnGateway {
         var isFavourite: Bool
     }
 
-    private let stream: AsyncThrowingStream<Linn.Snapshot, Error>
-    private let continuation: AsyncThrowingStream<Linn.Snapshot, Error>.Continuation
+    private var stream: AsyncThrowingStream<Linn.Snapshot, Error>
+    private var continuation: AsyncThrowingStream<Linn.Snapshot, Error>.Continuation
+    private var hasSubscribed = false
+    private var lastSnapshot = Linn.Snapshot()
+    private var wakeCalls = 0
+    private var wakeContinuation: CheckedContinuation<Void, any Error>?
     private var selectedIndexes: [Int] = []
     private var selectedMedia: [SelectedMediaItem] = []
     private var mediaPreviews: [Linn.LibraryItem?] = []
@@ -850,13 +969,34 @@ private actor TestGateway: LinnGateway {
         let source = AsyncThrowingStream<Linn.Snapshot, Error>.makeStream()
         stream = source.stream
         continuation = source.continuation
+        continuation.yield(lastSnapshot)
     }
 
     func nowPlayingUpdates(
         room _: String?,
         updateInterval _: Int
     ) async -> AsyncThrowingStream<Linn.Snapshot, Error> {
-        stream
+        if hasSubscribed {
+            let source = AsyncThrowingStream<Linn.Snapshot, Error>.makeStream()
+            stream = source.stream
+            continuation = source.continuation
+            continuation.yield(lastSnapshot)
+        }
+        hasSubscribed = true
+        return stream
+    }
+
+    func wake(room _: String) async throws {
+        wakeCalls += 1
+        try await withCheckedThrowingContinuation { wakeContinuation = $0 }
+    }
+
+    func wakeCallCount() -> Int { wakeCalls }
+
+    func finishWake(fail: Bool = false) {
+        if fail { wakeContinuation?.resume(throwing: MediaSelectionFailed()) }
+        else { wakeContinuation?.resume() }
+        wakeContinuation = nil
     }
 
     func play(room _: String) async throws {
@@ -953,6 +1093,7 @@ private actor TestGateway: LinnGateway {
     }
 
     func send(_ update: Linn.Snapshot) {
+        lastSnapshot = update
         continuation.yield(update)
     }
 

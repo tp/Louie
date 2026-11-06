@@ -59,6 +59,11 @@ impl Linn for LinnService {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    async fn wake(&self, _: Request<()>) -> Result<Response<()>, Status> {
+        self.gateway.wake().await?;
+        Ok(Response::new(()))
+    }
+
     async fn play(&self, _: Request<()>) -> Result<Response<()>, Status> {
         self.command("/V2/transport/play", json!({"room": self.room()}))
             .await

@@ -21,7 +21,9 @@ struct LibraryBrowser: View {
 
     var body: some View {
         ScrollView(.vertical) {
-            if isShowingSearch {
+            if !linn.canBrowseLibrary {
+                LibraryConnectionUnavailableView(linn: linn)
+            } else if isShowingSearch {
                 searchContent
             } else {
                 libraryStateContent

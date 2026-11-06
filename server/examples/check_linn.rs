@@ -10,10 +10,12 @@ use pb::{ConnectionStatus, SetVolumeRequest, VolumeScope, linn_client::LinnClien
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut endpoint = None;
     let mut probe_ack = false;
+    let mut wake = false;
     let mut probe_volume = false;
     let mut require_connected = false;
     for arg in env::args().skip(1) {
         match arg.as_str() {
+            "--wake" => wake = true,
             "--probe-ack" => probe_ack = true,
             "--probe-volume" => probe_volume = true,
             "--require-connected" => require_connected = true,
@@ -41,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Linn room is empty".into());
     }
     if connection != ConnectionStatus::Connected {
-        if probe_ack || require_connected {
+        if probe_ack || wake || require_connected {
             return Err(format!(
                 "Linn gateway is not connected: {:?}",
                 snapshot.connection_error
@@ -79,6 +81,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if probe_ack {
         tokio::time::timeout(Duration::from_secs(6), client.list_media_services(())).await??;
         println!("ListMediaServices acknowledged");
+    }
+    if wake {
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(35), client.wake(())).await??;
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), client.get_state(()))
+            .await??
+            .into_inner();
+        if snapshot.connection_status != ConnectionStatus::Connected as i32
+            || snapshot.now_playing.and_then(|state| state.is_standby) != Some(false)
+        {
+            return Err("Wake completed without confirmed standby=false".into());
+        }
+        println!(
+            "Wake confirmed after {:?}; no playback command sent",
+            started.elapsed()
+        );
     }
     if probe_volume {
         if connection != ConnectionStatus::Connected {

@@ -12,7 +12,7 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct V2TransportPlayPost200Response {
+pub struct V2ProductSetStandbyPost200Response {
     /// Tag from the original request that generated this response.
     #[serde(rename = "tag", skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
@@ -24,9 +24,9 @@ pub struct V2TransportPlayPost200Response {
     pub session: Option<String>,
 }
 
-impl V2TransportPlayPost200Response {
-    pub fn new() -> V2TransportPlayPost200Response {
-        V2TransportPlayPost200Response {
+impl V2ProductSetStandbyPost200Response {
+    pub fn new() -> V2ProductSetStandbyPost200Response {
+        V2ProductSetStandbyPost200Response {
             tag: None,
             room: None,
             session: None,

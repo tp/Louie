@@ -115,6 +115,28 @@ impl Gateway {
         self.request_with_preview(path, body, None, None).await
     }
 
+    pub async fn wake(&self) -> Result<(), tonic::Status> {
+        self.wake_with_timeout(Duration::from_secs(30)).await
+    }
+
+    async fn wake_with_timeout(&self, timeout: Duration) -> Result<(), tonic::Status> {
+        // Subscribe before sending: confirmation may arrive before the command ack.
+        let state = self.subscribe();
+        if awake(&state.borrow())? {
+            return Ok(());
+        }
+        tokio::time::timeout(timeout, async {
+            self.request(
+                "/V2/product/set_standby",
+                json!({"room": self.snapshot().room, "standby": false}),
+            )
+            .await?;
+            wait_until_awake(state).await
+        })
+        .await
+        .map_err(|_| tonic::Status::deadline_exceeded("Linn did not leave standby in time"))?
+    }
+
     pub async fn skip(&self, step: i32) -> Result<(), tonic::Status> {
         self.request("/louie/skip", json!({"step": step}))
             .await
@@ -601,6 +623,27 @@ fn publish_connected(
     observed.pending = Some(PendingState::default());
     observed.published_at = Some(now());
     state.send_replace(observed.clone());
+}
+
+fn awake(state: &StateSnapshot) -> Result<bool, tonic::Status> {
+    if state.connection_status != ConnectionStatus::Connected as i32 {
+        return Err(crate::error::failed_precondition(
+            "linn-disconnected",
+            "Linn is unreachable",
+        ));
+    }
+    Ok(state.now_playing.as_ref().and_then(|p| p.is_standby) == Some(false))
+}
+
+async fn wait_until_awake(mut state: watch::Receiver<StateSnapshot>) -> Result<(), tonic::Status> {
+    loop {
+        if awake(&state.borrow_and_update())? {
+            return Ok(());
+        }
+        state.changed().await.map_err(|_| {
+            crate::error::failed_precondition("gateway-unavailable", "Linn gateway worker stopped")
+        })?;
+    }
 }
 
 fn requires_active_room(path: &str) -> bool {
@@ -1187,7 +1230,7 @@ mod tests {
                                 assert_eq!(request["update"], 1);
                                 json!({"requestPath":"/V2/product/status", "data":{"standby":true}})
                             }
-                            "/V2/transport/play" => {
+                            "/V2/transport/play" | "/V2/product/set_standby" => {
                                 command_tx.send(request.clone()).await.unwrap();
                                 json!({"tag":request["tag"]})
                             }
@@ -1243,6 +1286,25 @@ mod tests {
             );
         }
         assert!(commands.try_recv().is_err());
+        // An ack is not proof of wake-up; a silent device must time out.
+        let error = gateway
+            .wake_with_timeout(Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(commands.recv().await.unwrap()["standby"], false);
+        assert_eq!(
+            gateway.snapshot().now_playing.unwrap().is_standby,
+            Some(true)
+        );
+
+        let wake_gateway = gateway.clone();
+        let wake = tokio::spawn(async move { wake_gateway.wake().await });
+        let request = commands.recv().await.unwrap();
+        assert_eq!(request["requestPath"], "/V2/product/set_standby");
+        assert_eq!(request["standby"], false);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!wake.is_finished(), "command ack must not finish wake");
         update_tx
             .send(json!({"requestPath":"/V2/product/status", "data":{"standby":false}}))
             .await
@@ -1251,6 +1313,9 @@ mod tests {
             s.now_playing.as_ref().unwrap().is_standby == Some(false)
         })
         .await;
+        wake.await.unwrap().unwrap();
+        gateway.wake().await.unwrap(); // Already awake: no additional command.
+        assert!(commands.try_recv().is_err());
         gateway
             .request("/V2/transport/play", json!({"room":"Linn"}))
             .await
@@ -1272,6 +1337,9 @@ mod tests {
             ConnectionStatus::Connected as i32
         );
         assert!(!state.borrow().pending.as_ref().unwrap().playback);
+        let wake_gateway = gateway.clone();
+        let interrupted_wake = tokio::spawn(async move { wake_gateway.wake().await });
+        assert_eq!(commands.recv().await.unwrap()["standby"], false);
         update_tx
             .send(json!({"requestPath":"/V2/topology/status", "data":{"rooms":[]}}))
             .await
@@ -1280,6 +1348,14 @@ mod tests {
             s.connection_status == ConnectionStatus::Disconnected as i32
         })
         .await;
+        assert_eq!(
+            interrupted_wake.await.unwrap().unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            gateway.wake().await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
         server.abort();
     }
 

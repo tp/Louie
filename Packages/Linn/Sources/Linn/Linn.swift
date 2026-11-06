@@ -8,6 +8,7 @@ public protocol LinnGateway: Sendable {
         updateInterval: Int
     ) async -> AsyncThrowingStream<Linn.Snapshot, Error>
 
+    func wake(room: String) async throws
     func play(room: String) async throws
     func pause(room: String) async throws
     func previous(room: String) async throws
@@ -50,6 +51,9 @@ public final class Linn {
     public private(set) var volume: Int?
     public private(set) var isMuted: Bool?
     public private(set) var isStandby = false
+    public private(set) var isWaking = false
+    public var canWake: Bool { connectionState == .connected && isStandby && !isWaking }
+    public var canBrowseLibrary: Bool { connectionState == .connected }
     public var canControlPlayback: Bool { connectionState == .connected && !isStandby }
     public private(set) var timeline: Timeline?
     public private(set) var lastErrorMessage: String?
@@ -114,6 +118,7 @@ public final class Linn {
     private var libraryPageCache: [LibraryCacheKey: LibraryPage] = [:]
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
 
+    @ObservationIgnored private var wakeTask: Task<Void, Never>?
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
 
@@ -197,6 +202,7 @@ public final class Linn {
     #endif
 
     deinit {
+        wakeTask?.cancel()
         updatesTask?.cancel()
         libraryTask?.cancel()
     }
@@ -226,6 +232,7 @@ public final class Linn {
         }
 
         updatesTask?.cancel()
+        invalidateConnectionWork()
         connectionState = .connecting
         lastErrorMessage = nil
         let requestedRoom = room
@@ -235,13 +242,15 @@ public final class Linn {
             guard let self else {
                 return
             }
-            var loadLibraryOnConnection = linnGateway is PiLinnGateway
+            var loadLibraryOnConnection = true
 
             do {
                 let updates = await linnGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
                 for try await update in updates {
+                    try Task.checkCancellation()
                     guard update.connectionState == .connected else {
                         connectionState = update.connectionState
+                        invalidateConnectionWork()
                         loadLibraryOnConnection = true
                         continue
                     }
@@ -254,34 +263,50 @@ public final class Linn {
                 }
             } catch is CancellationError {
                 Self.logger.info("Linn now-playing update task cancelled")
-                connectionState = .idle
             } catch {
+                guard !Task.isCancelled else { return }
                 let message = error.localizedDescription
                 Self.logger.error("Linn now-playing update task failed: \(message, privacy: .public)")
                 lastErrorMessage = message
                 connectionState = .failed(message)
+                invalidateConnectionWork()
             }
-        }
-
-        if !(linnGateway is PiLinnGateway) {
-            loadLibrary()
         }
     }
 
     public func stop() {
         updatesTask?.cancel()
         updatesTask = nil
-        libraryTask?.cancel()
-        // A cancelled in-flight load would otherwise strand `.loading`, and the
-        // next `loadLibrary()` bails out on that state — the library would
-        // never load again without a manual refresh.
-        if library.availability == .loading {
-            library.availability = .unavailable
-        }
+        invalidateConnectionWork()
         guard linnGateway != nil else {
             return
         }
         connectionState = .idle
+    }
+
+    private func invalidateConnectionWork() {
+        wakeTask?.cancel()
+        wakeTask = nil
+        isWaking = false
+        libraryTask?.cancel()
+        library.availability = .unavailable
+    }
+
+    public func turnOn() {
+        guard canWake, let linnGateway else { return }
+        isWaking = true
+        lastErrorMessage = nil
+        wakeTask = Task { [weak self, linnGateway, room] in
+            do {
+                try await linnGateway.wake(room: room)
+                try Task.checkCancellation()
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.lastErrorMessage = error.localizedDescription
+            }
+            self?.isWaking = false
+            self?.wakeTask = nil
+        }
     }
 
     public func play() {
@@ -369,6 +394,7 @@ public final class Linn {
     }
 
     private func loadLibrary(force: Bool) {
+        guard canBrowseLibrary else { return }
         switch library.availability {
         case .loading:
             return
@@ -410,6 +436,7 @@ public final class Linn {
                     count: 50,
                     browseType: ""
                 )
+                try Task.checkCancellation()
                 let libraryRootPage = rootPage
                 reconcileLibraryRevision(libraryRootPage.contentRevision)
                 cache(libraryRootPage, mediaID: qobuzService.id, browseType: "")
@@ -446,6 +473,7 @@ public final class Linn {
     }
 
     public func browse(_ item: LibraryItem, index: Int = 0, count: Int = 50, browseType: String = "") async throws -> LibraryPage {
+        guard canBrowseLibrary else { throw LibraryError.unavailable }
         if index == 0, let cached = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: browseType)] {
             return cached
         }
@@ -455,6 +483,8 @@ public final class Linn {
         }
 
         let page = try await linnGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
+        try Task.checkCancellation()
+        guard canBrowseLibrary else { throw LibraryError.unavailable }
         let libraryPage = page
         reconcileLibraryRevision(libraryPage.contentRevision)
         if index == 0 {
@@ -469,6 +499,7 @@ public final class Linn {
         index: Int = 0,
         count: Int = 25
     ) async throws -> LibraryPage {
+        guard canBrowseLibrary else { throw LibraryError.unavailable }
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else {
             return LibraryPage(id: "search", index: index)
@@ -484,6 +515,8 @@ public final class Linn {
             index: index,
             count: count
         )
+        try Task.checkCancellation()
+        guard canBrowseLibrary else { throw LibraryError.unavailable }
         return page
     }
 
@@ -514,7 +547,7 @@ public final class Linn {
     }
 
     public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {
-        guard item.canFavourite, item.isFavourite != nil, let linnGateway else {
+        guard canBrowseLibrary, item.canFavourite, item.isFavourite != nil, let linnGateway else {
             return
         }
 
@@ -707,7 +740,9 @@ public final class Linn {
         _ item: LibraryItem,
         gateway: any LinnGateway
     ) async -> [LibraryItem] {
+        guard canBrowseLibrary, !Task.isCancelled else { return [] }
         let page = try? await gateway.browseMedia(mediaID: item.id, index: 0, count: 50, browseType: "")
+        guard canBrowseLibrary, !Task.isCancelled else { return [] }
         let libraryPage = page
         if let libraryPage {
             reconcileLibraryRevision(libraryPage.contentRevision)

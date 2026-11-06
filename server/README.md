@@ -35,7 +35,21 @@ comes from `/V2/product/status`, is read before the first connected snapshot,
 and stays updated through a subscription. A room in standby keeps its observed
 metadata, but playback and volume commands fail with `linn-standby` in the
 `louie-error-reason` metadata. Clients show an off state and disable those controls.
+`Wake` sends `/V2/product/set_standby` with `standby: false` and waits up to
+30 seconds for observed standby-off, rather than treating its acknowledgement as
+completion. It does not start playback. Already-awake calls are no-ops;
+unreachable rooms fail immediately, and a disconnect while waking fails the
+request. The Apple client allows 35 seconds and shows progress only on the Home
+playing card. The real Linn took about 13 seconds to report awake during testing.
+
+Browsing remains available in standby. If either Linn or Louie Home Server is
+unreachable, clients cancel library loading, hide cached library pages, and
+block browsing/search/favourites until reconnection reloads the library.
 Topology updates also detect a room disappearing while the gateway remains up.
+
+For a deliberate wake test, run `check_linn http://louie-pi.local:50051 --wake`.
+This changes the room's power state and leaves it awake; it does not play music.
+The normal deploy smoke check does not send this command.
 
 ## Build and test
 

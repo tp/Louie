@@ -22,8 +22,12 @@ struct LibraryItemDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                header
-                content
+                if linn.canBrowseLibrary {
+                    header
+                    content
+                } else {
+                    LibraryConnectionUnavailableView(linn: linn)
+                }
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(.horizontal, 20)
@@ -48,7 +52,8 @@ struct LibraryItemDetailView: View {
                 .disabled(!linn.canControlPlayback)
             }
         }
-        .task(id: route.id) {
+        .task(id: "\(route.id):\(linn.canBrowseLibrary)") {
+            guard linn.canBrowseLibrary else { return }
             await loadItems()
         }
     }
@@ -182,9 +187,10 @@ private struct LibraryItemListRow: View {
 
 #if DEBUG
     #Preview {
+        @Previewable @State var linn = Linn(gateway: DemoLinnGateway())
         NavigationStack {
             LibraryItemDetailView(
-                linn: Linn(gateway: DemoLinnGateway()),
+                linn: linn,
                 route: LibraryItemRoute(
                     Linn.LibraryItem(
                         id: "qobuz-favourite-albums",
@@ -196,5 +202,7 @@ private struct LibraryItemListRow: View {
                 ),
             )
         }
+        .task { linn.start() }
+        .onDisappear { linn.stop() }
     }
 #endif

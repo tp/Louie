@@ -150,6 +150,7 @@ public struct PlayerBar: View {
     }
 
     private var statusTitle: String {
+        if state.isWaking { return "Turning on Linn…" }
         if state.connectionState == .connected && state.isStandby { return "Linn is off" }
         return switch state.connectionState {
         case .idle:
@@ -169,7 +170,7 @@ public struct PlayerBar: View {
 
     private var statusSubtitle: String? {
         if state.connectionState == .connected && state.isStandby {
-            return "Turn on Linn to control playback"
+            return state.lastErrorMessage ?? (state.isWaking ? "Waiting for Linn to become ready" : "Turn on Linn to control playback")
         }
         if state.connectionState == .connected, let message = state.lastErrorMessage {
             return message

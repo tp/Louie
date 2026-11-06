@@ -135,6 +135,31 @@ paths:
               session: sessionid
         default:
           $ref: '#/responses/default'
+  /V2/product/set_standby:
+    post:
+      summary: Set standby state of room
+      description: Sets the standby state of the room. True for standby active, False for standby off
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - $ref: '#/definitions/ParamRoom'
+              - type: object
+                properties:
+                  standby:
+                    description: If specified, sets the standby state of the room.
+                    type: boolean
+      tags:
+        - API V2
+      responses:
+        '200':
+          $ref: '#/responses/success_room'
+        default:
+          $ref: '#/responses/default'
   /V2/transport/status:
     get:
       summary: Query transport status of room

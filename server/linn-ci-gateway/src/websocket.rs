@@ -34,6 +34,7 @@ pub fn encode_request(path: &str, value: Value) -> Result<Value, serde_json::Err
         encode(&decode::<T>(&value)?)
     }
     let mut encoded = match path {
+        "/V2/product/set_standby" => round_trip::<models::V2ProductSetStandbyPostRequest>(value)?,
         "/V2/transport/play" => round_trip::<models::V2TransportPlayPostRequest>(value)?,
         "/V2/transport/skip_track" => round_trip::<models::V2TransportSkipTrackPostRequest>(value)?,
         "/V2/seek/set_position" => round_trip::<models::V2SeekSetPositionPostRequest>(value)?,
