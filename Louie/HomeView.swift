@@ -108,8 +108,11 @@ struct HomeView: View {
             }
             .disabled(!linn.hasPrevious)
 
-            Button(playPauseTitle, systemImage: playPauseSystemImage) {
+            Button {
                 linn.playPause()
+            } label: {
+                Label(playPauseTitle, systemImage: playPauseSystemImage)
+                    .frame(width: 24)
             }
             .disabled(linn.playState == nil)
 
