@@ -7,6 +7,7 @@ let package = Package(
     name: "Linn",
     platforms: [.iOS(.v27), .macOS(.v27)],
     products: [
+        .library(name: "LinnNowPlaying", targets: ["LinnNowPlaying"]),
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "Linn",
@@ -20,6 +21,14 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.39.0"),
     ],
     targets: [
+        .target(
+            name: "LinnNowPlaying",
+            dependencies: ["Linn"]
+        ),
+        .testTarget(
+            name: "LinnNowPlayingTests",
+            dependencies: ["LinnNowPlaying"]
+        ),
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(

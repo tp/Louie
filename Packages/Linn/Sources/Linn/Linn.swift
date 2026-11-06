@@ -10,6 +10,7 @@ public protocol LinnGateway: Sendable {
 
     func wake(room: String) async throws
     func play(room: String) async throws
+    func seek(to position: Int, room: String) async throws
     func pause(room: String) async throws
     func previous(room: String) async throws
     func next(room: String) async throws
@@ -319,6 +320,16 @@ public final class Linn {
         performControl { linnGateway, room in
             try await linnGateway.pause(room: room)
         }
+    }
+
+    /// Waits for the gateway acknowledgement; unavailable for non-seekable sources.
+    public func seek(to position: TimeInterval) async throws {
+        guard canControlPlayback, let linnGateway else {
+            throw SeekError.unavailable
+        }
+        guard let timeline else { throw SeekError.unavailable }
+        let seconds = try timeline.seekPosition(for: position)
+        try await linnGateway.seek(to: seconds, room: room)
     }
 
     public func playPause() {
