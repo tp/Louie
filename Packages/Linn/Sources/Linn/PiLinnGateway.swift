@@ -263,6 +263,7 @@ private enum PiLinnError: Error, LocalizedError {
 struct PiLinnRPCError: Error, LocalizedError {
     enum Reason: String {
         case linnDisconnected = "linn-disconnected"
+        case linnStandby = "linn-standby"
         case linnRejected = "linn-rejected"
         case sourceNotSeekable = "source-not-seekable"
         case gatewayUnavailable = "gateway-unavailable"
@@ -295,6 +296,7 @@ struct PiLinnRPCError: Error, LocalizedError {
         case .failedPrecondition:
             switch reason {
             case .linnDisconnected, .gatewayUnavailable: "Louie Home Server can't reach Linn."
+            case .linnStandby: "Linn is off. Turn it on to control playback."
             case .sourceNotSeekable: "This source doesn't support seeking."
             case .linnRejected: "Linn rejected the request."
             case .superseded: "The request was superseded."
@@ -336,6 +338,7 @@ enum PiLinnMapping {
         }
         guard snapshot.hasNowPlaying else { return result }
         let state = snapshot.nowPlaying
+        result.isStandby = state.hasIsStandby ? state.isStandby : nil
         if state.hasTransportState {
             let transport: LinnGatewayData.NowPlaying.TransportState = switch state.transportState {
             case .playing: .play

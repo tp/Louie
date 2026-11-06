@@ -52,7 +52,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 28) {
                 nowPlaying
 
-                if !linn.upcomingSongs.isEmpty {
+                if linn.canControlPlayback && !linn.upcomingSongs.isEmpty {
                     upcoming
                 }
             }
@@ -73,15 +73,15 @@ struct HomeView: View {
                 .font(.largeTitle.bold())
 
             HStack(alignment: .center, spacing: 16) {
-                AlbumArtwork(url: linn.currentSong?.artworkURL)
+                AlbumArtwork(url: displayedSong?.artworkURL)
                     .frame(width: 96, height: 96)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(linn.currentSong?.title ?? statusTitle)
+                    Text(displayedSong?.title ?? statusTitle)
                         .font(.title3.weight(.semibold))
                         .lineLimit(2)
 
-                    if let subtitle = linn.currentSong?.artist ?? statusSubtitle {
+                    if let subtitle = displayedSong?.artist ?? statusSubtitle {
                         Text(subtitle)
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -116,6 +116,7 @@ struct HomeView: View {
         }
         .labelStyle(.iconOnly)
         .buttonStyle(.bordered)
+        .disabled(!linn.canControlPlayback)
     }
 
     private var upcoming: some View {
@@ -149,8 +150,13 @@ struct HomeView: View {
         linn.playState == .playing ? "pause.fill" : "play.fill"
     }
 
+    private var displayedSong: Linn.Song? {
+        linn.canControlPlayback ? linn.currentSong : nil
+    }
+
     private var statusTitle: String {
-        switch linn.connectionState {
+        if linn.connectionState == .connected && linn.isStandby { return "Linn is off" }
+        return switch linn.connectionState {
         case .idle:
             "No song"
         case .connecting:
@@ -167,6 +173,9 @@ struct HomeView: View {
     }
 
     private var statusSubtitle: String? {
+        if linn.connectionState == .connected && linn.isStandby {
+            return "Turn on Linn to control playback"
+        }
         if linn.connectionState == .connected, let message = linn.lastErrorMessage {
             return message
         }

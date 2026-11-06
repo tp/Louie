@@ -38,9 +38,37 @@ func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
     await gateway.send(disconnected)
     try await waitUntil { linn.connectionState == .linnUnavailable(nil) }
     #expect(linn.currentSong?.title == "First")
+    #expect(!linn.canControlPlayback)
+    #expect(!linn.hasNext && !linn.hasPrevious)
 
     await gateway.send(nowPlaying(index: 0, titles: ["Second"], volume: 12))
     try await waitUntil { linn.connectionState == .connected && linn.currentSong?.title == "Second" }
+}
+
+@Test(arguments: [false, true])
+@MainActor
+func standbyDisablesControlsOnFreshClientsAndLiveUpdates(startConnected: Bool) async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    let active = nowPlaying(index: 1, titles: ["First", "Last song", "Next"], volume: 18)
+    if startConnected {
+        await gateway.send(active)
+        try await waitUntil { linn.canControlPlayback }
+    }
+    var standby = active
+    standby.isStandby = true
+    await gateway.send(standby)
+    try await waitUntil { linn.isStandby && linn.connectionState == .connected }
+    #expect(!linn.canControlPlayback)
+    #expect(!linn.hasNext && !linn.hasPrevious)
+    // Keep the last observed metadata, but views must display standby instead.
+    #expect(linn.currentSong?.title == "Last song")
+    var awake = active
+    awake.isStandby = false
+    await gateway.send(awake)
+    try await waitUntil { linn.canControlPlayback }
+    #expect(linn.hasNext && linn.hasPrevious)
 }
 
 @Test

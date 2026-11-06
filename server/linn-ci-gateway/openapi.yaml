@@ -102,6 +102,39 @@ paths:
               session: sessionid
         default:
           $ref: '#/responses/default'
+  /V2/product/status:
+    get:
+      summary: Query product status of room
+      description: |
+        Returns the standby state of the room.
+
+        If the client sets `update` > 0, an update will be sent to the client every update period with the up-to-date product status
+      parameters:
+        - name: body
+          required: true
+          in: body
+          schema:
+            allOf:
+              - $ref: '#/definitions/ParamTag'
+              - $ref: '#/definitions/ParamSession'
+              - $ref: '#/definitions/ParamRoom'
+              - $ref: '#/definitions/ParamUpdate'
+      tags:
+        - API V2
+      responses:
+        '200':
+          description: Product status parameters for a room
+          schema:
+            $ref: '#/definitions/V2ProductStatusResponse'
+          examples:
+            application/json:
+              tag: tag_01
+              room: Main Room
+              data:
+                standby: false
+              session: sessionid
+        default:
+          $ref: '#/responses/default'
   /V2/transport/status:
     get:
       summary: Query transport status of room
@@ -992,6 +1025,28 @@ definitions:
               items:
                 type: string
                 description: Human-readable name of the listening room.
+  V2ProductStatusResponse:
+    type: object
+    description: The product status of a room
+    properties:
+      tag:
+        type: string
+        description: Tag from the original request that generated this response.
+      data:
+        $ref: '#/definitions/V2ProductStatusData'
+      session:
+        type: string
+        description: Session from the original request that generated this response.
+      room:
+        type: string
+        description: The room name for which this response pertains
+  V2ProductStatusData:
+    type: object
+    description: The product status of the room.
+    properties:
+      standby:
+        type: boolean
+        description: Standby status of the the room
   V2VolumeStatusResponse:
     type: object
     description: The volume status of a room

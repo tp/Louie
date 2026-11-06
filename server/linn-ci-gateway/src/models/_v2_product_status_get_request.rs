@@ -12,7 +12,7 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct V2TransportStatusGetRequest {
+pub struct V2ProductStatusGetRequest {
     /// Opaque string, returned in the response. Varies per message.
     #[serde(rename = "tag", skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
@@ -27,9 +27,9 @@ pub struct V2TransportStatusGetRequest {
     pub update: Option<i32>,
 }
 
-impl V2TransportStatusGetRequest {
-    pub fn new(session: String, room: String) -> V2TransportStatusGetRequest {
-        V2TransportStatusGetRequest {
+impl V2ProductStatusGetRequest {
+    pub fn new(session: String, room: String) -> V2ProductStatusGetRequest {
+        V2ProductStatusGetRequest {
             tag: None,
             session,
             room,

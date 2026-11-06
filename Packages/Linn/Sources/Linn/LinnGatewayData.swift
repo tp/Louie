@@ -12,6 +12,7 @@ public enum LinnGatewayData {
 
         public var connectionStatus = ConnectionStatus.connected
         public var connectionError: String?
+        public var isStandby: Bool?
         public struct Pending: Sendable, Equatable {
             public var playback = false
             public var transport = false

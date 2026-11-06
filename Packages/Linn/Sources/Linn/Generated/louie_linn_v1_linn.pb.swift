@@ -532,6 +532,16 @@ nonisolated struct Louie_Linn_V1_NowPlayingState: @unchecked Sendable {
   /// Clears the value of `roomVolume`. Subsequent reads from it will return its default value.
   mutating func clearRoomVolume() {_uniqueStorage()._roomVolume = nil}
 
+  /// A reachable gateway can still have its speaker in standby. Absent on older servers.
+  var isStandby: Bool {
+    get {_storage._isStandby ?? false}
+    set {_uniqueStorage()._isStandby = newValue}
+  }
+  /// Returns true if `isStandby` has been explicitly set.
+  var hasIsStandby: Bool {_storage._isStandby != nil}
+  /// Clears the value of `isStandby`. Subsequent reads from it will return its default value.
+  mutating func clearIsStandby() {_uniqueStorage()._isStandby = nil}
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1369,7 +1379,7 @@ nonisolated extension Louie_Linn_V1_PendingState: SwiftProtobuf.Message, SwiftPr
 
 nonisolated extension Louie_Linn_V1_NowPlayingState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".NowPlayingState"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}transport_state\0\u{3}current_item\0\u{1}playlist\0\u{1}timeline\0\u{3}room_volume\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}transport_state\0\u{3}current_item\0\u{1}playlist\0\u{1}timeline\0\u{3}room_volume\0\u{3}is_standby\0")
 
   fileprivate class _StorageClass {
     var _transportState: Louie_Linn_V1_TransportState? = nil
@@ -1377,6 +1387,7 @@ nonisolated extension Louie_Linn_V1_NowPlayingState: SwiftProtobuf.Message, Swif
     var _playlist: Louie_Linn_V1_Playlist? = nil
     var _timeline: Louie_Linn_V1_Timeline? = nil
     var _roomVolume: Louie_Linn_V1_RoomVolume? = nil
+    var _isStandby: Bool? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1392,6 +1403,7 @@ nonisolated extension Louie_Linn_V1_NowPlayingState: SwiftProtobuf.Message, Swif
       _playlist = source._playlist
       _timeline = source._timeline
       _roomVolume = source._roomVolume
+      _isStandby = source._isStandby
     }
   }
 
@@ -1415,6 +1427,7 @@ nonisolated extension Louie_Linn_V1_NowPlayingState: SwiftProtobuf.Message, Swif
         case 3: try { try decoder.decodeSingularMessageField(value: &_storage._playlist) }()
         case 4: try { try decoder.decodeSingularMessageField(value: &_storage._timeline) }()
         case 5: try { try decoder.decodeSingularMessageField(value: &_storage._roomVolume) }()
+        case 6: try { try decoder.decodeSingularBoolField(value: &_storage._isStandby) }()
         default: break
         }
       }
@@ -1442,6 +1455,9 @@ nonisolated extension Louie_Linn_V1_NowPlayingState: SwiftProtobuf.Message, Swif
       try { if let v = _storage._roomVolume {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
       } }()
+      try { if let v = _storage._isStandby {
+        try visitor.visitSingularBoolField(value: v, fieldNumber: 6)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1456,6 +1472,7 @@ nonisolated extension Louie_Linn_V1_NowPlayingState: SwiftProtobuf.Message, Swif
         if _storage._playlist != rhs_storage._playlist {return false}
         if _storage._timeline != rhs_storage._timeline {return false}
         if _storage._roomVolume != rhs_storage._roomVolume {return false}
+        if _storage._isStandby != rhs_storage._isStandby {return false}
         return true
       }
       if !storagesAreEqual {return false}

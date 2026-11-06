@@ -262,7 +262,7 @@ async fn run_connection(
     socket
         .send(Message::Text(
             json!({
-                "requestPath": "/V2/topology/status", "tag": "topology-status", "session": session
+                "requestPath": "/V2/topology/status", "tag": "topology-status", "session": session, "update": 1
             })
             .to_string()
             .into(),
@@ -286,6 +286,26 @@ async fn run_connection(
         })
         .ok_or_else(|| format!("configured Linn room '{requested_room}' was not found"))?;
 
+    // Know the speaker's power state before publishing the first connected snapshot.
+    // WebSocket liveness only establishes that the gateway is reachable.
+    socket
+        .send(Message::Text(
+            json!({
+                "requestPath": "/V2/product/status", "tag": "subscription-product",
+                "session": session, "room": room, "update": 1
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    let product = await_path(&mut socket, "/V2/product/status").await?;
+    let standby = websocket::decode::<models::V2ProductStatusResponse>(&product)
+        .map_err(|e| format!("invalid Linn product status: {e}"))?
+        .data
+        .and_then(|data| data.standby)
+        .ok_or("Linn product status is missing standby")?;
+
     for (tag, path, mut body) in subscriptions(&session, &room) {
         body["tag"] = json!(tag);
         body["requestPath"] = json!(path);
@@ -295,7 +315,7 @@ async fn run_connection(
             .map_err(|e| e.to_string())?;
     }
     info!("Connected to Linn room {room}");
-    publish_connected(state, observed, &room, maximum_volume);
+    publish_connected(state, observed, &room, maximum_volume, standby);
     let mut optimism = Optimism::default();
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut in_flight: HashSet<CoalesceKey> = HashSet::new();
@@ -374,7 +394,22 @@ async fn run_connection(
                     continue;
                 }
                 let published_anchor = PublishedAnchor::from_snapshot(&state.borrow());
+                if header.request_path.as_deref() == Some("/V2/topology/status") {
+                    let topology = websocket::decode::<models::V2TopologyStatusResponse>(&envelope)
+                        .map_err(|e| format!("invalid Linn topology: {e}"))?;
+                    if !topology.data.and_then(|data| data.rooms).unwrap_or_default()
+                        .iter().any(|entry| entry.name.as_deref() == Some(&room)) {
+                        return Err(format!("Linn room '{room}' is no longer available"));
+                    }
+                }
                 let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope, published_anchor, optimism.timeline_is_pending()));
+                if header.request_path.as_deref() == Some("/V2/product/status")
+                    && observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true) {
+                    optimism = Optimism::default();
+                    for (_, queued) in deferred.drain() {
+                        let _ = queued.request.reply.send(Err(standby_error()));
+                    }
+                }
                 let settled = optimism.reconcile(observed);
                 if changed || settled {
                     state.send_replace(optimism.snapshot(observed));
@@ -387,6 +422,11 @@ async fn run_connection(
                 socket.send(Message::Ping(Vec::new().into())).await.map_err(|e| e.to_string())?;
             }
             Some(mut request) = rx.recv() => {
+                if observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true)
+                    && requires_active_room(request.path) {
+                    let _ = request.reply.send(Err(standby_error()));
+                    continue;
+                }
                 if request.path == "/louie/skip" {
                     let step = request.body["step"].as_i64().unwrap_or(0) as i32;
                     if shuffle {
@@ -542,6 +582,7 @@ fn publish_connected(
     observed: &mut StateSnapshot,
     room: &str,
     maximum_volume: i32,
+    standby: bool,
 ) {
     if observed.room != room || observed.now_playing.is_none() {
         observed.now_playing = Some(NowPlayingState::default());
@@ -549,6 +590,7 @@ fn publish_connected(
     observed.room = room.to_owned();
     observed.connection_status = ConnectionStatus::Connected as i32;
     observed.connection_error = None;
+    observed.now_playing.as_mut().unwrap().is_standby = Some(standby);
     observed
         .now_playing
         .as_mut()
@@ -559,6 +601,25 @@ fn publish_connected(
     observed.pending = Some(PendingState::default());
     observed.published_at = Some(now());
     state.send_replace(observed.clone());
+}
+
+fn requires_active_room(path: &str) -> bool {
+    matches!(
+        path,
+        "/louie/skip"
+            | "/V2/transport/play"
+            | "/V2/transport/pause"
+            | "/V2/transport/skip_track"
+            | "/V2/playlist/select"
+            | "/V2/media/select"
+            | "/V2/seek/set_position"
+            | "/V2/volume/set_vol"
+            | "/V2/volume/set_mute"
+    )
+}
+
+fn standby_error() -> tonic::Status {
+    crate::error::failed_precondition("linn-standby", "Linn is in standby")
 }
 
 fn coalesce_key(request: &GatewayRequest) -> Option<CoalesceKey> {
@@ -718,6 +779,21 @@ fn apply_update(
     let before_timeline = now_playing.timeline;
     let previous = (path != "/V2/seek/status").then(|| now_playing.clone());
     let changed = match path {
+        "/V2/product/status" => {
+            let response = match websocket::decode::<models::V2ProductStatusResponse>(value) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn_decode(path, &error);
+                    return false;
+                }
+            };
+            if let Some(standby) = response.data.and_then(|data| data.standby) {
+                now_playing.is_standby = Some(standby);
+                true
+            } else {
+                false
+            }
+        }
         "/V2/transport/status" => {
             let response = match websocket::decode::<models::V2TransportStatusResponse>(value) {
                 Ok(response) => response,
@@ -1049,7 +1125,7 @@ mod tests {
         });
 
         let mut observed = state.borrow().clone();
-        publish_connected(&state, &mut observed, "Linn", 70);
+        publish_connected(&state, &mut observed, "Linn", 70, false);
         assert_eq!(
             state
                 .borrow()
@@ -1062,7 +1138,7 @@ mod tests {
                 .id,
             "song-1"
         );
-        publish_connected(&state, &mut observed, "Other Room", 70);
+        publish_connected(&state, &mut observed, "Other Room", 70, false);
         assert!(
             state
                 .borrow()
@@ -1088,6 +1164,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standby_is_known_on_connect_and_updates_without_losing_the_gateway() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (update_tx, mut updates) = mpsc::channel::<Value>(4);
+        let (command_tx, mut commands) = mpsc::channel(4);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            loop {
+                let reply = tokio::select! {
+                    message = socket.next() => {
+                        let Some(Ok(Message::Text(text))) = message else { break };
+                        let request: Value = serde_json::from_str(&text).unwrap();
+                        match str_at(&request, "requestPath").unwrap() {
+                            "/session/create" => json!({"requestPath":"/session/create", "session":"test"}),
+                            "/V2/topology/status" => {
+                                assert_eq!(request["update"], 1);
+                                json!({"requestPath":"/V2/topology/status", "data":{"rooms":[{"name":"Linn"}]}})
+                            }
+                            "/V2/product/status" => {
+                                assert_eq!(request["update"], 1);
+                                json!({"requestPath":"/V2/product/status", "data":{"standby":true}})
+                            }
+                            "/V2/transport/play" => {
+                                command_tx.send(request.clone()).await.unwrap();
+                                json!({"tag":request["tag"]})
+                            }
+                            _ => continue,
+                        }
+                    }
+                    Some(update) = updates.recv() => update,
+                };
+                socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let gateway = Gateway::start(format!("ws://{address}"), "Linn".into(), 70);
+        let mut state = gateway.subscribe();
+        wait_for(&mut state, |s| {
+            s.connection_status == ConnectionStatus::Connected as i32
+        })
+        .await;
+        assert_eq!(
+            state.borrow().now_playing.as_ref().unwrap().is_standby,
+            Some(true)
+        );
+        // A newly attached client immediately sees standby, not merely a live socket.
+        assert_eq!(
+            gateway
+                .subscribe()
+                .borrow()
+                .now_playing
+                .as_ref()
+                .unwrap()
+                .is_standby,
+            Some(true)
+        );
+        for path in [
+            "/V2/transport/play",
+            "/louie/skip",
+            "/V2/playlist/select",
+            "/V2/volume/set_vol",
+        ] {
+            let error = gateway
+                .request(
+                    path,
+                    json!({"room":"Linn", "index":1, "step":1, "volume":20}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                error.metadata().get("louie-error-reason").unwrap(),
+                "linn-standby"
+            );
+        }
+        assert!(commands.try_recv().is_err());
+        update_tx
+            .send(json!({"requestPath":"/V2/product/status", "data":{"standby":false}}))
+            .await
+            .unwrap();
+        wait_for(&mut state, |s| {
+            s.now_playing.as_ref().unwrap().is_standby == Some(false)
+        })
+        .await;
+        gateway
+            .request("/V2/transport/play", json!({"room":"Linn"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.recv().await.unwrap()["requestPath"],
+            "/V2/transport/play"
+        );
+        update_tx
+            .send(json!({"requestPath":"/V2/product/status", "data":{"standby":true}}))
+            .await
+            .unwrap();
+        wait_for(&mut state, |s| {
+            s.now_playing.as_ref().unwrap().is_standby == Some(true)
+        })
+        .await;
+        assert_eq!(
+            state.borrow().connection_status,
+            ConnectionStatus::Connected as i32
+        );
+        assert!(!state.borrow().pending.as_ref().unwrap().playback);
+        update_tx
+            .send(json!({"requestPath":"/V2/topology/status", "data":{"rooms":[]}}))
+            .await
+            .unwrap();
+        wait_for(&mut state, |s| {
+            s.connection_status == ConnectionStatus::Disconnected as i32
+        })
+        .await;
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn sends_only_latest_queued_volume_after_first_ack() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1102,6 +1298,9 @@ mod tests {
                 let path = str_at(&request, "requestPath").unwrap();
                 let reply = match path {
                     "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
+                    "/V2/product/status" => {
+                        Some(json!({"requestPath": path, "data": {"standby": false}}))
+                    }
                     "/V2/topology/status" => Some(json!({
                         "requestPath": path, "data": {"rooms": [{"name": "Linn"}]}
                     })),
@@ -1201,6 +1400,9 @@ mod tests {
                 let path = str_at(&request, "requestPath").unwrap();
                 let reply = match path {
                     "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
+                    "/V2/product/status" => {
+                        Some(json!({"requestPath": path, "data": {"standby": false}}))
+                    }
                     "/V2/topology/status" => {
                         Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
                     }
@@ -1294,6 +1496,9 @@ mod tests {
                 let path = str_at(&request, "requestPath").unwrap();
                 let reply = match path {
                     "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
+                    "/V2/product/status" => {
+                        Some(json!({"requestPath": path, "data": {"standby": false}}))
+                    }
                     "/V2/topology/status" => {
                         Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
                     }
@@ -1407,6 +1612,9 @@ mod tests {
                 let path = str_at(&request, "requestPath").unwrap();
                 let reply = match path {
                     "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
+                    "/V2/product/status" => {
+                        Some(json!({"requestPath": path, "data": {"standby": false}}))
+                    }
                     "/V2/topology/status" => {
                         Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
                     }

@@ -30,6 +30,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_inner();
     let connection = ConnectionStatus::try_from(snapshot.connection_status)?;
     println!("room={} connection={connection:?}", snapshot.room);
+    println!(
+        "standby={:?}",
+        snapshot
+            .now_playing
+            .as_ref()
+            .and_then(|state| state.is_standby)
+    );
     if snapshot.room.trim().is_empty() {
         return Err("Linn room is empty".into());
     }
