@@ -22,6 +22,7 @@ yq -i '.paths = (.paths | pick([
     "/session/create",
     "/V2/topology/status",
     "/V2/product/status",
+    "/V2/product/set_standby",
     "/V2/transport/status",
     "/V2/transport/play",
     "/V2/transport/pause",

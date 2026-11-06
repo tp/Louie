@@ -47,6 +47,19 @@ internal enum Louie_Linn_V1_Linn: Sendable {
                 type: .serverStreaming
             )
         }
+        /// Namespace for "Wake" metadata.
+        internal enum Wake: Sendable {
+            /// Request type for "Wake".
+            internal typealias Input = SwiftProtobuf.Google_Protobuf_Empty
+            /// Response type for "Wake".
+            internal typealias Output = SwiftProtobuf.Google_Protobuf_Empty
+            /// Descriptor for "Wake".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "louie.linn.v1.Linn"),
+                method: "Wake",
+                type: .unary
+            )
+        }
         /// Namespace for "Play" metadata.
         internal enum Play: Sendable {
             /// Request type for "Play".
@@ -246,6 +259,7 @@ internal enum Louie_Linn_V1_Linn: Sendable {
         internal static let descriptors: [GRPCCore.MethodDescriptor] = [
             GetState.descriptor,
             WatchState.descriptor,
+            Wake.descriptor,
             Play.descriptor,
             Pause.descriptor,
             Previous.descriptor,
@@ -327,6 +341,30 @@ extension Louie_Linn_V1_Linn {
             deserializer: some GRPCCore.MessageDeserializer<Louie_Linn_V1_StateSnapshot>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Louie_Linn_V1_StateSnapshot>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "Wake" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Wake without starting playback. Completes only when product status reports
+        /// > standby=false (up to 30 seconds). Does not wake unreachable rooms.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `SwiftProtobuf.Google_Protobuf_Empty` message.
+        ///   - serializer: A serializer for `SwiftProtobuf.Google_Protobuf_Empty` messages.
+        ///   - deserializer: A deserializer for `SwiftProtobuf.Google_Protobuf_Empty` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response and returns its result to
+        ///       the caller. Returning from the closure will cancel the RPC if it hasn't
+        ///       already finished.
+        /// - Returns: The result of `handleResponse`.
+        func wake<Result>(
+            request: GRPCCore.ClientRequest<SwiftProtobuf.Google_Protobuf_Empty>,
+            serializer: some GRPCCore.MessageSerializer<SwiftProtobuf.Google_Protobuf_Empty>,
+            deserializer: some GRPCCore.MessageDeserializer<SwiftProtobuf.Google_Protobuf_Empty>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<SwiftProtobuf.Google_Protobuf_Empty>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "Play" method.
@@ -697,6 +735,41 @@ extension Louie_Linn_V1_Linn {
             try await self.client.serverStreaming(
                 request: request,
                 descriptor: Louie_Linn_V1_Linn.Method.WatchState.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "Wake" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Wake without starting playback. Completes only when product status reports
+        /// > standby=false (up to 30 seconds). Does not wake unreachable rooms.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `SwiftProtobuf.Google_Protobuf_Empty` message.
+        ///   - serializer: A serializer for `SwiftProtobuf.Google_Protobuf_Empty` messages.
+        ///   - deserializer: A deserializer for `SwiftProtobuf.Google_Protobuf_Empty` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response and returns its result to
+        ///       the caller. Returning from the closure will cancel the RPC if it hasn't
+        ///       already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func wake<Result>(
+            request: GRPCCore.ClientRequest<SwiftProtobuf.Google_Protobuf_Empty>,
+            serializer: some GRPCCore.MessageSerializer<SwiftProtobuf.Google_Protobuf_Empty>,
+            deserializer: some GRPCCore.MessageDeserializer<SwiftProtobuf.Google_Protobuf_Empty>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<SwiftProtobuf.Google_Protobuf_Empty>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Louie_Linn_V1_Linn.Method.Wake.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -1216,6 +1289,36 @@ extension Louie_Linn_V1_Linn.ClientProtocol {
         )
     }
 
+    /// Call the "Wake" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Wake without starting playback. Completes only when product status reports
+    /// > standby=false (up to 30 seconds). Does not wake unreachable rooms.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `SwiftProtobuf.Google_Protobuf_Empty` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response and returns its result to
+    ///       the caller. Returning from the closure will cancel the RPC if it hasn't
+    ///       already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func wake<Result>(
+        request: GRPCCore.ClientRequest<SwiftProtobuf.Google_Protobuf_Empty>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<SwiftProtobuf.Google_Protobuf_Empty>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.wake(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<SwiftProtobuf.Google_Protobuf_Empty>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<SwiftProtobuf.Google_Protobuf_Empty>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "Play" method.
     ///
     /// - Parameters:
@@ -1654,6 +1757,40 @@ extension Louie_Linn_V1_Linn.ClientProtocol {
             metadata: metadata
         )
         return try await self.watchState(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "Wake" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Wake without starting playback. Completes only when product status reports
+    /// > standby=false (up to 30 seconds). Does not wake unreachable rooms.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response and returns its result to
+    ///       the caller. Returning from the closure will cancel the RPC if it hasn't
+    ///       already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func wake<Result>(
+        _ message: SwiftProtobuf.Google_Protobuf_Empty,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<SwiftProtobuf.Google_Protobuf_Empty>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<SwiftProtobuf.Google_Protobuf_Empty>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.wake(
             request: request,
             options: options,
             onResponse: handleResponse

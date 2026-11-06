@@ -15,27 +15,34 @@ struct LibrarySearchView: View {
     @State private var state = LibrarySearchState()
 
     var body: some View {
-        LibrarySearchContent(
-            state: state,
-            searchType: $state.type,
-            canPlay: linn.canControlPlayback,
-            enqueue: { item in
-                linn.play(item, placement: .last)
-            },
-            play: { item in
-                linn.play(item, placement: .replace)
-            },
-        )
+        Group {
+            if !linn.canBrowseLibrary {
+                LibraryConnectionUnavailableView(linn: linn)
+            } else {
+                LibrarySearchContent(
+                    state: state,
+                    searchType: $state.type,
+                    canPlay: linn.canControlPlayback,
+                    enqueue: { item in
+                        linn.play(item, placement: .last)
+                    },
+                    play: { item in
+                        linn.play(item, placement: .replace)
+                    },
+                )
+            }
+        }
         .task(id: searchTaskID) {
             await search()
         }
     }
 
     private var searchTaskID: String {
-        "\(state.type.rawValue):\(query)"
+        "\(state.type.rawValue):\(query):\(linn.canBrowseLibrary)"
     }
 
     private func search() async {
+        guard linn.canBrowseLibrary else { return }
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else {
             state.reset()
@@ -202,6 +209,7 @@ struct LibrarySearchResultRow: View {
 
 #if DEBUG
     private struct LibrarySearchContentPreview: View {
+        @State private var linn = Linn(gateway: DemoLinnGateway())
         @State private var state = LibrarySearchState(
             type: .albums,
             results: results,
@@ -225,10 +233,12 @@ struct LibrarySearchResultRow: View {
                 case let .library(libraryRoute):
                     switch libraryRoute {
                     case let .item(itemRoute):
-                        LibraryItemDetailView(linn: Linn(gateway: DemoLinnGateway()), route: itemRoute)
+                        LibraryItemDetailView(linn: linn, route: itemRoute)
                     }
                 }
             }
+            .task { linn.start() }
+            .onDisappear { linn.stop() }
         }
 
         private static let results: [Linn.LibraryItem] = [

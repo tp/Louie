@@ -151,6 +151,8 @@
             }
         }
 
+        public func wake(room _: String) async throws {}
+
         public func play(room _: String) async throws {
             transportState = .buffering
             yieldSnapshot()

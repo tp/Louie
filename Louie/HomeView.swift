@@ -88,7 +88,11 @@ struct HomeView: View {
                             .lineLimit(2)
                     }
 
-                    playbackControls
+                    if linn.connectionState == .connected && linn.isStandby {
+                        LinnPowerButton(linn: linn)
+                    } else {
+                        playbackControls
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -155,6 +159,7 @@ struct HomeView: View {
     }
 
     private var statusTitle: String {
+        if linn.isWaking { return "Turning on Linn…" }
         if linn.connectionState == .connected && linn.isStandby { return "Linn is off" }
         return switch linn.connectionState {
         case .idle:
@@ -174,7 +179,7 @@ struct HomeView: View {
 
     private var statusSubtitle: String? {
         if linn.connectionState == .connected && linn.isStandby {
-            return "Turn on Linn to control playback"
+            return linn.lastErrorMessage ?? (linn.isWaking ? "Waiting for Linn to become ready" : "Turn on Linn to control playback")
         }
         if linn.connectionState == .connected, let message = linn.lastErrorMessage {
             return message
