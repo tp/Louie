@@ -142,6 +142,12 @@ actor PiLinnGateway: LinnGateway {
         _ = try await remapCancellation { try await service().play(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }
 
+    func seek(to position: Int, room: String) async throws {
+        var request = Louie_Linn_V1_SeekRequest()
+        request.positionSeconds = Int32(clamping: position)
+        _ = try await remapCancellation { try await service().seek(request, options: Self.commandOptions) }
+    }
+
     func pause(room: String) async throws {
         _ = try await remapCancellation { try await service().pause(Google_Protobuf_Empty(), options: Self.commandOptions) }
     }
@@ -371,10 +377,20 @@ enum PiLinnMapping {
             } else {
                 nil
             }
+            let seekableRange: ClosedRange<Int>?
+            if timeline.hasIsSeekable, timeline.isSeekable,
+               timeline.hasSeekLowerBoundSeconds, timeline.hasSeekUpperBoundSeconds,
+               timeline.seekLowerBoundSeconds >= 0,
+               timeline.seekUpperBoundSeconds > timeline.seekLowerBoundSeconds {
+                seekableRange = Int(timeline.seekLowerBoundSeconds)...Int(timeline.seekUpperBoundSeconds)
+            } else {
+                seekableRange = nil
+            }
             result.timeline = .init(
                 position: position,
                 duration: duration,
-                progress: progress
+                progress: progress,
+                seekableRange: seekableRange
             )
         }
         let volume = state.roomVolume
