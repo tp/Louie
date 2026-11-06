@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
@@ -9,13 +9,14 @@ use linn_ci_gateway::{models, websocket};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use crate::optimism::Optimism;
+use crate::optimism::Command;
 use crate::pb::{
     ConnectionStatus, CurrentItem, NowPlayingState, PendingState, Playlist, PlaylistItem,
     StateSnapshot, Track, TransportState,
 };
+use crate::scheduler::Scheduler;
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -53,22 +54,12 @@ struct GatewayRequest {
 struct Pending {
     reply: oneshot::Sender<Result<Value, tonic::Status>>,
     deadline: tokio::time::Instant,
-    coalesce_key: Option<CoalesceKey>,
     search: bool,
-    target_index: Option<i32>,
-    queue_epoch: u64,
-}
-
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct CoalesceKey {
-    path: &'static str,
-    group: bool,
 }
 
 struct TaggedRequest {
     tag: String,
     request: GatewayRequest,
-    queue_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -158,14 +149,14 @@ impl Gateway {
         }
         let (reply, result) = oneshot::channel();
         let (started, ready) = oneshot::channel();
-        let is_search = path == "/V2/services/search";
+        let queued = path == "/V2/services/search" || requires_active_room(path);
         self.requests
             .send(GatewayRequest {
                 path,
                 body,
                 preview,
                 first_track,
-                started: is_search.then_some(started),
+                started: queued.then_some(started),
                 reply,
             })
             .await
@@ -175,9 +166,9 @@ impl Gateway {
                     "Linn gateway worker stopped",
                 )
             })?;
-        if is_search {
-            // The command deadline starts when the serial search lane sends it,
-            // not while an older search is still occupying that lane.
+        if queued {
+            // Playback may wait for an earlier command to settle. The scheduler
+            // bounds waiting at 15 seconds; the ack budget starts at dispatch.
             let _ = ready.await;
         }
         match tokio::time::timeout(Duration::from_secs(5), result).await {
@@ -338,32 +329,27 @@ async fn run_connection(
     }
     info!("Connected to Linn room {room}");
     publish_connected(state, observed, &room, maximum_volume, standby);
-    let mut optimism = Optimism::default();
+    let mut scheduler = Scheduler::default();
     let mut pending: HashMap<String, Pending> = HashMap::new();
-    let mut in_flight: HashSet<CoalesceKey> = HashSet::new();
-    let mut deferred: HashMap<CoalesceKey, TaggedRequest> = HashMap::new();
     let mut search_in_flight = false;
     let mut search_queue: VecDeque<TaggedRequest> = VecDeque::new();
+    let mut refresh: Option<(HashMap<String, &'static str>, tokio::time::Instant)> = None;
     let mut shuffle = false;
     let mut next_tag = 0_u64;
-    let mut queue_epoch = 0_u64;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut ping = tokio::time::interval(Duration::from_secs(15));
     ping.tick().await;
     let mut last_frame = tokio::time::Instant::now();
     loop {
+        let mut publish_update = false;
         tokio::select! {
             message = socket.next() => {
-                let message = message.ok_or("gateway websocket closed")?
-                    .map_err(|e| e.to_string())?;
+                let message = message.ok_or("gateway websocket closed")?.map_err(|e| e.to_string())?;
                 last_frame = tokio::time::Instant::now();
                 let text = match message {
                     Message::Text(text) => text.to_string(),
                     Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?,
-                    Message::Ping(payload) => {
-                        socket.send(Message::Pong(payload)).await.map_err(|e| e.to_string())?;
-                        continue;
-                    }
+                    Message::Ping(payload) => { socket.send(Message::Pong(payload)).await.map_err(|e| e.to_string())?; continue; }
                     Message::Close(_) => return Err("gateway websocket closed".into()),
                     _ => continue,
                 };
@@ -375,228 +361,194 @@ async fn run_connection(
                     Ok(header) => header,
                     Err(error) => { warn!("Invalid Linn WebSocket envelope: {error}"); continue; }
                 };
-                if header.request_path.as_deref() == Some("/V2/transport/status")
-                    && let Ok(response) = websocket::decode::<models::V2TransportStatusResponse>(&envelope)
-                    && let Some(value) = response.data.and_then(|data| data.shuffle) {
-                    shuffle = value;
-                }
-                if let Some(tag) = header.tag.as_deref()
-                    && let Some(waiter) = pending.remove(tag) {
-                    debug!(tag, reply = %text, "Linn tagged reply");
+                if let Some(tag) = header.tag.as_deref() && let Some(waiter) = pending.remove(tag) {
                     let result = if let Some(code) = header.error_code {
+                        scheduler.reject(tag);
                         Err(crate::error::failed_precondition("linn-rejected", format!("Linn error {code}: {}", header.message.as_deref().unwrap_or("request failed"))))
-                    } else { Ok(envelope.clone()) };
-                    if result.is_ok() {
-                        optimism.acknowledged(tag);
-                    }
-                    if result.is_err() {
-                        let changed = optimism.fail(tag);
-                        if waiter.coalesce_key.is_some_and(|key| key.path == "/V2/playlist/select")
-                            && deferred.contains_key(&CoalesceKey { path: "/V2/playlist/select", group: false }) {
-                            optimism.promote_surviving_select(observed.now_playing.as_ref().and_then(|p| p.playlist.as_ref()).and_then(|p| p.current_index));
-                        }
-                        if changed {
-                            state.send_replace(optimism.snapshot(observed));
-                        }
-                    }
+                    } else {
+                        scheduler.acknowledge(tag, tokio::time::Instant::now());
+                        Ok(envelope.clone())
+                    };
                     let _ = waiter.reply.send(result);
-                    if let Some(key) = waiter.coalesce_key {
-                        in_flight.remove(&key);
-                        if let Some(next) = deferred.remove(&key) {
-                            let tag = next.tag.clone();
-                            if !send_request(&mut socket, next, &session, &mut pending, &mut in_flight, Some(key), false).await?
-                                && optimism.fail(&tag) {
-                                state.send_replace(optimism.snapshot(observed));
-                            }
+                    if waiter.search { search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending).await?; }
+                } else {
+                    // Tagged read-back replies may omit requestPath, like command acks.
+                    let path = header.request_path.as_deref().or_else(|| header.tag.as_ref().and_then(|tag| refresh.as_ref()?.0.get(tag).copied()));
+                    if path == Some("/V2/topology/status") {
+                        let topology = websocket::decode::<models::V2TopologyStatusResponse>(&envelope).map_err(|e| format!("invalid Linn topology: {e}"))?;
+                        if !topology.data.and_then(|data| data.rooms).unwrap_or_default().iter().any(|entry| entry.name.as_deref() == Some(&room)) { return Err(format!("Linn room '{room}' is no longer available")); }
+                    }
+                    if path == Some("/V2/transport/status") && let Ok(response) = websocket::decode::<models::V2TransportStatusResponse>(&envelope) && let Some(value) = response.data.and_then(|data| data.shuffle) { shuffle = value; }
+                    if let Some(path) = path {
+                        let published = PublishedAnchor::from_snapshot(&state.borrow());
+                        let predicted = scheduler.snapshot(observed).pending.is_some_and(|p| p.timeline);
+                        publish_update = apply_update(observed, path, &envelope, published, predicted);
+                        // Evidence comes from this frame, never merely a cached value.
+                        let evidence = evidence_paths(path, &envelope);
+                        for source in evidence.iter().flatten() { scheduler.observe(source, observed); }
+                        if path == "/V2/product/status" && observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true) {
+                            scheduler.clear();
+                            refresh = None;
+                        }
+                        if evidence.is_some() && header.error_code.is_none() && let Some(tag) = header.tag.as_ref() && let Some((remaining, _)) = &mut refresh {
+                            remaining.remove(tag);
+                            if remaining.is_empty() { refresh = None; scheduler.refreshed(); }
                         }
                     }
-                    if waiter.search {
-                        search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending, &mut in_flight).await?;
-                    }
-                    continue;
-                }
-                let published_anchor = PublishedAnchor::from_snapshot(&state.borrow());
-                if header.request_path.as_deref() == Some("/V2/topology/status") {
-                    let topology = websocket::decode::<models::V2TopologyStatusResponse>(&envelope)
-                        .map_err(|e| format!("invalid Linn topology: {e}"))?;
-                    if !topology.data.and_then(|data| data.rooms).unwrap_or_default()
-                        .iter().any(|entry| entry.name.as_deref() == Some(&room)) {
-                        return Err(format!("Linn room '{room}' is no longer available"));
-                    }
-                }
-                let changed = header.request_path.as_deref().is_some_and(|path| apply_update(observed, path, &envelope, published_anchor, optimism.timeline_is_pending()));
-                if header.request_path.as_deref() == Some("/V2/product/status")
-                    && observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true) {
-                    optimism = Optimism::default();
-                    for (_, queued) in deferred.drain() {
-                        let _ = queued.request.reply.send(Err(standby_error()));
-                    }
-                }
-                let settled = optimism.reconcile(observed);
-                if changed || settled {
-                    state.send_replace(optimism.snapshot(observed));
                 }
             }
             _ = ping.tick() => {
-                if last_frame.elapsed() > Duration::from_secs(30) {
-                    return Err("Linn gateway stopped responding to WebSocket pings".into());
-                }
+                if last_frame.elapsed() > Duration::from_secs(30) { return Err("Linn gateway stopped responding to WebSocket pings".into()); }
                 socket.send(Message::Ping(Vec::new().into())).await.map_err(|e| e.to_string())?;
             }
             Some(mut request) = rx.recv() => {
-                if observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true)
-                    && requires_active_room(request.path) {
+                if observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true) && requires_active_room(request.path) {
                     let _ = request.reply.send(Err(standby_error()));
                     continue;
                 }
                 if request.path == "/louie/skip" {
                     let step = request.body["step"].as_i64().unwrap_or(0) as i32;
-                    if shuffle {
-                        request.path = "/V2/transport/skip_track";
-                        request.body = json!({"room": observed.room, "skip_track": step, "shuffle": true});
-                    } else if optimism.replace_has_unknown_size() {
-                        request.path = "/V2/transport/skip_track";
-                        request.body = json!({"room": observed.room, "skip_track": step});
-                    } else {
-                    let effective = optimism.snapshot(observed);
-                    let playlist = effective.now_playing.and_then(|state| state.playlist);
-                    if let Some(playlist) = playlist
-                        && let Some(current) = playlist.current_index {
+                    let effective = scheduler.snapshot(observed);
+                    let playlist = effective.now_playing.as_ref().and_then(|p| p.playlist.as_ref());
+                    if !shuffle && let Some(current) = playlist.and_then(|p| p.current_index) {
                         let target = current.saturating_add(step);
-                        if target < 0 || playlist.total.is_some_and(|total| target >= total) {
-                            let _ = request.reply.send(Ok(Value::Null));
-                            continue;
-                        }
+                        if target < 0 || playlist.and_then(|p| p.total).is_some_and(|n| target >= n) { let _ = request.reply.send(Ok(Value::Null)); continue; }
                         request.path = "/V2/playlist/select";
-                        request.body = json!({"room": observed.room, "index": target});
+                        request.body = json!({"room": room, "index": target});
                     } else {
                         request.path = "/V2/transport/skip_track";
-                        request.body = json!({"room": observed.room, "skip_track": step});
-                    }
-                    }
-                }
-                let mut superseded_row_titles = Vec::new();
-                if request.path == "/V2/media/select"
-                    && matches!(request.body.get("queue").and_then(Value::as_str), Some("now" | "replace")) {
-                    queue_epoch += 1;
-                    let row_title = |index: i32| observed.now_playing.as_ref()
-                        .and_then(|p| p.playlist.as_ref())
-                        .and_then(|p| p.items.iter().find(|item| item.index == index))
-                        .and_then(|item| item.display_name.clone());
-                    superseded_row_titles.extend(pending.values().filter_map(|waiter| waiter.target_index).filter_map(row_title));
-                    let select_key = CoalesceKey { path: "/V2/playlist/select", group: false };
-                    if let Some(old) = deferred.remove(&select_key) {
-                        if let Some(title) = old.request.body.get("index").and_then(Value::as_i64)
-                            .and_then(|index| i32::try_from(index).ok()).and_then(row_title) {
-                            superseded_row_titles.push(title);
-                        }
-                        if optimism.fail(&old.tag) {
-                            state.send_replace(optimism.snapshot(observed));
-                        }
-                        let _ = old.request.reply.send(Ok(Value::Null));
+                        request.body = json!({"room": room, "skip_track": step, "shuffle": shuffle});
                     }
                 }
                 next_tag += 1;
                 let tag = format!("pi-{next_tag}");
-                let key = coalesce_key(&request);
-                if request.path == "/V2/playlist/select"
-                    && let Some(key) = key
-                    && let Some(index) = request.body.get("index").and_then(Value::as_i64)
-                    && pending.values().any(|waiter|
-                        waiter.coalesce_key == Some(key)
-                            && waiter.queue_epoch == queue_epoch
-                            && waiter.target_index == i32::try_from(index).ok()) {
-                    if let Some(old) = deferred.remove(&key) {
-                        optimism.fail(&old.tag);
-                        state.send_replace(optimism.snapshot(observed));
-                        let _ = old.request.reply.send(Ok(Value::Null));
-                    }
-                    let _ = request.reply.send(Ok(Value::Null));
-                    continue;
-                }
-                if request.path == "/V2/services/search" && search_in_flight {
+                if let Some(command) = Command::from_request(request.path, &request.body, request.preview.as_ref(), request.first_track.as_ref()) {
+                    scheduler.enqueue(tag, command, request, observed, tokio::time::Instant::now());
+                    publish_update = true;
+                } else if request.path == "/V2/services/search" && search_in_flight {
                     search_queue.retain(|old| !old.request.reply.is_closed());
-                    if search_queue.len() >= 16 {
-                        let _ = request.reply.send(Err(tonic::Status::resource_exhausted("search queue is full")));
-                        continue;
-                    }
-                    search_queue.push_back(TaggedRequest { tag, request, queue_epoch });
-                    continue;
+                    if search_queue.len() >= 16 { let _ = request.reply.send(Err(tonic::Status::resource_exhausted("search queue is full"))); }
+                    else { search_queue.push_back(TaggedRequest { tag, request }); }
+                } else {
+                    let search = request.path == "/V2/services/search";
+                    let registered = send_request(&mut socket, TaggedRequest { tag, request }, &session, &mut pending, search).await?;
+                    search_in_flight |= search && registered;
                 }
-                if let Some(key) = key
-                    && in_flight.contains(&key) {
-                    if let Some(old) = deferred.remove(&key) {
-                        optimism.fail(&old.tag);
-                        let result = if key.path == "/V2/playlist/select" {
-                            Ok(Value::Null)
-                        } else {
-                            Err(crate::error::with_reason(
-                                tonic::Code::Cancelled,
-                                "superseded",
-                                "superseded by a newer value",
-                            ))
-                        };
-                        let _ = old.request.reply.send(result);
-                    }
-                    let applied = if key.path == "/V2/playlist/select" {
-                        optimism.apply_deferred_select(&tag, &request.body, observed)
-                    } else {
-                        optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed)
-                    };
-                    if applied {
-                        state.send_replace(optimism.snapshot(observed));
-                    }
-                    deferred.insert(key, TaggedRequest { tag, request, queue_epoch });
-                    continue;
-                }
-                if optimism.apply(&tag, request.path, &request.body, request.preview.clone(), request.first_track.clone(), observed) {
-                    optimism.add_superseded_titles(superseded_row_titles);
-                    state.send_replace(optimism.snapshot(observed));
-                }
-                let search = request.path == "/V2/services/search";
-                let registered = send_request(&mut socket, TaggedRequest { tag: tag.clone(), request, queue_epoch }, &session, &mut pending, &mut in_flight, key, search).await?;
-                if !registered && optimism.fail(&tag) {
-                    state.send_replace(optimism.snapshot(observed));
-                }
-                search_in_flight |= search && registered;
             }
             _ = tick.tick() => {
                 let now = tokio::time::Instant::now();
-                let expired: Vec<_> = pending.iter()
-                    .filter(|(_, waiter)| waiter.deadline <= now)
-                    .map(|(tag, _)| tag.clone()).collect();
+                if refresh.as_ref().is_some_and(|(_, deadline)| *deadline <= now) { return Err("Linn did not answer playback read-back after a command timeout".into()); }
+                if scheduler.tick(now) {
+                    // A timeout is not cancellation. Refresh before sending more;
+                    // no read-back can promise an older command won't execute late.
+                    let mut remaining = HashMap::new();
+                    for (_, path, mut body) in subscriptions(&session, &room) {
+                        if path == "/V2/volume/status" { continue; }
+                        next_tag += 1;
+                        let tag = format!("refresh-{next_tag}");
+                        body["tag"] = json!(tag);
+                        body["requestPath"] = json!(path);
+                        // Omitting update preserves the subscription; zero cancels it.
+                        body.as_object_mut().unwrap().remove("update");
+                        let encoded = websocket::encode_request(path, body).map_err(|e| e.to_string())?;
+                        socket.send(Message::Text(encoded.to_string().into())).await.map_err(|e| e.to_string())?;
+                        remaining.insert(tag, path);
+                    }
+                    refresh = Some((remaining, now + Duration::from_secs(3)));
+                }
+                let expired: Vec<_> = pending.iter().filter(|(_, waiter)| waiter.deadline <= now).map(|(tag, _)| tag.clone()).collect();
                 for tag in expired {
                     if let Some(waiter) = pending.remove(&tag) {
-                        let changed = optimism.fail(&tag);
-                        if waiter.coalesce_key.is_some_and(|key| key.path == "/V2/playlist/select")
-                            && deferred.contains_key(&CoalesceKey { path: "/V2/playlist/select", group: false }) {
-                            optimism.promote_surviving_select(observed.now_playing.as_ref().and_then(|p| p.playlist.as_ref()).and_then(|p| p.current_index));
-                        }
-                        if changed {
-                            state.send_replace(optimism.snapshot(observed));
-                        }
+                        scheduler.reject(&tag);
                         let _ = waiter.reply.send(Err(tonic::Status::deadline_exceeded("Linn request timed out")));
-                        if let Some(key) = waiter.coalesce_key {
-                            in_flight.remove(&key);
-                            if let Some(next) = deferred.remove(&key) {
-                                let tag = next.tag.clone();
-                                if !send_request(&mut socket, next, &session, &mut pending, &mut in_flight, Some(key), false).await?
-                                    && optimism.fail(&tag) {
-                                    state.send_replace(optimism.snapshot(observed));
-                                }
-                            }
-                        }
-                        if waiter.search {
-                            search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending, &mut in_flight).await?;
-                        }
+                        if waiter.search { search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending).await?; }
                     }
-                }
-                if optimism.reconcile(observed) {
-                    state.send_replace(optimism.snapshot(observed));
                 }
             }
         }
+        for (tag, request) in scheduler.dispatch(observed, tokio::time::Instant::now()) {
+            if !send_request(
+                &mut socket,
+                TaggedRequest {
+                    tag: tag.clone(),
+                    request,
+                },
+                &session,
+                &mut pending,
+                false,
+            )
+            .await?
+            {
+                scheduler.reject(&tag);
+            }
+        }
+        for (request, result) in scheduler.take_completed() {
+            let _ = request.reply.send(result.map(|()| Value::Null));
+        }
+        let mut snapshot = scheduler.snapshot(observed);
+        let mut comparable = snapshot.now_playing.clone();
+        if let Some(playing) = &mut comparable {
+            playing.timeline = state.borrow().now_playing.as_ref().and_then(|p| p.timeline);
+        }
+        if publish_update
+            || comparable != state.borrow().now_playing
+            || snapshot.pending != state.borrow().pending
+        {
+            snapshot.published_at = Some(now());
+            state.send_replace(snapshot);
+        }
     }
+}
+
+// Decode through the generated models, including partial volume/seek updates.
+// A malformed event or a frame carrying only mute cannot confirm volume.
+fn evidence_paths(path: &str, value: &Value) -> Option<Vec<&'static str>> {
+    // Some(empty) is a valid read-back with unknown fields, e.g. a radio source
+    // without an elapsed position. It must not force an unnecessary reconnect.
+    Some(match path {
+        "/V2/transport/status" => {
+            let data = websocket::decode::<models::V2TransportStatusResponse>(value)
+                .ok()?
+                .data?;
+            data.transport_state
+                .map(|_| "/V2/transport/status")
+                .into_iter()
+                .collect()
+        }
+        "/V2/metadata/status" => {
+            let data = websocket::decode::<models::V2MetadataStatusResponse>(value)
+                .ok()?
+                .metadata?;
+            data.line_1
+                .map(|_| "/V2/metadata/status")
+                .into_iter()
+                .collect()
+        }
+        "/V2/seek/status" => {
+            let data = websocket::decode::<models::V2SeekStatusResponse>(value)
+                .ok()?
+                .data?;
+            data.elapsed
+                .map(|_| "/V2/seek/status")
+                .into_iter()
+                .collect()
+        }
+        "/V2/playlist/subscribe" => {
+            websocket::decode_playlist(value.clone()).ok()?.data?;
+            vec!["/V2/playlist/subscribe"]
+        }
+        "/V2/volume/status" => {
+            let data = websocket::decode::<models::V2VolumeStatusResponse>(value)
+                .ok()?
+                .data?;
+            data.volume
+                .map(|_| "volume")
+                .into_iter()
+                .chain(data.mute.map(|_| "mute"))
+                .collect()
+        }
+        _ => return None,
+    })
 }
 
 fn publish_connected(
@@ -665,39 +617,15 @@ fn standby_error() -> tonic::Status {
     crate::error::failed_precondition("linn-standby", "Linn is in standby")
 }
 
-fn coalesce_key(request: &GatewayRequest) -> Option<CoalesceKey> {
-    matches!(
-        request.path,
-        "/V2/volume/set_vol" | "/V2/volume/set_mute" | "/V2/playlist/select"
-    )
-    .then(|| CoalesceKey {
-        path: request.path,
-        group: request.body.get("group").and_then(Value::as_bool) == Some(true),
-    })
-}
-
 async fn send_request(
     socket: &mut Socket,
     tagged: TaggedRequest,
     session: &str,
     pending: &mut HashMap<String, Pending>,
-    in_flight: &mut HashSet<CoalesceKey>,
-    key: Option<CoalesceKey>,
     search: bool,
 ) -> Result<bool, String> {
-    let TaggedRequest {
-        tag,
-        request,
-        queue_epoch,
-    } = tagged;
+    let TaggedRequest { tag, request } = tagged;
     let mut body = request.body;
-    let target_index = if request.path == "/V2/playlist/select" {
-        body.get("index")
-            .and_then(Value::as_i64)
-            .and_then(|index| i32::try_from(index).ok())
-    } else {
-        None
-    };
     body["requestPath"] = json!(request.path);
     body["tag"] = json!(tag);
     body["session"] = json!(session);
@@ -713,18 +641,12 @@ async fn send_request(
             return Ok(false);
         }
     };
-    if let Some(key) = key {
-        in_flight.insert(key);
-    }
     pending.insert(
         tag.clone(),
         Pending {
             reply: request.reply,
             deadline: tokio::time::Instant::now() + Duration::from_secs(5),
-            coalesce_key: key,
             search,
-            target_index,
-            queue_epoch,
         },
     );
     if let Some(started) = request.started {
@@ -737,9 +659,6 @@ async fn send_request(
                 format!("failed to send {}: {error}", request.path),
             )));
         }
-        if let Some(key) = key {
-            in_flight.remove(&key);
-        }
         return Err(error.to_string());
     }
     Ok(true)
@@ -750,13 +669,12 @@ async fn send_next_search(
     session: &str,
     search_queue: &mut VecDeque<TaggedRequest>,
     pending: &mut HashMap<String, Pending>,
-    in_flight: &mut HashSet<CoalesceKey>,
 ) -> Result<bool, String> {
     while let Some(next) = search_queue.pop_front() {
         if next.request.reply.is_closed() {
             continue;
         }
-        if send_request(socket, next, session, pending, in_flight, None, true).await? {
+        if send_request(socket, next, session, pending, true).await? {
             return Ok(true);
         }
     }
@@ -1462,218 +1380,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returning_to_in_flight_selection_cancels_deferred_without_restarting_track() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (select_tx, mut selections) = mpsc::channel(3);
-        let (release_tx, release_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            let mut release_rx = Some(release_rx);
-            while let Some(Ok(Message::Text(text))) = socket.next().await {
-                let request: Value = serde_json::from_str(&text).unwrap();
-                let path = str_at(&request, "requestPath").unwrap();
-                let reply = match path {
-                    "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
-                    "/V2/product/status" => {
-                        Some(json!({"requestPath": path, "data": {"standby": false}}))
-                    }
-                    "/V2/topology/status" => {
-                        Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
-                    }
-                    "/V2/playlist/select" => {
-                        select_tx
-                            .send(int_at(&request, "index").unwrap())
-                            .await
-                            .unwrap();
-                        if let Some(wait) = release_rx.take() {
-                            wait.await.unwrap();
-                        }
-                        Some(json!({"requestPath": path, "tag": request["tag"]}))
-                    }
-                    _ => None,
-                };
-                if let Some(reply) = reply {
-                    socket
-                        .send(Message::Text(reply.to_string().into()))
-                        .await
-                        .unwrap();
-                }
-            }
-        });
-        let gateway = Gateway::start(format!("ws://{address}"), "Linn".into(), 70);
-        let mut state = gateway.subscribe();
-        wait_for(&mut state, |snapshot| {
-            snapshot.connection_status == ConnectionStatus::Connected as i32
-        })
-        .await;
-        let first_gateway = gateway.clone();
-        let first = tokio::spawn(async move {
-            first_gateway
-                .request("/V2/playlist/select", json!({"room":"Linn", "index":0}))
-                .await
-        });
-        assert_eq!(selections.recv().await, Some(0));
-        let second_gateway = gateway.clone();
-        let second = tokio::spawn(async move {
-            second_gateway
-                .request("/V2/playlist/select", json!({"room":"Linn", "index":2}))
-                .await
-        });
-        wait_for(&mut state, |snapshot| {
-            snapshot
-                .now_playing
-                .as_ref()
-                .and_then(|p| p.playlist.as_ref())
-                .and_then(|p| p.current_index)
-                == Some(2)
-        })
-        .await;
-        let third_gateway = gateway.clone();
-        let third = tokio::spawn(async move {
-            third_gateway
-                .request("/V2/playlist/select", json!({"room":"Linn", "index":0}))
-                .await
-        });
-        third.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
-        wait_for(&mut state, |snapshot| {
-            snapshot
-                .now_playing
-                .as_ref()
-                .and_then(|p| p.playlist.as_ref())
-                .and_then(|p| p.current_index)
-                == Some(0)
-        })
-        .await;
-        release_tx.send(()).unwrap();
-        first.await.unwrap().unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), selections.recv())
-                .await
-                .is_err()
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn replacing_media_discards_old_select_but_sends_a_new_same_target() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (select_tx, mut selections) = mpsc::channel(3);
-        let (release_tx, release_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            let mut release_rx = Some(release_rx);
-            while let Some(Ok(Message::Text(text))) = socket.next().await {
-                let request: Value = serde_json::from_str(&text).unwrap();
-                let path = str_at(&request, "requestPath").unwrap();
-                let reply = match path {
-                    "/session/create" => Some(json!({"requestPath": path, "session": "test"})),
-                    "/V2/product/status" => {
-                        Some(json!({"requestPath": path, "data": {"standby": false}}))
-                    }
-                    "/V2/topology/status" => {
-                        Some(json!({"requestPath": path, "data": {"rooms": [{"name": "Linn"}]}}))
-                    }
-                    "/V2/playlist/select" => {
-                        select_tx
-                            .send(int_at(&request, "index").unwrap())
-                            .await
-                            .unwrap();
-                        if let Some(wait) = release_rx.take() {
-                            wait.await.unwrap();
-                        }
-                        Some(json!({"requestPath": path, "tag": request["tag"]}))
-                    }
-                    "/V2/media/select" => Some(json!({"requestPath": path, "tag": request["tag"]})),
-                    _ => None,
-                };
-                if let Some(reply) = reply {
-                    socket
-                        .send(Message::Text(reply.to_string().into()))
-                        .await
-                        .unwrap();
-                }
-            }
-        });
-        let gateway = Gateway::start(format!("ws://{address}"), "Linn".into(), 70);
-        let mut state = gateway.subscribe();
-        wait_for(&mut state, |snapshot| {
-            snapshot.connection_status == ConnectionStatus::Connected as i32
-        })
-        .await;
-        let first_gateway = gateway.clone();
-        let first = tokio::spawn(async move {
-            first_gateway
-                .request("/V2/playlist/select", json!({"room":"Linn", "index":1}))
-                .await
-        });
-        assert_eq!(selections.recv().await, Some(1));
-        let second_gateway = gateway.clone();
-        let second = tokio::spawn(async move {
-            second_gateway
-                .request("/V2/playlist/select", json!({"room":"Linn", "index":2}))
-                .await
-        });
-        wait_for(&mut state, |snapshot| {
-            snapshot
-                .now_playing
-                .as_ref()
-                .and_then(|p| p.playlist.as_ref())
-                .and_then(|p| p.current_index)
-                == Some(2)
-        })
-        .await;
-        let replace_gateway = gateway.clone();
-        let replace = tokio::spawn(async move {
-            replace_gateway
-                .request(
-                    "/V2/media/select",
-                    json!({"room":"Linn", "media_id":"album", "queue":"replace"}),
-                )
-                .await
-        });
-        wait_for(&mut state, |snapshot| {
-            snapshot
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.playback)
-        })
-        .await;
-        state.borrow_and_update();
-        let third_gateway = gateway.clone();
-        let third = tokio::spawn(async move {
-            third_gateway
-                .request("/V2/playlist/select", json!({"room":"Linn", "index":1}))
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(2), state.changed())
-            .await
-            .expect("third selection was not processed")
-            .unwrap();
-        release_tx.send(()).unwrap();
-        first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
-        replace.await.unwrap().unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), selections.recv())
-                .await
-                .unwrap(),
-            Some(1)
-        );
-        third.await.unwrap().unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), selections.recv())
-                .await
-                .is_err()
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
     async fn serializes_searches_on_the_shared_gateway_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1755,3 +1461,7 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+#[path = "gateway_scheduler_tests.rs"]
+mod scheduler_tests;
