@@ -114,6 +114,7 @@ impl Script {
     }
     fn settle_row(&mut self, tag: &str, index: i32) {
         self.ack(tag);
+        self.transport(TransportState::Playing as i32);
         self.playlist(index, 1, 4);
         self.metadata(index);
         self.position(0);
@@ -141,6 +142,7 @@ fn row_and_double_skip_wait_for_each_fields_own_evidence() {
     assert_eq!(s.send(), ["first"]);
     s.enqueue("next", Command::Select(2));
     s.ack("first");
+    s.transport(TransportState::Playing as i32);
     assert!(s.send().is_empty());
     s.playlist(1, 1, 4);
     assert_eq!(
@@ -157,6 +159,7 @@ fn row_and_double_skip_wait_for_each_fields_own_evidence() {
     s.position(0);
     assert_eq!(s.send(), ["next"]);
     s.ack("next");
+    s.transport(TransportState::Playing as i32);
     s.playlist(2, 1, 4);
     let view = s.view();
     assert_eq!(
@@ -175,6 +178,7 @@ fn unrelated_events_never_confirm_cached_metadata_and_evidence_can_precede_ack()
     let mut s = Script::new();
     s.enqueue("a", Command::Select(1));
     s.send();
+    s.transport(TransportState::Playing as i32);
     s.playlist(1, 1, 4);
     s.position(0);
     assert!(s.view().pending.unwrap().current_item);
@@ -417,6 +421,7 @@ fn shuffle_and_missing_revision_eventually_expire_without_inventing_a_song() {
     s.enqueue("shuffle", Command::Skip);
     s.send();
     s.ack("shuffle");
+    s.transport(TransportState::Playing as i32);
     assert!(s.view().now_playing.unwrap().current_item.is_none());
     s.playlist(3, 1, 4);
     s.metadata(3);
@@ -433,6 +438,7 @@ fn shuffle_and_missing_revision_eventually_expire_without_inventing_a_song() {
     s.enqueue("album", album(10, None));
     s.send();
     s.ack("album");
+    s.transport(TransportState::Playing as i32);
     s.now += Duration::from_secs(7);
     assert!(s.scheduler.tick(s.now));
     assert_eq!(s.view().pending, Some(PendingState::default()));
@@ -484,6 +490,7 @@ fn seek_evidence_can_arrive_before_metadata_without_blocking_the_lane() {
     s.enqueue("row", Command::Select(1));
     s.send();
     s.ack("row");
+    s.transport(TransportState::Playing as i32);
     s.position(0);
     s.playlist(1, 1, 4);
     s.metadata(1);
@@ -544,6 +551,7 @@ fn old_tick_after_reset_does_not_reuse_stale_seek_evidence() {
     s.send();
     s.position(0);
     s.position(41);
+    s.position(42); // Continuing old-song progress must not re-anchor evidence.
     s.ack("row");
     s.playlist(1, 2, 4);
     s.metadata(1);
@@ -558,6 +566,7 @@ fn delayed_playlist_confirmation_does_not_trigger_read_back() {
     s.enqueue("row", Command::Select(1));
     s.send();
     s.ack("row");
+    s.transport(TransportState::Playing as i32);
     s.metadata(1);
     s.position(2);
     s.now += Duration::from_millis(3250);
@@ -567,4 +576,88 @@ fn delayed_playlist_confirmation_does_not_trigger_read_back() {
     assert_eq!(s.view().pending, Some(PendingState::default()));
     s.enqueue("next", Command::Select(2));
     assert_eq!(s.send(), ["next"]);
+}
+
+#[test]
+fn review_delayed_playlist_retains_continuous_new_song_progress() {
+    let mut s = Script::new();
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.ack("row");
+    s.transport(TransportState::Playing as i32);
+    s.metadata(1);
+    s.position(2);
+    s.now += Duration::from_millis(1000);
+    s.position(3);
+    s.now += Duration::from_millis(2250);
+    s.playlist(1, 2, 4);
+    assert_eq!(s.view().pending, Some(PendingState::default()));
+}
+
+#[test]
+fn review_seek_after_row_survives_delayed_playlist() {
+    let mut s = Script::new();
+    s.enqueue("row", Command::Select(1));
+    assert_eq!(s.send(), ["row"]);
+    s.enqueue("seek", Command::Seek(60));
+    s.ack("row");
+    s.transport(TransportState::Playing as i32);
+    s.metadata(1);
+    for position in 0..=3 {
+        s.position(position);
+        s.now += Duration::from_secs(1);
+    }
+    s.playlist(1, 2, 4);
+    s.position(4);
+    s.now += Duration::from_secs(1);
+    assert!(!s.scheduler.tick(s.now));
+    assert!(s.scheduler.take_completed().is_empty());
+    assert_eq!(s.send(), ["seek"]);
+}
+
+#[test]
+fn paused_track_changes_predict_playing_until_transport_confirms() {
+    for command in [Command::Select(1), Command::Skip] {
+        let mut s = Script::new();
+        s.transport(TransportState::Paused as i32);
+        s.enqueue("next", command);
+        assert_eq!(
+            s.view().now_playing.unwrap().transport_state,
+            Some(TransportState::Playing as i32)
+        );
+        assert_eq!(s.send(), ["next"]);
+        s.ack("next");
+        for state in [
+            TransportState::Paused,
+            TransportState::Stopped,
+            TransportState::Buffering,
+        ] {
+            s.transport(state as i32);
+            assert_eq!(
+                s.view().now_playing.unwrap().transport_state,
+                Some(TransportState::Playing as i32)
+            );
+        }
+        s.playlist(1, 2, 4);
+        s.metadata(1);
+        s.position(0);
+        assert!(s.view().pending.unwrap().transport);
+        s.transport(TransportState::Playing as i32);
+        assert_eq!(s.view().pending, Some(PendingState::default()));
+    }
+}
+
+#[test]
+fn rejected_paused_track_change_restores_observed_transport() {
+    let mut s = Script::new();
+    s.transport(TransportState::Paused as i32);
+    s.enqueue("next", Command::Select(1));
+    s.send();
+    assert_eq!(
+        s.view().now_playing.unwrap().transport_state,
+        Some(TransportState::Playing as i32)
+    );
+    s.scheduler.reject("next");
+    assert_eq!(s.view().now_playing, s.observed.now_playing);
+    assert_eq!(s.view().pending, Some(PendingState::default()));
 }

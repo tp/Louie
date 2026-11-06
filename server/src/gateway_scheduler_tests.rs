@@ -153,6 +153,8 @@ async fn double_skip_waits_for_metadata_even_after_ack_and_index() {
     })
     .await;
     wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
     first.await.unwrap().unwrap();
     wire.quiet().await;
     wire.update(playlist(1, 2)).await;
@@ -173,6 +175,8 @@ async fn double_skip_waits_for_metadata_even_after_ack_and_index() {
     let request = wire.next().await;
     assert_eq!(request["index"], 2);
     wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
     second.await.unwrap().unwrap();
     wire.update(playlist(2, 3)).await;
     wire.wait(|s| !s.pending.as_ref().unwrap().queue_index)
@@ -218,6 +222,8 @@ async fn a_b_a_cancels_b_but_does_not_restart_confirmed_a() {
         tonic::Code::Cancelled
     );
     wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
     first.await.unwrap().unwrap();
     wire.update(playlist(1, 2)).await;
     wire.update(metadata(1)).await;
@@ -234,6 +240,8 @@ async fn timeout_renews_subscriptions_before_sending_waiting_command() {
     let first = wire.row(1);
     let request = wire.next().await;
     wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
     first.await.unwrap().unwrap();
     let second = wire.row(2);
     let mut refreshes = Vec::new();
@@ -264,6 +272,8 @@ async fn timeout_renews_subscriptions_before_sending_waiting_command() {
     let request = wire.next().await;
     assert_eq!(request["index"], 2);
     wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
     second.await.unwrap().unwrap();
     wire.update(playlist(2, 3)).await;
     wire.update(metadata(2)).await;
@@ -356,4 +366,73 @@ async fn row_tap_does_not_publish_old_song_position_for_new_song() {
     assert!(snapshot.now_playing.unwrap().timeline.is_none());
     wire.update(seek(0)).await;
     wire.wait(|s| !s.pending.as_ref().unwrap().timeline).await;
+}
+
+#[tokio::test]
+async fn review_late_playlist_after_new_song_progress_does_not_force_read_back() {
+    let mut wire = Wire::new().await;
+    let row = wire.row(1);
+    let request = wire.next().await;
+    wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
+    row.await.unwrap().unwrap();
+    wire.update(metadata(1)).await;
+    for position in 0..=3 {
+        wire.update(seek(position)).await;
+    }
+    wire.update(playlist(1, 2)).await;
+    wire.wait(|s| !s.pending.as_ref().unwrap().queue_index)
+        .await;
+    let next = wire.row(2);
+    let request = wire.next().await;
+    assert!(
+        request["tag"].as_str().unwrap().starts_with("pi-"),
+        "confirmed row timed out into read-back: {request}"
+    );
+    assert_eq!(request["index"], 2);
+    wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
+    next.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn paused_next_publishes_playing_before_gateway_ack() {
+    let mut wire = Wire::new().await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"pause"}}))
+        .await;
+    wire.wait(|s| {
+        s.now_playing.as_ref().unwrap().transport_state == Some(TransportState::Paused as i32)
+    })
+    .await;
+    let gateway = wire.gateway.clone();
+    let next = tokio::spawn(async move { gateway.skip(1).await });
+    let request = wire.next().await;
+    assert_eq!(request["index"], 1);
+    wire.wait(|s| {
+        s.pending.as_ref().unwrap().transport
+            && s.now_playing.as_ref().unwrap().transport_state
+                == Some(TransportState::Playing as i32)
+    })
+    .await;
+    wire.ack(&request).await;
+    next.await.unwrap().unwrap();
+    wire.update(
+        json!({"requestPath":"/V2/transport/status","data":{"transport_state":"buffering"}}),
+    )
+    .await;
+    wire.update(playlist(1, 2)).await;
+    wire.update(metadata(1)).await;
+    wire.update(seek(0)).await;
+    wire.wait(|s| !s.pending.as_ref().unwrap().timeline).await;
+    assert_eq!(
+        wire.gateway.snapshot().now_playing.unwrap().transport_state,
+        Some(TransportState::Playing as i32)
+    );
+    assert!(wire.gateway.snapshot().pending.unwrap().transport);
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
+    wire.wait(|s| s.pending == Some(PendingState::default()))
+        .await;
 }
