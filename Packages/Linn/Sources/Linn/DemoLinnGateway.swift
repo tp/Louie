@@ -26,9 +26,9 @@
                 self.artworkURL = artworkURL
             }
 
-            init?(_ item: LinnGatewayData.MediaItem) {
-                let title = item.displayTitle ?? item.title ?? item.name
-                guard let title, !title.isEmpty else {
+            init?(_ item: Linn.LibraryItem) {
+                let title = item.title
+                guard !title.isEmpty else {
                     return nil
                 }
 
@@ -45,16 +45,15 @@
 
         private struct Subscription {
             var room: String
-            var continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
+            var continuation: AsyncThrowingStream<Linn.Snapshot, Error>.Continuation
         }
 
         private var songs: [DemoSong]
         private var currentIndex: Int
-        private var transportState: LinnGatewayData.NowPlaying.TransportState
+        private var transportState: Linn.PlayState
         private var position: Int
         private var volume: Int
         private var isMuted: Bool
-        private var playlistContentRevision: Int
         private var pendingSelectionIndex: Int?
         private var mediaSelectionGeneration = 0
         private let playlistSelectionObservationDelay: Duration
@@ -68,7 +67,7 @@
             self.init(
                 songs: Self.defaultSongs,
                 currentIndex: 0,
-                transportState: .pause,
+                transportState: .paused,
                 position: 61,
                 volume: 32,
                 isMuted: false,
@@ -101,7 +100,7 @@
             self.init(
                 songs: demoSongs.isEmpty ? Self.defaultSongs : demoSongs,
                 currentIndex: currentIndex,
-                transportState: Self.transportState(for: playState),
+                transportState: playState,
                 position: position,
                 volume: volume,
                 isMuted: isMuted,
@@ -113,7 +112,7 @@
         private init(
             songs: [DemoSong],
             currentIndex: Int,
-            transportState: LinnGatewayData.NowPlaying.TransportState,
+            transportState: Linn.PlayState,
             position: Int,
             volume: Int,
             isMuted: Bool,
@@ -126,7 +125,6 @@
             self.position = position
             self.volume = volume
             self.isMuted = isMuted
-            playlistContentRevision = 1
             self.playlistSelectionObservationDelay = playlistSelectionObservationDelay
             self.mediaSelectionObservationDelay = mediaSelectionObservationDelay
         }
@@ -134,7 +132,7 @@
         public func nowPlayingUpdates(
             room: String?,
             updateInterval _: Int
-        ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
+        ) async -> AsyncThrowingStream<Linn.Snapshot, Error> {
             AsyncThrowingStream { continuation in
                 let id = UUID()
                 Task {
@@ -157,13 +155,13 @@
             transportState = .buffering
             yieldSnapshot()
             try await Task.sleep(for: .milliseconds(350))
-            transportState = .play
+            transportState = .playing
             yieldSnapshot()
         }
 
         public func pause(room _: String) async throws {
             try await Task.sleep(for: .milliseconds(150))
-            transportState = .pause
+            transportState = .paused
             yieldSnapshot()
         }
 
@@ -199,7 +197,7 @@
             currentIndex = index
             position = 0
             pendingSelectionIndex = nil
-            transportState = .play
+            transportState = .playing
             yieldSnapshot()
         }
 
@@ -227,14 +225,14 @@
         ) async throws -> Linn.LibraryPage {
             let children = Self.mediaChildren(for: mediaID)
             let slice = Array(children.dropFirst(index).prefix(count))
-            return Linn.LibraryPage(LinnGatewayData.MediaPage(
+            return Linn.LibraryPage(
                 id: mediaID,
                 contentRevision: 1,
                 index: index,
                 count: slice.count,
                 total: children.count,
-                children: slice
-            ))
+                items: slice
+            )
         }
 
         public func searchMedia(
@@ -245,18 +243,18 @@
             count: Int
         ) async throws -> Linn.LibraryPage {
             let matches = Self.demoLibraryAlbums.filter {
-                ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
+                $0.title.localizedCaseInsensitiveContains(query)
                     || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
             }
             let slice = Array(matches.dropFirst(index).prefix(count))
-            return Linn.LibraryPage(LinnGatewayData.MediaPage(
+            return Linn.LibraryPage(
                 id: "qobuz-search",
                 contentRevision: 1,
                 index: index,
                 count: slice.count,
                 total: matches.count,
-                children: slice
-            ))
+                items: slice
+            )
         }
 
         public func selectMedia(mediaID: String, room _: String, queue: Linn.QueuePlacement) async throws {
@@ -279,8 +277,7 @@
             currentIndex = mutation.currentIndex
             pendingSelectionIndex = nil
             position = 0
-            transportState = .play
-            playlistContentRevision += 1
+            transportState = .playing
             yieldSnapshot()
         }
 
@@ -289,7 +286,7 @@
         private func addSubscription(
             id: UUID,
             room: String,
-            continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
+            continuation: AsyncThrowingStream<Linn.Snapshot, Error>.Continuation
         ) {
             subscriptions[id] = Subscription(room: room, continuation: continuation)
             continuation.yield(snapshot(room: room))
@@ -311,68 +308,43 @@
             }
         }
 
-        private func snapshot(room: String) -> LinnGatewayData.NowPlaying {
+        private func snapshot(room _: String) -> Linn.Snapshot {
             let song = songs[currentIndex]
-            var nowPlaying = LinnGatewayData.NowPlaying(room: room, session: "preview-session")
-            nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: transportState)
-            nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: currentIndex, length: songs.count)
-            nowPlaying.currentItem = currentItem(song)
-            nowPlaying.playlist = playlist
-            nowPlaying.timeline = LinnGatewayData.NowPlaying.Timeline(
+            var snapshot = Linn.Snapshot()
+            snapshot.playState = transportState
+            snapshot.currentSong = appSong(song, index: currentIndex)
+            snapshot.playlist = .init(
+                songs: songs.enumerated().map { appSong($0.element, index: $0.offset) },
+                currentIndex: currentIndex,
+                total: songs.count
+            )
+            snapshot.pending.queueIndex = pendingSelectionIndex != nil
+            snapshot.timeline = .init(
                 position: position,
                 duration: song.duration,
-                seekableRange: LinnGatewayData.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
+                progress: song.duration > 0 ? Double(position) / Double(song.duration) : nil
             )
-            nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
-            return nowPlaying
+            snapshot.volume = volume
+            snapshot.isMuted = isMuted
+            return snapshot
         }
 
-        private func countOnlySnapshot(room: String, queueLength: Int) -> LinnGatewayData.NowPlaying {
-            let song = songs[currentIndex]
-            var nowPlaying = LinnGatewayData.NowPlaying(room: room, session: "preview-session")
-            nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: transportState)
-            nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: currentIndex, length: queueLength)
-            nowPlaying.currentItem = currentItem(song)
-            nowPlaying.playlist = LinnGatewayData.NowPlaying.Playlist(items: [], total: queueLength)
-            nowPlaying.timeline = LinnGatewayData.NowPlaying.Timeline(
-                position: position,
-                duration: song.duration,
-                seekableRange: LinnGatewayData.NowPlaying.SeekableRange(lowerBound: 0, upperBound: song.duration)
-            )
-            nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: isMuted)
-            return nowPlaying
+        private func countOnlySnapshot(room: String, queueLength: Int) -> Linn.Snapshot {
+            var snapshot = snapshot(room: room)
+            snapshot.playlist.total = queueLength
+            snapshot.pending.queueTotal = true
+            return snapshot
         }
 
-        private func currentItem(_ song: DemoSong) -> LinnGatewayData.NowPlaying.CurrentItem {
-            LinnGatewayData.NowPlaying.CurrentItem(
+        private func appSong(_ song: DemoSong, index: Int) -> Linn.Song {
+            .init(
                 id: song.id,
-                kind: "md.track.preview",
-                displayName: song.title,
+                title: song.title,
+                artist: song.artist,
+                album: song.album,
+                duration: song.duration,
                 artworkURL: song.artworkURL,
-                track: LinnGatewayData.NowPlaying.Track(
-                    title: song.title,
-                    album: song.album,
-                    artist: song.artist
-                )
-            )
-        }
-
-        private var playlist: LinnGatewayData.NowPlaying.Playlist {
-            let selectedIndex = pendingSelectionIndex ?? currentIndex
-            return LinnGatewayData.NowPlaying.Playlist(
-                items: songs.enumerated().map { index, song in
-                    LinnGatewayData.NowPlaying.PlaylistItem(
-                        index: index,
-                        displayName: song.title,
-                        album: song.album,
-                        artist: song.artist,
-                        duration: song.duration,
-                        artworkURL: song.artworkURL,
-                        isCurrent: index == selectedIndex
-                    )
-                },
-                total: songs.count,
-                contentRevision: playlistContentRevision
+                queueIndex: index
             )
         }
 
@@ -398,19 +370,6 @@
             }
         }
 
-        private static func transportState(for playState: Linn.PlayState) -> LinnGatewayData.NowPlaying.TransportState {
-            switch playState {
-            case .stopped:
-                .stop
-            case .playing:
-                .play
-            case .paused:
-                .pause
-            case .loading, .buffering:
-                .buffering
-            }
-        }
-
         private static func queueSongs(for mediaID: String) -> [DemoSong] {
             if let directTrack = queueableMediaItems.first(where: { $0.id == mediaID }) {
                 return DemoSong(directTrack).map { [$0] } ?? []
@@ -421,7 +380,7 @@
                 .compactMap(DemoSong.init)
         }
 
-        private static func queueableTracks(in item: LinnGatewayData.MediaItem) -> [LinnGatewayData.MediaItem] {
+        private static func queueableTracks(in item: Linn.LibraryItem) -> [Linn.LibraryItem] {
             if isTrack(item) {
                 return [item]
             }
@@ -429,36 +388,36 @@
             return mediaChildren(for: item.id).filter(isTrack)
         }
 
-        private static var queueableMediaItems: [LinnGatewayData.MediaItem] {
+        private static var queueableMediaItems: [Linn.LibraryItem] {
             hitMeHardAndSoftTracks
                 + demoPlaylistTracks
                 + demoLibraryAlbums.flatMap { demoTracks(for: $0.id) }
         }
 
-        private static func isTrack(_ item: LinnGatewayData.MediaItem) -> Bool {
+        private static func isTrack(_ item: Linn.LibraryItem) -> Bool {
             item.kind.localizedCaseInsensitiveContains("track")
         }
 
-        private static func mediaChildren(for mediaID: String) -> [LinnGatewayData.MediaItem] {
+        private static func mediaChildren(for mediaID: String) -> [Linn.LibraryItem] {
             switch mediaID {
             case "service-qobuz":
                 [
-                    LinnGatewayData.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    LinnGatewayData.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    LinnGatewayData.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                    Linn.LibraryItem(id: "qobuz-discover", kind: "md.qobuz.discover", title: "Discover"),
+                    Linn.LibraryItem(id: "qobuz-genres", kind: "md.qobuz.genres", title: "Genres"),
+                    Linn.LibraryItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", title: "My Qobuz"),
                 ]
             case "qobuz-myqobuz":
                 [
-                    LinnGatewayData.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    LinnGatewayData.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    LinnGatewayData.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                    Linn.LibraryItem(id: "qobuz-favourites", kind: "md.container", title: "Favourites"),
+                    Linn.LibraryItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", title: "My Playlists"),
+                    Linn.LibraryItem(id: "qobuz-purchased", kind: "md.container", title: "Purchased"),
                 ]
             case "qobuz-favourites":
                 [
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
-                    LinnGatewayData.MediaItem(id: "qobuz-favourite-tracks", kind: "md.container", name: "Tracks"),
+                    Linn.LibraryItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", title: "Albums"),
+                    Linn.LibraryItem(id: "qobuz-favourite-artists", kind: "md.container", title: "Artist"),
+                    Linn.LibraryItem(id: "qobuz-favourite-playlists", kind: "md.container", title: "Playlists"),
+                    Linn.LibraryItem(id: "qobuz-favourite-tracks", kind: "md.container", title: "Tracks"),
                 ]
             case "qobuz-favourite-albums":
                 demoLibraryAlbums
@@ -470,15 +429,15 @@
                 Array(demoLibraryAlbums.reversed())
             case "qobuz-discover":
                 [
-                    LinnGatewayData.MediaItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", name: "New Releases"),
-                    LinnGatewayData.MediaItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", name: "Qobuz Playlists"),
-                    LinnGatewayData.MediaItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", name: "Most Streamed"),
+                    Linn.LibraryItem(id: "qobuz-new-releases", kind: "md.container.qobuz.album", title: "New Releases"),
+                    Linn.LibraryItem(id: "qobuz-discover-playlists", kind: "md.container.qobuz.playlist", title: "Qobuz Playlists"),
+                    Linn.LibraryItem(id: "qobuz-most-streamed", kind: "md.container.qobuz.album", title: "Most Streamed"),
                 ]
             case "qobuz-genres":
                 [
-                    LinnGatewayData.MediaItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", name: "Jazz"),
-                    LinnGatewayData.MediaItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", name: "Electronic"),
-                    LinnGatewayData.MediaItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", name: "Classical"),
+                    Linn.LibraryItem(id: "qobuz-genre-jazz", kind: "md.container.qobuz.genre", title: "Jazz"),
+                    Linn.LibraryItem(id: "qobuz-genre-electronic", kind: "md.container.qobuz.genre", title: "Electronic"),
+                    Linn.LibraryItem(id: "qobuz-genre-classical", kind: "md.container.qobuz.genre", title: "Classical"),
                 ]
             case "qobuz-album-hit-me-hard-and-soft":
                 hitMeHardAndSoftTracks
@@ -622,137 +581,156 @@
             ),
         ]
 
-        private static let demoLibraryAlbums: [LinnGatewayData.MediaItem] = [
-            LinnGatewayData.MediaItem(
+        private static let demoLibraryAlbums: [Linn.LibraryItem] = [
+            Linn.LibraryItem(
                 id: "qobuz-album-happy-christmas",
                 kind: "md.album.qobuz",
-                name: "Happy Christmas",
+                title: "Happy Christmas",
+                subtitle: "Frank Sinatra",
                 album: "Happy Christmas",
                 artists: ["Frank Sinatra"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/25/04/3610152050425_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 50,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-shostakovich-quartets",
                 kind: "md.album.qobuz",
-                name: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                title: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
+                subtitle: "Cuarteto Casals",
                 album: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
                 artists: ["Cuarteto Casals"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/ob/zn/wozp8tpq0znob_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 30,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-hit-me-hard-and-soft",
                 kind: "md.album.qobuz",
-                name: "HIT ME HARD AND SOFT",
+                title: "HIT ME HARD AND SOFT",
+                subtitle: "Billie Eilish",
                 album: "HIT ME HARD AND SOFT",
                 artists: ["Billie Eilish"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 10,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-birth-of-the-blue",
                 kind: "md.album.qobuz",
-                name: "Birth of the Blue",
+                title: "Birth of the Blue",
+                subtitle: "Miles Davis",
                 album: "Birth of the Blue",
                 artists: ["Miles Davis"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/fa/90/ld7wpvuga90fa_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 4,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-chopin-nocturnes",
                 kind: "md.album.qobuz",
-                name: "Chopin: The Complete Nocturnes",
+                title: "Chopin: The Complete Nocturnes",
+                subtitle: "Tom Hicks",
                 album: "Chopin: The Complete Nocturnes",
                 artists: ["Tom Hicks"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/yc/ag/nuuxf36hoagyc_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 21,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-abbey-road",
                 kind: "md.album.qobuz",
-                name: "Abbey Road",
+                title: "Abbey Road",
+                subtitle: "The Beatles",
                 album: "Abbey Road",
                 artists: ["The Beatles"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/6b/az/trrcz9pvaaz6b_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 40,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-opus",
                 kind: "md.album.qobuz",
-                name: "Opus",
+                title: "Opus",
+                subtitle: "Ryuichi Sakamoto",
                 album: "Opus",
                 artists: ["Ryuichi Sakamoto"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/vc/kx/z9mpg2fc7kxvc_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 20,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-album-the-old-country",
                 kind: "md.album.qobuz",
-                name: "The Old Country",
+                title: "The Old Country",
+                subtitle: "Keith Jarrett",
                 album: "The Old Country",
                 artists: ["Keith Jarrett"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/4a/4y/rfwy0akjr4y4a_230.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 8,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
         ]
 
-        private static let demoLibraryArtists: [LinnGatewayData.MediaItem] = [
-            LinnGatewayData.MediaItem(
+        private static let demoLibraryArtists: [Linn.LibraryItem] = [
+            Linn.LibraryItem(
                 id: "qobuz-artist-qrion",
                 kind: "md.artist.qobuz",
-                name: "Qrion",
+                title: "Qrion",
+                subtitle: "Qrion",
                 artists: ["Qrion"],
                 artworkURL: URL(string: "https://static.qobuz.com/images/artists/covers/small/afd716d782ba6b056d5a311b0bed0573.jpg"),
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
         ]
 
-        private static let demoLibraryPlaylists: [LinnGatewayData.MediaItem] = [
-            LinnGatewayData.MediaItem(
+        private static let demoLibraryPlaylists: [Linn.LibraryItem] = [
+            Linn.LibraryItem(
                 id: "qobuz-playlist-willkommen",
                 kind: "md.playlist.qobuz",
-                name: "Willkommen bei Qobuz",
+                title: "Willkommen bei Qobuz",
                 artworkURL: URL(string: "https://static.qobuz.com/images/playlists/1285072_2bc9b2d5023757d1a8b10db915efd367_rectangle.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 125
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-playlist-true-sound-covers",
                 kind: "md.playlist.qobuz",
-                name: "True Sound Covers",
+                title: "True Sound Covers",
                 artworkURL: URL(string: "https://static.qobuz.com/images/covers/13/05/0093624980513_300.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 50
             ),
-            LinnGatewayData.MediaItem(
+            Linn.LibraryItem(
                 id: "qobuz-playlist-grammy-winners-2021",
                 kind: "md.playlist.qobuz",
-                name: "2021 Grammy Winners",
+                title: "2021 Grammy Winners",
                 artworkURL: URL(string: "https://static.qobuz.com/images/playlists/5863588_f5111fc6839f22be2f91948ca16dfc71_rectangle.jpg"),
                 containedKinds: ["md.track.qobuz"],
                 childCount: 58,
-                isFavourite: true
+                isFavourite: true,
+                canFavourite: true
             ),
         ]
 
-        private static let hitMeHardAndSoftTracks: [LinnGatewayData.MediaItem] = [
+        private static let hitMeHardAndSoftTracks: [Linn.LibraryItem] = [
             demoTrack(id: "qobuz-track-skinny", title: "SKINNY", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 219),
             demoTrack(id: "qobuz-track-lunch", title: "LUNCH", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 180),
             demoTrack(id: "qobuz-track-chihiro", title: "CHIHIRO", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 303),
@@ -765,7 +743,7 @@
             demoTrack(id: "qobuz-track-blue", title: "BLUE", album: "HIT ME HARD AND SOFT", artist: "Billie Eilish", duration: 343),
         ]
 
-        private static let demoPlaylistTracks: [LinnGatewayData.MediaItem] = [
+        private static let demoPlaylistTracks: [Linn.LibraryItem] = [
             demoTrack(id: "qobuz-playlist-track-chainsmoking", title: "Chainsmoking", album: "Preview Queue", artist: "Jacob Banks", duration: 197),
             demoTrack(id: "qobuz-playlist-track-green-light", title: "Green Light", album: "Melodrama", artist: "Lorde", duration: 234),
             demoTrack(id: "qobuz-playlist-track-supercut", title: "Supercut", album: "Melodrama", artist: "Lorde", duration: 278),
@@ -773,12 +751,12 @@
             demoTrack(id: "qobuz-playlist-track-time", title: "Time", album: "The Old Country", artist: "Keith Jarrett", duration: 298),
         ]
 
-        private static func demoTracks(for albumID: String) -> [LinnGatewayData.MediaItem] {
+        private static func demoTracks(for albumID: String) -> [Linn.LibraryItem] {
             guard let album = demoLibraryAlbums.first(where: { $0.id == albumID }) else {
                 return []
             }
 
-            let title = album.displayTitle ?? albumID
+            let title = album.title
             let artist = album.artists.first ?? "Qobuz"
             return (1 ... min(album.childCount ?? 6, 8)).map { index in
                 demoTrack(
@@ -799,11 +777,12 @@
             artist: String,
             duration: Int,
             artworkURL: URL? = URL(string: "https://static.qobuz.com/images/covers/kc/95/gvcirtodd95kc_230.jpg")
-        ) -> LinnGatewayData.MediaItem {
-            LinnGatewayData.MediaItem(
+        ) -> Linn.LibraryItem {
+            Linn.LibraryItem(
                 id: id,
                 kind: "md.track.qobuz",
                 title: title,
+                subtitle: artist,
                 album: album,
                 artists: [artist],
                 artworkURL: artworkURL,

@@ -78,15 +78,14 @@ private actor RetryDelays {
     let scripted = ScriptedWatch()
     let delays = RetryDelays()
     let updates = await gateway.updates(
-        room: "Linn",
         watch: { receive in try await scripted.run(receive) },
         sleep: { seconds in await delays.record(seconds) }
     )
-    var statuses: [LinnGatewayData.NowPlaying.ConnectionStatus] = []
+    var statuses: [Linn.ConnectionState] = []
     var terminalCode: RPCError.Code?
     do {
         for try await update in updates {
-            statuses.append(update.connectionStatus)
+            statuses.append(update.connectionState)
         }
     } catch let error as PiLinnRPCError {
         terminalCode = error.code
@@ -121,16 +120,14 @@ private actor RetryDelays {
     snapshot.nowPlaying = state
 
     let update = PiLinnMapping.nowPlaying(snapshot)
-    #expect(update.room == "Linn")
     #expect(update.isStandby == true)
-    #expect(update.session == "session-1")
-    #expect(update.playback?.transportState == .play)
-    #expect(update.currentItem?.displayName == "A Song")
-    #expect(update.queue?.index == 1)
-    #expect(update.queue?.length == 3)
-    #expect(update.roomState?.volume == 42)
-    #expect(update.roomState?.isMuted == false)
-    #expect(update.roomState?.maximumVolume == 45)
+    #expect(update.playState == .playing)
+    #expect(update.currentSong?.title == "A Song")
+    #expect(update.playlist.currentIndex == 1)
+    #expect(update.playlist.total == 3)
+    #expect(update.volume == 42)
+    #expect(update.isMuted == false)
+    #expect(update.maximumVolume == 45)
 }
 
 @Test func piQobuzFolderKeepsLibraryNavigation() {
@@ -177,10 +174,68 @@ private actor RetryDelays {
     snapshot.pending = pending
 
     let update = PiLinnMapping.nowPlaying(snapshot)
-    #expect(update.pending.queue)
     #expect(update.pending.queueIndex)
     #expect(update.pending.currentItem)
-    #expect(update.pending.transport)
     #expect(update.pending.volume)
-    #expect(!update.pending.playback)
+}
+
+@Test func snapshotMapsDomainValuesAndPreservesOptionalPresence() {
+    var snapshot = Louie_Linn_V1_StateSnapshot()
+    snapshot.connectionStatus = .connected
+    snapshot.nowPlaying.transportState = .waiting
+    snapshot.nowPlaying.playlist.currentIndex = 0
+    snapshot.nowPlaying.playlist.total = 1
+    var row = Louie_Linn_V1_PlaylistItem()
+    row.index = 0
+    row.displayName = "Queue title"
+    row.artist = "Artist"
+    row.album = "Album"
+    row.durationSeconds = 180
+    row.artworkURL = "https://example.com/cover.jpg"
+    snapshot.nowPlaying.playlist.items = [row]
+    snapshot.nowPlaying.currentItem.id = "track"
+    snapshot.nowPlaying.currentItem.displayName = "Fallback"
+    snapshot.nowPlaying.currentItem.track.title = "Track title"
+    snapshot.nowPlaying.currentItem.track.artist = "Artist"
+    snapshot.nowPlaying.timeline.positionSeconds = 0
+    snapshot.nowPlaying.timeline.durationSeconds = 180
+    snapshot.nowPlaying.roomVolume.volume = 0
+    snapshot.nowPlaying.roomVolume.isMuted = false
+    let mapped = PiLinnMapping.nowPlaying(snapshot)
+    #expect(mapped.connectionState == .connected)
+    #expect(!mapped.isStandby) // Older servers omit this field.
+    #expect(mapped.playState == .buffering)
+    #expect(mapped.currentSong?.title == "Track title")
+    #expect(mapped.currentSong?.queueIndex == 0)
+    #expect(mapped.playlist.songs == [Linn.Song(
+        id: "playlist-0", title: "Queue title", artist: "Artist", album: "Album",
+        duration: 180, artworkURL: URL(string: "https://example.com/cover.jpg"), queueIndex: 0
+    )])
+    #expect(mapped.timeline == .init(position: 0, duration: 180, progress: 0))
+    #expect(mapped.volume == 0)
+    #expect(mapped.isMuted == false)
+
+    snapshot.nowPlaying.timeline.durationSeconds = 0
+    #expect(PiLinnMapping.nowPlaying(snapshot).timeline?.progress == nil)
+    snapshot.clearNowPlaying()
+    let empty = PiLinnMapping.nowPlaying(snapshot)
+    #expect(empty.currentSong == nil)
+    #expect(empty.playState == nil)
+    #expect(empty.playlist == .init())
+    #expect(empty.timeline == nil)
+    #expect(empty.volume == nil)
+    #expect(empty.isMuted == nil)
+}
+
+@Test func snapshotConnectionStateDistinguishesLinnFromServerAvailability() {
+    var snapshot = Louie_Linn_V1_StateSnapshot()
+    #expect(PiLinnMapping.nowPlaying(snapshot).connectionState == .connecting)
+    snapshot.connectionStatus = .disconnected
+    #expect(PiLinnMapping.nowPlaying(snapshot).connectionState == .linnUnavailable(nil))
+    snapshot.connectionError = "Room unavailable"
+    #expect(PiLinnMapping.nowPlaying(snapshot).connectionState == .linnUnavailable("Room unavailable"))
+    snapshot.connectionStatus = .connecting
+    #expect(PiLinnMapping.nowPlaying(snapshot).connectionState == .linnUnavailable("Room unavailable"))
+    snapshot.connectionStatus = .connected
+    #expect(PiLinnMapping.nowPlaying(snapshot).connectionState == .connected)
 }

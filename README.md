@@ -21,6 +21,13 @@ changed in the connection screen or through `LOUIE_SERVER_URL` in the local
 developer `.env`. Old direct-DSM connection settings are not reused. The Pi
 owns the Linn connection and broadcasts full state snapshots to the app.
 
+`PiLinnGateway` maps each gRPC snapshot directly into `Linn.Snapshot`, using
+app-domain songs, playlists, timelines, and connection states. `Linn` replaces
+its playback and queue state from that snapshot, including empty queues; it
+does not merge earlier gateway events or infer queue metadata from the current
+song. Playback predictions belong to the server. The client retains immediate
+volume/mute feedback, the pending row marker, and stable row IDs for animations.
+
 The Swift messages and gRPC client under `Packages/Linn/Sources/Linn/Generated`
 are checked in. Regenerate them locally with
 `bash Packages/Linn/generate-proto.sh` after changing the proto. This builds
