@@ -325,3 +325,33 @@ fn partial_status_frames_are_valid_readbacks_but_not_evidence_for_missing_fields
         Some(vec![])
     );
 }
+
+#[tokio::test]
+async fn row_tap_does_not_publish_old_song_position_for_new_song() {
+    let mut wire = Wire::new().await;
+    let row = wire.row(1);
+    let request = wire.next().await;
+    wire.update(seek(41)).await;
+    wire.ack(&request).await;
+    row.await.unwrap().unwrap();
+    wire.update(playlist(1, 2)).await;
+    wire.update(metadata(1)).await;
+    wire.wait(|s| {
+        !s.pending.as_ref().unwrap().current_item
+            && s.now_playing
+                .as_ref()
+                .unwrap()
+                .current_item
+                .as_ref()
+                .unwrap()
+                .display_name
+                .as_deref()
+                == Some("Song 1")
+    })
+    .await;
+    let snapshot = wire.gateway.snapshot();
+    assert!(snapshot.pending.unwrap().timeline);
+    assert!(snapshot.now_playing.unwrap().timeline.is_none());
+    wire.update(seek(0)).await;
+    wire.wait(|s| !s.pending.as_ref().unwrap().timeline).await;
+}

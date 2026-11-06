@@ -344,75 +344,146 @@ async fn run_connection(
         let mut publish_update = false;
         tokio::select! {
             message = socket.next() => {
-                let message = message.ok_or("gateway websocket closed")?.map_err(|e| e.to_string())?;
+                let message = message
+                    .ok_or("gateway websocket closed")?
+                    .map_err(|e| e.to_string())?;
                 last_frame = tokio::time::Instant::now();
                 let text = match message {
                     Message::Text(text) => text.to_string(),
                     Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?,
-                    Message::Ping(payload) => { socket.send(Message::Pong(payload)).await.map_err(|e| e.to_string())?; continue; }
+                    Message::Ping(payload) => {
+                        socket
+                            .send(Message::Pong(payload))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        continue;
+                    }
                     Message::Close(_) => return Err("gateway websocket closed".into()),
                     _ => continue,
                 };
                 let envelope: Value = match serde_json::from_str(&text) {
                     Ok(value) => value,
-                    Err(error) => { warn!("Invalid gateway JSON: {error}"); continue; }
+                    Err(error) => {
+                        warn!("Invalid gateway JSON: {error}");
+                        continue;
+                    }
                 };
                 let header: websocket::Envelope = match websocket::decode(&envelope) {
                     Ok(header) => header,
-                    Err(error) => { warn!("Invalid Linn WebSocket envelope: {error}"); continue; }
+                    Err(error) => {
+                        warn!("Invalid Linn WebSocket envelope: {error}");
+                        continue;
+                    }
                 };
-                if let Some(tag) = header.tag.as_deref() && let Some(waiter) = pending.remove(tag) {
+                if let Some(tag) = header.tag.as_deref()
+                    && let Some(waiter) = pending.remove(tag)
+                {
                     let result = if let Some(code) = header.error_code {
                         scheduler.reject(tag);
-                        Err(crate::error::failed_precondition("linn-rejected", format!("Linn error {code}: {}", header.message.as_deref().unwrap_or("request failed"))))
+                        Err(crate::error::failed_precondition(
+                            "linn-rejected",
+                            format!(
+                                "Linn error {code}: {}",
+                                header.message.as_deref().unwrap_or("request failed")
+                            ),
+                        ))
                     } else {
                         scheduler.acknowledge(tag, tokio::time::Instant::now());
                         Ok(envelope.clone())
                     };
                     let _ = waiter.reply.send(result);
-                    if waiter.search { search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending).await?; }
+                    if waiter.search {
+                        search_in_flight =
+                            send_next_search(&mut socket, &session, &mut search_queue, &mut pending).await?;
+                    }
                 } else {
                     // Tagged read-back replies may omit requestPath, like command acks.
-                    let path = header.request_path.as_deref().or_else(|| header.tag.as_ref().and_then(|tag| refresh.as_ref()?.0.get(tag).copied()));
+                    let path = header.request_path.as_deref().or_else(|| {
+                        header
+                            .tag
+                            .as_ref()
+                            .and_then(|tag| refresh.as_ref()?.0.get(tag).copied())
+                    });
                     if path == Some("/V2/topology/status") {
-                        let topology = websocket::decode::<models::V2TopologyStatusResponse>(&envelope).map_err(|e| format!("invalid Linn topology: {e}"))?;
-                        if !topology.data.and_then(|data| data.rooms).unwrap_or_default().iter().any(|entry| entry.name.as_deref() == Some(&room)) { return Err(format!("Linn room '{room}' is no longer available")); }
+                        let topology = websocket::decode::<models::V2TopologyStatusResponse>(&envelope)
+                            .map_err(|e| format!("invalid Linn topology: {e}"))?;
+                        if !topology
+                            .data
+                            .and_then(|data| data.rooms)
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|entry| entry.name.as_deref() == Some(&room))
+                        {
+                            return Err(format!("Linn room '{room}' is no longer available"));
+                        }
                     }
-                    if path == Some("/V2/transport/status") && let Ok(response) = websocket::decode::<models::V2TransportStatusResponse>(&envelope) && let Some(value) = response.data.and_then(|data| data.shuffle) { shuffle = value; }
+                    if path == Some("/V2/transport/status")
+                        && let Ok(response) = websocket::decode::<models::V2TransportStatusResponse>(&envelope)
+                        && let Some(value) = response.data.and_then(|data| data.shuffle)
+                    {
+                        shuffle = value;
+                    }
                     if let Some(path) = path {
                         let published = PublishedAnchor::from_snapshot(&state.borrow());
-                        let predicted = scheduler.snapshot(observed).pending.is_some_and(|p| p.timeline);
+                        let predicted = scheduler
+                            .snapshot(observed)
+                            .pending
+                            .is_some_and(|p| p.timeline);
                         publish_update = apply_update(observed, path, &envelope, published, predicted);
                         // Evidence comes from this frame, never merely a cached value.
                         let evidence = evidence_paths(path, &envelope);
-                        for source in evidence.iter().flatten() { scheduler.observe(source, observed); }
-                        if path == "/V2/product/status" && observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true) {
+                        for source in evidence.iter().flatten() {
+                            scheduler.observe(source, observed);
+                        }
+                        if path == "/V2/product/status"
+                            && observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true)
+                        {
                             scheduler.clear();
                             refresh = None;
                         }
-                        if evidence.is_some() && header.error_code.is_none() && let Some(tag) = header.tag.as_ref() && let Some((remaining, _)) = &mut refresh {
+                        if evidence.is_some()
+                            && header.error_code.is_none()
+                            && let Some(tag) = header.tag.as_ref()
+                            && let Some((remaining, _)) = &mut refresh
+                        {
                             remaining.remove(tag);
-                            if remaining.is_empty() { refresh = None; scheduler.refreshed(); }
+                            if remaining.is_empty() {
+                                refresh = None;
+                                scheduler.refreshed();
+                            }
                         }
                     }
                 }
             }
             _ = ping.tick() => {
-                if last_frame.elapsed() > Duration::from_secs(30) { return Err("Linn gateway stopped responding to WebSocket pings".into()); }
-                socket.send(Message::Ping(Vec::new().into())).await.map_err(|e| e.to_string())?;
+                if last_frame.elapsed() > Duration::from_secs(30) {
+                    return Err("Linn gateway stopped responding to WebSocket pings".into());
+                }
+                socket
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             Some(mut request) = rx.recv() => {
-                if observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true) && requires_active_room(request.path) {
+                if observed.now_playing.as_ref().and_then(|p| p.is_standby) == Some(true)
+                    && requires_active_room(request.path)
+                {
                     let _ = request.reply.send(Err(standby_error()));
                     continue;
                 }
                 if request.path == "/louie/skip" {
                     let step = request.body["step"].as_i64().unwrap_or(0) as i32;
                     let effective = scheduler.snapshot(observed);
-                    let playlist = effective.now_playing.as_ref().and_then(|p| p.playlist.as_ref());
+                    let playlist = effective
+                        .now_playing
+                        .as_ref()
+                        .and_then(|p| p.playlist.as_ref());
                     if !shuffle && let Some(current) = playlist.and_then(|p| p.current_index) {
                         let target = current.saturating_add(step);
-                        if target < 0 || playlist.and_then(|p| p.total).is_some_and(|n| target >= n) { let _ = request.reply.send(Ok(Value::Null)); continue; }
+                        if target < 0 || playlist.and_then(|p| p.total).is_some_and(|n| target >= n) {
+                            let _ = request.reply.send(Ok(Value::Null));
+                            continue;
+                        }
                         request.path = "/V2/playlist/select";
                         request.body = json!({"room": room, "index": target});
                     } else {
@@ -422,28 +493,52 @@ async fn run_connection(
                 }
                 next_tag += 1;
                 let tag = format!("pi-{next_tag}");
-                if let Some(command) = Command::from_request(request.path, &request.body, request.preview.as_ref(), request.first_track.as_ref()) {
+                if let Some(command) = Command::from_request(
+                    request.path,
+                    &request.body,
+                    request.preview.as_ref(),
+                    request.first_track.as_ref(),
+                ) {
                     scheduler.enqueue(tag, command, request, observed, tokio::time::Instant::now());
                     publish_update = true;
                 } else if request.path == "/V2/services/search" && search_in_flight {
                     search_queue.retain(|old| !old.request.reply.is_closed());
-                    if search_queue.len() >= 16 { let _ = request.reply.send(Err(tonic::Status::resource_exhausted("search queue is full"))); }
-                    else { search_queue.push_back(TaggedRequest { tag, request }); }
+                    if search_queue.len() >= 16 {
+                        let _ = request.reply.send(Err(tonic::Status::resource_exhausted(
+                            "search queue is full",
+                        )));
+                    } else {
+                        search_queue.push_back(TaggedRequest { tag, request });
+                    }
                 } else {
                     let search = request.path == "/V2/services/search";
-                    let registered = send_request(&mut socket, TaggedRequest { tag, request }, &session, &mut pending, search).await?;
+                    let registered = send_request(
+                        &mut socket,
+                        TaggedRequest { tag, request },
+                        &session,
+                        &mut pending,
+                        search,
+                    )
+                    .await?;
                     search_in_flight |= search && registered;
                 }
             }
             _ = tick.tick() => {
                 let now = tokio::time::Instant::now();
-                if refresh.as_ref().is_some_and(|(_, deadline)| *deadline <= now) { return Err("Linn did not answer playback read-back after a command timeout".into()); }
+                if refresh
+                    .as_ref()
+                    .is_some_and(|(_, deadline)| *deadline <= now)
+                {
+                    return Err("Linn did not answer playback read-back after a command timeout".into());
+                }
                 if scheduler.tick(now) {
                     // A timeout is not cancellation. Refresh before sending more;
                     // no read-back can promise an older command won't execute late.
                     let mut remaining = HashMap::new();
                     for (_, path, mut body) in subscriptions(&session, &room) {
-                        if path == "/V2/volume/status" { continue; }
+                        if path == "/V2/volume/status" {
+                            continue;
+                        }
                         next_tag += 1;
                         let tag = format!("refresh-{next_tag}");
                         body["tag"] = json!(tag);
@@ -451,17 +546,30 @@ async fn run_connection(
                         // Omitting update preserves the subscription; zero cancels it.
                         body.as_object_mut().unwrap().remove("update");
                         let encoded = websocket::encode_request(path, body).map_err(|e| e.to_string())?;
-                        socket.send(Message::Text(encoded.to_string().into())).await.map_err(|e| e.to_string())?;
+                        socket
+                            .send(Message::Text(encoded.to_string().into()))
+                            .await
+                            .map_err(|e| e.to_string())?;
                         remaining.insert(tag, path);
                     }
                     refresh = Some((remaining, now + Duration::from_secs(3)));
                 }
-                let expired: Vec<_> = pending.iter().filter(|(_, waiter)| waiter.deadline <= now).map(|(tag, _)| tag.clone()).collect();
+                let expired: Vec<_> = pending
+                    .iter()
+                    .filter(|(_, waiter)| waiter.deadline <= now)
+                    .map(|(tag, _)| tag.clone())
+                    .collect();
                 for tag in expired {
                     if let Some(waiter) = pending.remove(&tag) {
                         scheduler.reject(&tag);
-                        let _ = waiter.reply.send(Err(tonic::Status::deadline_exceeded("Linn request timed out")));
-                        if waiter.search { search_in_flight = send_next_search(&mut socket, &session, &mut search_queue, &mut pending).await?; }
+                        let _ = waiter.reply.send(Err(tonic::Status::deadline_exceeded(
+                            "Linn request timed out",
+                        )));
+                        if waiter.search {
+                            search_in_flight =
+                                send_next_search(&mut socket, &session, &mut search_queue, &mut pending)
+                                    .await?;
+                        }
                     }
                 }
             }

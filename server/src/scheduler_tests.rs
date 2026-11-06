@@ -509,3 +509,45 @@ fn album_start_holds_playing_through_old_transport_and_loading_frames() {
     s.transport(TransportState::Playing as i32);
     assert_eq!(s.view().pending, Some(PendingState::default()));
 }
+
+#[test]
+fn old_song_position_tick_is_not_seek_evidence_for_the_new_song() {
+    for command in [
+        Command::Select(1),
+        album(1, Some(4)),
+        Command::Media {
+            placement: "now".into(),
+            count: Some(1),
+            preview: Some(song(1)),
+        },
+    ] {
+        let mut s = Script::new();
+        s.enqueue("change", command);
+        assert_eq!(s.send(), ["change"]);
+        s.position(41);
+        s.ack("change");
+        s.playlist(1, 2, 5);
+        s.metadata(1);
+        let view = s.view();
+        assert!(
+            view.pending.unwrap().timeline,
+            "old song progress must not settle the new song"
+        );
+        assert!(view.now_playing.unwrap().timeline.is_none());
+    }
+}
+
+#[test]
+fn old_tick_after_reset_does_not_reuse_stale_seek_evidence() {
+    let mut s = Script::new();
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.position(0);
+    s.position(41);
+    s.ack("row");
+    s.playlist(1, 2, 4);
+    s.metadata(1);
+    assert!(s.view().pending.unwrap().timeline);
+    s.position(0);
+    assert!(!s.view().pending.unwrap().timeline);
+}

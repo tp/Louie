@@ -235,11 +235,11 @@ impl Prediction {
                         }
                     } else {
                         let position = actual.timeline.and_then(|t| t.position_seconds);
-                        self.saw_track_seek |= position.is_some_and(|p| {
-                            p <= 2
-                                || Some(p)
-                                    != self.baseline.timeline.and_then(|t| t.position_seconds)
-                        });
+                        // A normal old-song tick (40 -> 41) is not evidence
+                        // of the new track. Only the latest near-zero sample can
+                        // release a track-change hold; do not latch an earlier
+                        // reset if a stale nonzero frame subsequently replaces it.
+                        self.saw_track_seek = position.is_some_and(|p| (0..=2).contains(&p));
                     }
                 }
             }
