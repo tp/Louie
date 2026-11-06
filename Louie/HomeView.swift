@@ -111,8 +111,17 @@ struct HomeView: View {
             Button {
                 linn.playPause()
             } label: {
-                Label(playPauseTitle, systemImage: playPauseSystemImage)
-                    .frame(width: 24)
+                Label {
+                    Text(playPauseTitle)
+                } icon: {
+                    // Keep both symbols in layout so the text above stays still.
+                    ZStack {
+                        Image(systemName: "play.fill")
+                            .opacity(linn.playState == .playing ? 0 : 1)
+                        Image(systemName: "pause.fill")
+                            .opacity(linn.playState == .playing ? 1 : 0)
+                    }
+                }
             }
             .disabled(linn.playState == nil)
 
@@ -151,10 +160,6 @@ struct HomeView: View {
 
     private var playPauseTitle: String {
         linn.playState == .playing ? "Pause" : "Play"
-    }
-
-    private var playPauseSystemImage: String {
-        linn.playState == .playing ? "pause.fill" : "play.fill"
     }
 
     private var displayedSong: Linn.Song? {
