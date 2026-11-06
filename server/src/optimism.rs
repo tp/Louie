@@ -143,6 +143,9 @@ impl Prediction {
         }
         if command.changes_track() {
             p.transport = Some(TransportState::Playing as i32);
+            // An unchanged transport state need not be pushed again. A later
+            // stopped/loading event invalidates this standing evidence.
+            p.saw_transport = p.baseline.transport_state == p.transport;
         }
         p.expected_total = p.total.flatten();
         p
@@ -237,15 +240,16 @@ impl Prediction {
                         }
                     } else {
                         let position = actual.timeline.and_then(|t| t.position_seconds);
-                        // Anchor at a reset, then retain evidence while the
-                        // new song advances normally, even if its playlist
-                        // update is late. A jump back to old-song progress
-                        // invalidates the anchor rather than latching it.
+                        // Anchor at a reset. Continue beyond it only after
+                        // the new song's metadata confirms: during a quick
+                        // second skip, low ticks may still belong to song one.
+                        // A jump away from the sequence invalidates the anchor.
                         self.track_position = position.filter(|p| {
                             (0..=2).contains(p)
-                                || self
-                                    .track_position
-                                    .is_some_and(|last| (last..=last.saturating_add(2)).contains(p))
+                                || (self.item.is_none()
+                                    && self.track_position.is_some_and(|last| {
+                                        (last..=last.saturating_add(2)).contains(p)
+                                    }))
                         });
                     }
                 }

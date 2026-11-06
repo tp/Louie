@@ -153,8 +153,6 @@ async fn double_skip_waits_for_metadata_even_after_ack_and_index() {
     })
     .await;
     wire.ack(&request).await;
-    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
-        .await;
     first.await.unwrap().unwrap();
     wire.quiet().await;
     wire.update(playlist(1, 2)).await;
@@ -175,8 +173,6 @@ async fn double_skip_waits_for_metadata_even_after_ack_and_index() {
     let request = wire.next().await;
     assert_eq!(request["index"], 2);
     wire.ack(&request).await;
-    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
-        .await;
     second.await.unwrap().unwrap();
     wire.update(playlist(2, 3)).await;
     wire.wait(|s| !s.pending.as_ref().unwrap().queue_index)
@@ -222,8 +218,6 @@ async fn a_b_a_cancels_b_but_does_not_restart_confirmed_a() {
         tonic::Code::Cancelled
     );
     wire.ack(&request).await;
-    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
-        .await;
     first.await.unwrap().unwrap();
     wire.update(playlist(1, 2)).await;
     wire.update(metadata(1)).await;
@@ -240,8 +234,6 @@ async fn timeout_renews_subscriptions_before_sending_waiting_command() {
     let first = wire.row(1);
     let request = wire.next().await;
     wire.ack(&request).await;
-    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
-        .await;
     first.await.unwrap().unwrap();
     let second = wire.row(2);
     let mut refreshes = Vec::new();
@@ -272,8 +264,6 @@ async fn timeout_renews_subscriptions_before_sending_waiting_command() {
     let request = wire.next().await;
     assert_eq!(request["index"], 2);
     wire.ack(&request).await;
-    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
-        .await;
     second.await.unwrap().unwrap();
     wire.update(playlist(2, 3)).await;
     wire.update(metadata(2)).await;
@@ -435,4 +425,27 @@ async fn paused_next_publishes_playing_before_gateway_ack() {
         .await;
     wire.wait(|s| s.pending == Some(PendingState::default()))
         .await;
+}
+
+#[tokio::test]
+async fn review_row_tap_while_playing_confirms_without_a_repeated_play_frame() {
+    // The fake Linn reports "play" at startup and, like an update subscription,
+    // pushes nothing further because the transport state never changes.
+    let mut wire = Wire::new().await;
+    let row = wire.row(1);
+    let request = wire.next().await;
+    wire.ack(&request).await;
+    row.await.unwrap().unwrap();
+    wire.update(playlist(1, 2)).await;
+    wire.update(metadata(1)).await;
+    wire.update(seek(0)).await;
+    let next = wire.row(2);
+    let request = wire.next().await;
+    assert!(
+        request["tag"].as_str().unwrap().starts_with("pi-"),
+        "confirmed row timed out into read-back: {request}"
+    );
+    assert_eq!(request["index"], 2);
+    wire.ack(&request).await;
+    next.await.unwrap().unwrap();
 }
