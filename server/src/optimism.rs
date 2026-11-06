@@ -52,7 +52,9 @@ struct QueueAdditions {
 
 #[derive(Clone)]
 enum PreviewRule {
-    Row,
+    Row {
+        baseline_title: Option<String>,
+    },
     Media {
         baseline_title: Option<String>,
         baseline_revision: Option<i64>,
@@ -412,7 +414,9 @@ impl Optimism {
             || prior_select_in_flight
         {
             self.current_item = Some(Pending::new(tag, preview, 6));
-            self.current_item_rule = Some(PreviewRule::Row);
+            self.current_item_rule = Some(PreviewRule::Row {
+                baseline_title: playing.current_item.as_ref().map(title).map(str::to_owned),
+            });
         }
     }
 
@@ -569,7 +573,17 @@ impl Optimism {
                 return false;
             }
             match &self.current_item_rule {
-                Some(PreviewRule::Row) => self.queue_index.is_none(),
+                // Playlist and metadata arrive separately. Only changed metadata
+                // can settle the song preview; an index update proves nothing about it.
+                Some(PreviewRule::Row { baseline_title }) => {
+                    playing.current_item.as_ref().is_some_and(|item| {
+                        let incoming_title = title(item);
+                        !incoming_title.trim().is_empty()
+                            && !baseline_title
+                                .as_deref()
+                                .is_some_and(|old| old.eq_ignore_ascii_case(incoming_title))
+                    })
+                }
                 Some(PreviewRule::Media {
                     baseline_title,
                     baseline_revision,
@@ -1294,7 +1308,87 @@ mod tests {
             .current_index = Some(2);
         optimism.acknowledged("row");
         optimism.reconcile(&observed);
+        let snapshot = optimism.snapshot(&observed);
+        let pending = snapshot.pending.unwrap();
+        assert!(!pending.queue_index);
+        assert_eq!(
+            snapshot
+                .now_playing
+                .unwrap()
+                .current_item
+                .as_ref()
+                .map(title),
+            Some("Target"),
+            "a playlist update must not release the song preview"
+        );
+        assert!(pending.current_item);
+
+        observed.now_playing.as_mut().unwrap().current_item = Some(CurrentItem {
+            display_name: Some("Target".into()),
+            ..Default::default()
+        });
+        optimism.reconcile(&observed);
         assert!(!optimism.snapshot(&observed).pending.unwrap().current_item);
+    }
+
+    #[test]
+    fn row_preview_accepts_changed_metadata_independently_of_queue_index() {
+        for index_first in [false, true] {
+            let mut observed = state();
+            observed
+                .now_playing
+                .as_mut()
+                .unwrap()
+                .playlist
+                .as_mut()
+                .unwrap()
+                .items
+                .push(PlaylistItem {
+                    index: 2,
+                    display_name: Some("Target".into()),
+                    ..Default::default()
+                });
+            let mut optimism = Optimism::default();
+            optimism.apply(
+                "row",
+                "/V2/playlist/select",
+                &json!({"index": 2}),
+                None,
+                None,
+                &observed,
+            );
+            optimism.acknowledged("row");
+            if index_first {
+                observed
+                    .now_playing
+                    .as_mut()
+                    .unwrap()
+                    .playlist
+                    .as_mut()
+                    .unwrap()
+                    .current_index = Some(2);
+                optimism.reconcile(&observed);
+            }
+
+            // Empty metadata during loading is not evidence of a different song.
+            observed.now_playing.as_mut().unwrap().current_item = Some(CurrentItem::default());
+            optimism.reconcile(&observed);
+            assert!(optimism.snapshot(&observed).pending.unwrap().current_item);
+
+            // A real different song overrides the prediction, even if it isn't
+            // the requested title and even if the playlist frame hasn't arrived.
+            let actual = CurrentItem {
+                display_name: Some("External selection".into()),
+                ..Default::default()
+            };
+            observed.now_playing.as_mut().unwrap().current_item = Some(actual.clone());
+            optimism.reconcile(&observed);
+            let snapshot = optimism.snapshot(&observed);
+            assert_eq!(snapshot.now_playing.unwrap().current_item, Some(actual));
+            let pending = snapshot.pending.unwrap();
+            assert!(!pending.current_item);
+            assert_eq!(pending.queue_index, !index_first);
+        }
     }
 
     #[test]
@@ -1345,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn restarting_playing_row_confirms_after_ack() {
+    fn restarting_playing_row_confirms_index_but_same_title_waits_for_expiry() {
         let mut observed = state();
         observed
             .now_playing
@@ -1374,7 +1468,15 @@ mod tests {
         optimism.acknowledged("row");
         optimism.reconcile(&observed);
         let pending = optimism.snapshot(&observed).pending.unwrap();
-        assert!(!pending.queue_index && !pending.current_item && !pending.timeline);
+        assert!(!pending.queue_index);
+        assert!(pending.current_item && pending.timeline);
+        optimism.current_item.as_mut().unwrap().expires = Instant::now();
+        optimism.timeline.as_mut().unwrap().expires = Instant::now();
+        assert!(optimism.expire());
+        let snapshot = optimism.snapshot(&observed);
+        assert_eq!(snapshot.now_playing, observed.now_playing);
+        let pending = snapshot.pending.unwrap();
+        assert!(!pending.current_item && !pending.timeline);
     }
 
     #[test]
