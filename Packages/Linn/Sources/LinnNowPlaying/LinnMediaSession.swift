@@ -20,7 +20,26 @@ public final class LinnMediaSession {
         self.gateway = gateway ?? Linn.Configuration(serverURL: attributes.serverURL).makeGateway()
     }
 
-    deinit { monitoringTask?.cancel() }
+    @ObservationIgnored private var pushTokenTask: Task<Void, Never>?
+
+    deinit {
+        monitoringTask?.cancel()
+        pushTokenTask?.cancel()
+    }
+
+    #if os(iOS)
+    public func startObservingPushToken() {
+        guard pushTokenTask == nil, let installationID = attributes.installationID,
+              let value = attributes.pushEnvironment, let environment = NowPlayingPushEnvironment(rawValue: value) else { return }
+        let registrar = NowPlayingTokenRegistrar(
+            gateway: Linn.Configuration(serverURL: attributes.serverURL).makePushGateway(),
+            installationID: installationID, environment: environment, serverURL: attributes.serverURL)
+        let current = pushToken
+        let updates = pushTokenUpdates
+        let sessionID = id
+        pushTokenTask = Task { await registrar.observe(current: current, updates: updates, sessionID: sessionID) }
+    }
+    #endif
 
     /// Used by the extension while it is running, including after a Lock Screen command.
     public func startMonitoring() {
@@ -36,7 +55,7 @@ public final class LinnMediaSession {
             } catch is CancellationError {
             } catch {
                 self?.receive(Linn.Snapshot(connectionState: .serverUnreachable))
-                Logger(subsystem: "xyz.timm.preetz.Louie", category: "NowPlaying")
+                Logger(subsystem: "xyz.preetz.Louie", category: "NowPlaying")
                     .error("Remote session subscription failed: \(String(describing: error), privacy: .public)")
             }
             self?.monitoringTask = nil
@@ -49,6 +68,7 @@ public final class LinnMediaSession {
         if update.connectionState == .connected && !update.isStandby
             && update.currentSong == nil && update.pending.currentItem
             && [.playing, .paused, .buffering, .loading].contains(update.playState) { return }
+        if attributes.installationID != nil && [.idle, .connecting, .serverUnreachable].contains(update.connectionState) { return }
         let previous = attributes.playback
         // Home Server sends complete projections, including cleared fields.
         attributes.canControlPlayback = update.connectionState == .connected && !update.isStandby
@@ -57,7 +77,9 @@ public final class LinnMediaSession {
         attributes.hasNext = update.playlist.currentIndex.map { $0 + 1 < (update.playlist.total ?? 0) } ?? false
         attributes.volume = update.volume
         if let maximum = update.maximumVolume { attributes.maximumVolume = min(70, maximum) }
-        if previous != attributes.playback { attributes.timestamp = .now }
+        if previous != attributes.playback {
+            attributes.timestamp = update.timeline?.sampledAtSeconds.map(Date.init(timeIntervalSince1970:)) ?? .now
+        }
     }
 
     public func update(_ attributes: LinnSessionAttributes) {

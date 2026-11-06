@@ -10,6 +10,7 @@ nonisolated struct LouieRemoteMediaExtension: RemoteMediaSessionExtension {
 
     @MainActor func session(_ attributes: LinnSessionAttributes) async throws -> LinnMediaSession {
         let session = LinnMediaSession(attributes: attributes)
+        session.startObservingPushToken()
         session.startMonitoring()
         return session
     }

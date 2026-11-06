@@ -210,6 +210,35 @@ This checks `GetState`, the volume ceiling when available, and the initial
 
 The deploy script also installs this tool as `~/.local/bin/check_linn` on the Pi.
 
+## Now Playing push notifications
+
+Configure `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, and at least one environment's key pair
+(`APNS_PRODUCTION_KEY_ID` / `APNS_PRODUCTION_KEY_PATH`, or the corresponding
+`APNS_SANDBOX_*` variables). With no keys configured, playback works normally and
+registration returns `FAILED_PRECONDITION`. Partial/invalid key configuration fails
+startup rather than silently disabling delivery. TestFlight uses production APNs.
+
+Registrations live in memory and are atomically saved as JSON, by default at
+`~/.local/state/louie/nowplaying.json` (override with `LOUIE_PUSH_REGISTRY`). The file
+is created with mode 0600. It contains device tokens, so exclude it from source
+control and public backups. The private signing keys remain separate `.p8` files.
+Playback state and delivery cursors stay in memory and rebuild after restart.
+
+The worker sends start/update/end events over HTTP/2 using ES256 provider tokens.
+It publishes the latest state at most once a second per token, suppresses normal
+elapsed-time ticks, retries transient failures with capped backoff, and retires
+invalid tokens. APNs acceptance is not a delivery guarantee. Start pushes are
+retried every 60 seconds until a session token arrives; no stale push is queued
+for an offline device (`apns-expiration: 0`). Unrefreshed registrations expire after
+90 days, and there is a 128-token registry limit. Clients refresh on launch/session
+creation; open Louie periodically to keep registration current.
+
+APNs requires only outbound HTTPS from the Pi. Controls and token registration
+still use the home server's LAN gRPC connection; no Funnel or inbound port opening
+is needed for push delivery. A phone outside the LAN can receive updates for an
+already registered session, but cannot control playback or register a new session
+token until it can reach the server. No standalone Watch app is included.
+
 ## Generated code
 
 The OpenAPI spec is local to [`linn-ci-gateway`](linn-ci-gateway).
@@ -241,8 +270,8 @@ That script needs a local `protoc` and builds the pinned Swift plugins locally.
 ## Current scope
 
 One configured Linn room; no users, roles, service discovery, or other home devices.
-Now Playing token-registration RPCs currently return `UNIMPLEMENTED`; APNs delivery
-and the Apple Now Playing integration are follow-up work. The music server does
+Optional Now Playing APNs delivery keeps registered iPhones updated while the app
+is suspended. See [push setup](../docs/now-playing-push.md). The music server does
 not require the Hey Louie/Modal voice backend.
 
 The deployed path is tested with IPv4. The server still accepts general socket
