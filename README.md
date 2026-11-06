@@ -15,7 +15,7 @@ The Raspberry Pi server is in `server/`; its gRPC schema is in
 
 ```sh
 cd server
-cargo test --locked --all-targets
+cargo test --workspace --locked --all-targets
 cargo build --release --locked
 ```
 
@@ -29,9 +29,12 @@ The Linn CI Gateway WebSocket payload models live in the separate
 `server/linn-ci-gateway` crate. They are generated from the normalized local
 `server/linn-ci-gateway/openapi.yaml` by running
 `bash server/linn-ci-gateway/generate.sh`. The script runs a pinned OpenAPI
-Generator image locally and commits only the model output; CI checks that it
-is current. The handwritten `websocket` module handles the live gateway's
-string-or-array `artist` deviation. To update from a local gateway, run
+Generator Docker image locally and generates only models and their module index;
+Docker is required. The normalized spec includes only the wrapped endpoints
+and related schemas. CI checks regeneration and runs tests and Clippy for both
+workspace crates. Generated models are marked in `.gitattributes` so GitHub
+collapses their diffs by default. The handwritten `websocket` module handles
+the live gateway's string-or-array `artist` deviation. To update from a local gateway, run
 `bash server/linn-ci-gateway/fetch-spec.sh`, then
 `bash server/linn-ci-gateway/normalize.sh`, then regenerate the Rust models
 with `bash server/linn-ci-gateway/generate.sh`.

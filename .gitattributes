@@ -1,0 +1,2 @@
+# Collapse generated Rust models in GitHub diffs and exclude them from language statistics.
+/server/linn-ci-gateway/src/models/** linguist-generated=true
