@@ -11,6 +11,8 @@ const MAX_WAITING: usize = 8;
 pub const WAIT_LIMIT: Duration = Duration::from_secs(15);
 const ACK_LIMIT: Duration = Duration::from_secs(5);
 const SETTLE_LIMIT: Duration = Duration::from_secs(3);
+// Live playlist updates can take about three seconds after a row selection.
+const TRACK_SETTLE_LIMIT: Duration = Duration::from_secs(5);
 const MEDIA_SETTLE_LIMIT: Duration = Duration::from_secs(6);
 
 struct Queued<T> {
@@ -196,10 +198,10 @@ impl<T> Scheduler<T> {
             {
                 active.acknowledged = true;
                 active.expires = now
-                    + if matches!(active.command, Command::Media { .. }) {
-                        MEDIA_SETTLE_LIMIT
-                    } else {
-                        SETTLE_LIMIT
+                    + match active.command {
+                        Command::Media { .. } => MEDIA_SETTLE_LIMIT,
+                        Command::Select(_) | Command::Skip => TRACK_SETTLE_LIMIT,
+                        _ => SETTLE_LIMIT,
                     };
                 if active.prediction.settled() {
                     self.finish(index, true);

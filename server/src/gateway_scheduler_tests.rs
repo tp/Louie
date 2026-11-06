@@ -91,7 +91,7 @@ impl Wire {
         wire
     }
     async fn next(&mut self) -> Value {
-        tokio::time::timeout(Duration::from_secs(5), self.commands.recv())
+        tokio::time::timeout(Duration::from_secs(7), self.commands.recv())
             .await
             .unwrap()
             .unwrap()

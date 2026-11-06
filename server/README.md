@@ -49,9 +49,12 @@ local volume/mute feedback and row markers.
 |---|---|
 | Waiting queue | At most 8 actions per lane, each with a 15-second lifetime |
 | Gateway acknowledgement | 5 seconds from dispatch |
-| Playback confirmation | 3 seconds after acknowledgement; 6 seconds for media changes |
+| Playback confirmation | 3 seconds after acknowledgement; 5 for track selection/skip, 6 for media changes |
 | Timeout read-back | Up to 3 seconds; missing replies cause reconnect |
 | Swift RPC deadline | 25 seconds, allowing queue wait plus acknowledgement |
+
+Track selection allows for the roughly three-second playlist update delay seen on
+the live Linn, rather than timing out at the edge of that interval.
 
 A playback timeout removes its prediction and reads back transport, metadata,
 position and playlist before dispatching more playback commands. Read-back explicitly

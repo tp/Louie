@@ -327,7 +327,7 @@ fn timeout_refreshes_before_dispatch_and_late_frames_remain_observed_truth() {
     s.send();
     s.ack("a");
     s.enqueue("b", Command::Select(2));
-    s.now += Duration::from_secs(4);
+    s.now += Duration::from_secs(6);
     assert!(s.scheduler.tick(s.now));
     assert!(s.send().is_empty());
     s.playlist(1, 1, 4);
@@ -338,7 +338,7 @@ fn timeout_refreshes_before_dispatch_and_late_frames_remain_observed_truth() {
     s.playlist(1, 1, 4);
     s.metadata(1); // baseline from dispatch
     assert!(s.view().pending.unwrap().current_item);
-    s.now += Duration::from_secs(4);
+    s.now += Duration::from_secs(6);
     assert!(s.scheduler.tick(s.now));
     assert_eq!(s.view().now_playing, s.observed.now_playing);
     assert_eq!(s.view().pending, Some(PendingState::default()));
@@ -550,4 +550,21 @@ fn old_tick_after_reset_does_not_reuse_stale_seek_evidence() {
     assert!(s.view().pending.unwrap().timeline);
     s.position(0);
     assert!(!s.view().pending.unwrap().timeline);
+}
+
+#[test]
+fn delayed_playlist_confirmation_does_not_trigger_read_back() {
+    let mut s = Script::new();
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.ack("row");
+    s.metadata(1);
+    s.position(2);
+    s.now += Duration::from_millis(3250);
+    assert!(!s.scheduler.tick(s.now));
+    assert!(s.view().pending.unwrap().queue_index);
+    s.playlist(1, 2, 4);
+    assert_eq!(s.view().pending, Some(PendingState::default()));
+    s.enqueue("next", Command::Select(2));
+    assert_eq!(s.send(), ["next"]);
 }
