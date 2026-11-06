@@ -283,6 +283,8 @@ extension Louie_Linn_V1_Linn {
     /// > Source IDL Documentation:
     /// >
     /// > The Pi owns one Linn gateway connection and observes its configured room.
+    /// > Playback/volume commands while in standby fail with FAILED_PRECONDITION
+    /// > and the metadata entry louie-error-reason: linn-standby.
     internal protocol ClientProtocol: Sendable {
         /// Call the "GetState" method.
         ///
@@ -626,6 +628,8 @@ extension Louie_Linn_V1_Linn {
     /// > Source IDL Documentation:
     /// >
     /// > The Pi owns one Linn gateway connection and observes its configured room.
+    /// > Playback/volume commands while in standby fail with FAILED_PRECONDITION
+    /// > and the metadata entry louie-error-reason: linn-standby.
     internal struct Client<Transport>: ClientProtocol where Transport: GRPCCore.ClientTransport {
         private let client: GRPCCore.GRPCClient<Transport>
 

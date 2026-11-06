@@ -30,6 +30,13 @@ commands. It reconnects to Linn automatically and preserves observed state while
 reporting a disconnected status. Shared playback prediction belongs here; Apple
 clients retain immediate feedback for local volume/mute controls and row taps.
 
+Gateway connectivity and speaker power are separate: `now_playing.is_standby`
+comes from `/V2/product/status`, is read before the first connected snapshot,
+and stays updated through a subscription. A room in standby keeps its observed
+metadata, but playback and volume commands fail with `linn-standby` in the
+`louie-error-reason` metadata. Clients show an off state and disable those controls.
+Topology updates also detect a room disappearing while the gateway remains up.
+
 ## Build and test
 
 Run from this directory with Rust installed through rustup:

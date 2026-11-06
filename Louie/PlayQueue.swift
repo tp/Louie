@@ -31,6 +31,7 @@ public struct PlayQueue: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(!linn.canControlPlayback)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }

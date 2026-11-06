@@ -45,11 +45,11 @@ public struct PlayerBar: View {
     @ViewBuilder
     var currentSong: some View {
         HStack {
-            AlbumArtwork(url: state.currentSong?.artworkURL)
+            AlbumArtwork(url: state.canControlPlayback ? state.currentSong?.artworkURL : nil)
                 .frame(width: 40, height: 40)
 
             ZStack(alignment: .leading) {
-                if let song = state.currentSong {
+                if state.canControlPlayback, let song = state.currentSong {
                     VStack(alignment: .leading) {
                         Text(song.title)
                             .font(.caption.bold())
@@ -143,13 +143,15 @@ public struct PlayerBar: View {
         }
         .tint(.primary)
         .labelStyle(.iconOnly)
+        .disabled(!state.canControlPlayback)
         .onTapGesture {
             // ignored; taps on disabled buttons should not collapse the bar
         }
     }
 
     private var statusTitle: String {
-        switch state.connectionState {
+        if state.connectionState == .connected && state.isStandby { return "Linn is off" }
+        return switch state.connectionState {
         case .idle:
             "No song"
         case .connecting:
@@ -166,6 +168,9 @@ public struct PlayerBar: View {
     }
 
     private var statusSubtitle: String? {
+        if state.connectionState == .connected && state.isStandby {
+            return "Turn on Linn to control playback"
+        }
         if state.connectionState == .connected, let message = state.lastErrorMessage {
             return message
         }

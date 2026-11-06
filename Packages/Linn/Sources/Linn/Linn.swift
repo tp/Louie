@@ -49,6 +49,8 @@ public final class Linn {
     public private(set) var playState: PlayState?
     public private(set) var volume: Int?
     public private(set) var isMuted: Bool?
+    public private(set) var isStandby = false
+    public var canControlPlayback: Bool { connectionState == .connected && !isStandby }
     public private(set) var timeline: Timeline?
     public private(set) var lastErrorMessage: String?
     public private(set) var songTransitionDirection: SongTransitionDirection = .forward
@@ -77,6 +79,7 @@ public final class Linn {
     }
 
     public var hasPrevious: Bool {
+        guard canControlPlayback else { return false }
         guard let currentIndex = playlist.currentIndex else {
             return false
         }
@@ -84,6 +87,7 @@ public final class Linn {
     }
 
     public var hasNext: Bool {
+        guard canControlPlayback else { return false }
         guard let currentIndex = playlist.currentIndex, let total = playlist.total else {
             return false
         }
@@ -806,6 +810,13 @@ public final class Linn {
     }
 
     private func apply(_ update: LinnGatewayData.NowPlaying) {
+        isStandby = update.isStandby ?? false
+        if isStandby {
+            pendingQueueIndex = nil
+            pendingQueueExpiresAt = nil
+            optimisticVolume = nil
+            optimisticMute = nil
+        }
         playState = PlayState(update.playback)
         playlist.total = update.queue?.length
         if let playlist = update.playlist {

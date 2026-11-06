@@ -22,6 +22,9 @@ import Testing
     ))
     #expect(withReason.reason == .linnDisconnected)
     #expect(withReason.errorDescription == "Louie Home Server can't reach Linn.")
+    let standby = PiLinnRPCError(RPCError(code: .failedPrecondition, message: "standby", metadata: ["louie-error-reason": "linn-standby"]))
+    #expect(standby.reason == .linnStandby)
+    #expect(standby.errorDescription == "Linn is off. Turn it on to control playback.")
     #expect(PiLinnRPCError(code: .failedPrecondition, message: "", reason: .sourceNotSeekable).errorDescription == "This source doesn't support seeking.")
     #expect(PiLinnRPCError(code: .failedPrecondition, message: "", reason: .linnRejected).errorDescription == "Linn rejected the request.")
 }
@@ -100,6 +103,7 @@ private actor RetryDelays {
     snapshot.room = "Linn"
     snapshot.nowPlayingSessionID = "session-1"
     var state = Louie_Linn_V1_NowPlayingState()
+    state.isStandby = true
     state.transportState = .playing
     var item = Louie_Linn_V1_CurrentItem()
     item.id = "track-1"
@@ -118,6 +122,7 @@ private actor RetryDelays {
 
     let update = PiLinnMapping.nowPlaying(snapshot)
     #expect(update.room == "Linn")
+    #expect(update.isStandby == true)
     #expect(update.session == "session-1")
     #expect(update.playback?.transportState == .play)
     #expect(update.currentItem?.displayName == "A Song")

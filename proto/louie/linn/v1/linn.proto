@@ -6,6 +6,8 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 // The Pi owns one Linn gateway connection and observes its configured room.
+// Playback/volume commands while in standby fail with FAILED_PRECONDITION
+// and the metadata entry louie-error-reason: linn-standby.
 service Linn {
   rpc GetState(google.protobuf.Empty) returns (StateSnapshot);
 
@@ -72,6 +74,8 @@ message NowPlayingState {
   Playlist playlist = 3;
   Timeline timeline = 4;
   RoomVolume room_volume = 5;
+  // A reachable gateway can still have its speaker in standby. Absent on older servers.
+  optional bool is_standby = 6;
 }
 
 enum TransportState {

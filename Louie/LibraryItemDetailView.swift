@@ -40,10 +40,12 @@ struct LibraryItemDetailView: View {
                 Button("Enqueue", systemImage: "text.badge.plus") {
                     linn.play(item, placement: .last)
                 }
+                .disabled(!linn.canControlPlayback)
 
                 Button("Play", systemImage: "play.fill") {
                     linn.play(item, placement: .replace)
                 }
+                .disabled(!linn.canControlPlayback)
             }
         }
         .task(id: route.id) {
@@ -95,6 +97,7 @@ struct LibraryItemDetailView: View {
                     LibraryItemListRow(item: child) {
                         linn.play(child, placement: .replace)
                     }
+                    .disabled(!linn.canControlPlayback)
                 }
             }
         }

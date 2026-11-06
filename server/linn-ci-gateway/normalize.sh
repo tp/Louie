@@ -21,6 +21,7 @@ cp "${ORIGINAL_SPEC_PATH}" "${SPEC_PATH}"
 yq -i '.paths = (.paths | pick([
     "/session/create",
     "/V2/topology/status",
+    "/V2/product/status",
     "/V2/transport/status",
     "/V2/transport/play",
     "/V2/transport/pause",
@@ -131,7 +132,7 @@ yq -i '.definitions = (.definitions | with_entries(select(
     .key == "SessionData" or
     .key == "SessionResponse" or
     (.key | test("^Param(Tag|Session|Room|Update|Filter)$")) or
-    (.key | test("^V2(TopologyStatus|Transport|Seek|Metadata|Volume|Playlist|ServicesStatus)")) or
+    (.key | test("^V2(TopologyStatus|ProductStatus|Transport|Seek|Metadata|Volume|Playlist|ServicesStatus)")) or
     (.key | test("^MediaBrowse(Response|Data)$")) or
     .key == "ItemMetaData"
 )))' "${SPEC_PATH}"

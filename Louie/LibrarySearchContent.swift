@@ -18,6 +18,7 @@ struct LibrarySearchView: View {
         LibrarySearchContent(
             state: state,
             searchType: $state.type,
+            canPlay: linn.canControlPlayback,
             enqueue: { item in
                 linn.play(item, placement: .last)
             },
@@ -93,16 +94,19 @@ struct LibrarySearchState: Equatable {
 struct LibrarySearchContent: View {
     @Binding var searchType: Linn.SearchType
     var state: LibrarySearchState
+    var canPlay: Bool
     var enqueue: (Linn.LibraryItem) -> Void
     var play: (Linn.LibraryItem) -> Void
 
     init(
         state: LibrarySearchState,
         searchType: Binding<Linn.SearchType>,
+        canPlay: Bool = true,
         enqueue: @escaping (Linn.LibraryItem) -> Void,
         play: @escaping (Linn.LibraryItem) -> Void,
     ) {
         self.state = state
+        self.canPlay = canPlay
         _searchType = searchType
         self.enqueue = enqueue
         self.play = play
@@ -130,7 +134,7 @@ struct LibrarySearchContent: View {
                 noSearchResults
             } else {
                 ForEach(state.results) { item in
-                    LibrarySearchResultRow(item: item) {
+                    LibrarySearchResultRow(item: item, canPlay: canPlay) {
                         enqueue(item)
                     } play: {
                         play(item)
@@ -153,6 +157,7 @@ struct LibrarySearchContent: View {
 
 struct LibrarySearchResultRow: View {
     var item: Linn.LibraryItem
+    var canPlay: Bool = true
     var enqueue: () -> Void
     var play: () -> Void
 
@@ -188,6 +193,7 @@ struct LibrarySearchResultRow: View {
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.bordered)
+            .disabled(!canPlay)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
