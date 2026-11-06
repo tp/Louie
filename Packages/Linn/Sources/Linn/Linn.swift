@@ -1,5 +1,4 @@
 import Foundation
-import LinnCiGateway
 import Observation
 import OSLog
 
@@ -7,7 +6,7 @@ public protocol LinnGateway: Sendable {
     func nowPlayingUpdates(
         room: String?,
         updateInterval: Int
-    ) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error>
+    ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>
 
     func play(room: String) async throws
     func pause(room: String) async throws
@@ -16,14 +15,19 @@ public protocol LinnGateway: Sendable {
     func selectPlaylistItem(at index: Int, room: String) async throws
     func setVolume(_ volume: Int, room: String, group: Bool) async throws
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws
-    func mediaServices(room: String) async throws -> [CiGateway.MediaService]
-    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> CiGateway.MediaPage
-    func searchMedia(serviceID: String, query: String, type: CiGateway.MediaSearchType, index: Int, count: Int) async throws -> CiGateway.MediaPage
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws
+    func mediaServices(room: String) async throws -> [Linn.LibraryService]
+    func browseMedia(mediaID: String, index: Int, count: Int, browseType: String) async throws -> Linn.LibraryPage
+    func searchMedia(serviceID: String, query: String, type: Linn.SearchType, index: Int, count: Int) async throws -> Linn.LibraryPage
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws
     func setMediaFavourite(mediaID: String, isFavourite: Bool) async throws
 }
 
 public extension LinnGateway {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws {
+        try await selectMedia(mediaID: mediaID, room: room, queue: queue)
+    }
+
     func setVolume(_ volume: Int, room: String) async throws {
         try await setVolume(volume, room: room, group: true)
     }
@@ -37,7 +41,7 @@ public extension LinnGateway {
 @MainActor
 public final class Linn {
     public let room: String
-    public let maximumVolume: Int
+    public private(set) var maximumVolume: Int
     public private(set) var connectionState: ConnectionState = .idle
     public private(set) var library = Library()
     public private(set) var currentSong: Song?
@@ -50,13 +54,7 @@ public final class Linn {
     public private(set) var songTransitionDirection: SongTransitionDirection = .forward
 
     /// Queue row the user tapped that the device hasn't switched to yet.
-    public var pendingQueueIndex: Int? {
-        if case let .queueItem(targetIndex) = pendingPlayback {
-            targetIndex
-        } else {
-            nil
-        }
-    }
+    public private(set) var pendingQueueIndex: Int?
 
     public var previousSongs: [Song] {
         guard let currentIndex = playlist.currentIndex else {
@@ -92,108 +90,30 @@ public final class Linn {
         return currentIndex + 1 < total
     }
 
-    /// Number of songs left after the observed or pending queue selection,
-    /// including library additions the device hasn't reported yet.
+    /// Number of songs left in the server's current queue projection.
     public var remainingQueueCount: Int {
-        let effectiveCurrentIndex = pendingQueueIndex ?? playlist.currentIndex
-        if let pendingQueueLength, let total = pendingQueueLength.total {
-            let currentIndex = pendingQueueLength.currentIndex ?? effectiveCurrentIndex ?? -1
-            return max(0, total - currentIndex - 1)
-        }
-
         guard let total = playlist.total else {
             return upcomingSongs.count
         }
-
-        guard let effectiveCurrentIndex else {
+        guard let currentIndex = playlist.currentIndex else {
             return total
         }
-
-        return max(0, total - effectiveCurrentIndex - 1)
+        return max(0, total - currentIndex - 1)
     }
 
-    private var ciGateway: (any LinnGateway)?
+    private var linnGateway: (any LinnGateway)?
     private var configurationLoadAttempted = false
     private var playlistContentRevision: Int?
     private var playlistSongsByIndex: [Int: Song] = [:]
-    private var pendingPlayback: PendingPlayback?
-    private var isPreviewingMedia: Bool {
-        if case .media = pendingPlayback {
-            return true
-        }
-        return false
-    }
-
-    private var pendingQueueLength: PendingQueueLength?
-    @ObservationIgnored private var queueCommandGeneration = 0
-    private var optimisticPlayState: OptimisticPlayState?
+    private var pendingQueueExpiresAt: Date?
     private var optimisticVolume: OptimisticVolume?
     private var optimisticMute: OptimisticMute?
-    @ObservationIgnored private var mediaSelectionGeneration = 0
-    /// What the device itself last reported, regardless of any preview shown.
-    @ObservationIgnored private var reportedSong: Song?
-    @ObservationIgnored private var reportedTimeline: Timeline?
-    private var playlistSelectionQueue = PlaylistSelectionQueue()
     private var libraryContentRevision: Int?
     private var libraryPageCache: [LibraryCacheKey: LibraryPage] = [:]
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
 
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
-    @ObservationIgnored private var playlistSelectionTask: Task<Void, Never>?
-    @ObservationIgnored private var playlistSelectionTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
-
-    /// What the user asked to play that the device hasn't picked up yet.
-    /// Only one at a time: the latest request supersedes earlier ones.
-    private enum PendingPlayback {
-        /// Previous/next. Already shown as current; stale updates are ignored
-        /// until the device reaches the index.
-        case skip(targetIndex: Int, expiresAt: Date)
-        /// A tapped queue row. Marked pending in the queue, not shown as
-        /// current until the device confirms.
-        case queueItem(targetIndex: Int)
-        /// A library item started with play-now or replace. Shown as current
-        /// while the device swaps its queue.
-        case media(MediaSelection)
-    }
-
-    private struct MediaSelection {
-        var generation: Int
-        var preview: Song
-        /// Title the device reports once it plays the selection, when known.
-        /// Only needed when that's also the song being replaced.
-        var expectedTitle: String?
-        var replacedSong: Song?
-        var supersededTitles: [String]
-        var playlistRevision: Int?
-        var expiresAt: Date
-    }
-
-    /// Queue length the device will report once library items it was just
-    /// sent land, so the queue count responds right away.
-    private struct PendingQueueLength {
-        /// Nil once a replace or play-now of unknown size was sent: the count
-        /// follows the device until its new queue shows up, and additions
-        /// can't be counted on top of the old one.
-        var total: Int?
-        /// Where the new queue starts playing, for a replace or play-now.
-        /// Nil for additions, which count from wherever playback is.
-        var currentIndex: Int?
-        /// A replace can keep the old length; then only a new revision
-        /// tells the swapped queue apart from the old one.
-        var requiresNewRevision: Bool
-        var revisionAtRequest: Int?
-        /// The replace this count is built on. Additions sent before it were
-        /// discarded with the old queue, so their failure changes nothing.
-        var replaceCommand: Int?
-        var expiresAt: Date
-    }
-
-    private struct OptimisticPlayState {
-        var targetState: PlayState
-        var previousState: PlayState?
-        var expiresAt: Date
-    }
 
     private struct OptimisticVolume {
         var target: Int
@@ -217,7 +137,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = CiGateway(webSocketURL: configuration.ciGatewayWebSocketURL)
+        linnGateway = PiLinnGateway(serverURL: configuration.serverURL)
         configurationLoadAttempted = true
     }
 
@@ -228,7 +148,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = gateway
+        linnGateway = gateway
         configurationLoadAttempted = true
     }
 
@@ -238,7 +158,7 @@ public final class Linn {
     ) {
         self.room = room
         self.maximumVolume = maximumVolume
-        ciGateway = nil
+        linnGateway = nil
     }
 
     #if DEBUG
@@ -268,7 +188,7 @@ public final class Linn {
             self.timeline = timeline
             self.songTransitionDirection = songTransitionDirection
             self.lastErrorMessage = lastErrorMessage
-            ciGateway = nil
+            linnGateway = nil
             configurationLoadAttempted = true
             setQueueAvailability(hasPrevious: hasPrevious, hasNext: hasNext)
         }
@@ -276,20 +196,18 @@ public final class Linn {
 
     deinit {
         updatesTask?.cancel()
-        playlistSelectionTask?.cancel()
-        playlistSelectionTimeoutTask?.cancel()
         libraryTask?.cancel()
     }
 
     public func start() {
-        if ciGateway == nil, !configurationLoadAttempted {
+        if linnGateway == nil, !configurationLoadAttempted {
             configurationLoadAttempted = true
             do {
                 let configuration = try Configuration.local()
-                Self.logger.info("Loaded Linn gateway websocket URL \(configuration.ciGatewayWebSocketURL.absoluteString, privacy: .public)")
-                ciGateway = CiGateway(webSocketURL: configuration.ciGatewayWebSocketURL)
+                Self.logger.info("Loaded Louie server URL \(configuration.serverURL.absoluteString, privacy: .public)")
+                linnGateway = PiLinnGateway(serverURL: configuration.serverURL)
             } catch {
-                let message = String(describing: error)
+                let message = error.localizedDescription
                 Self.logger.error("Failed to load Linn configuration: \(message, privacy: .public)")
                 lastErrorMessage = message
                 connectionState = .failed(message)
@@ -297,7 +215,7 @@ public final class Linn {
             }
         }
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             if case .failed = connectionState {
                 return
             }
@@ -315,25 +233,46 @@ public final class Linn {
             guard let self else {
                 return
             }
+            var loadLibraryOnConnection = linnGateway is PiLinnGateway
 
             do {
-                let updates = await ciGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
+                let updates = await linnGateway.nowPlayingUpdates(room: requestedRoom, updateInterval: 1)
                 for try await update in updates {
+                    guard update.connectionStatus == .connected else {
+                        switch update.connectionStatus {
+                        case .serverUnreachable:
+                            connectionState = .serverUnreachable
+                        case .disconnected:
+                            connectionState = .linnUnavailable(update.connectionError)
+                        case .connecting:
+                            connectionState = update.connectionError.map { .linnUnavailable($0) } ?? .connecting
+                        case .connected:
+                            break
+                        }
+                        loadLibraryOnConnection = true
+                        continue
+                    }
                     apply(update)
                     connectionState = .connected
+                    if loadLibraryOnConnection {
+                        loadLibraryOnConnection = false
+                        loadLibrary()
+                    }
                 }
             } catch is CancellationError {
                 Self.logger.info("Linn now-playing update task cancelled")
                 connectionState = .idle
             } catch {
-                let message = String(describing: error)
+                let message = error.localizedDescription
                 Self.logger.error("Linn now-playing update task failed: \(message, privacy: .public)")
                 lastErrorMessage = message
                 connectionState = .failed(message)
             }
         }
 
-        loadLibrary()
+        if !(linnGateway is PiLinnGateway) {
+            loadLibrary()
+        }
     }
 
     public func stop() {
@@ -346,21 +285,21 @@ public final class Linn {
         if library.availability == .loading {
             library.availability = .unavailable
         }
-        guard ciGateway != nil else {
+        guard linnGateway != nil else {
             return
         }
         connectionState = .idle
     }
 
     public func play() {
-        performControl(optimisticState: .playing) { ciGateway, room in
-            try await ciGateway.play(room: room)
+        performControl { linnGateway, room in
+            try await linnGateway.play(room: room)
         }
     }
 
     public func pause() {
-        performControl(optimisticState: .paused) { ciGateway, room in
-            try await ciGateway.pause(room: room)
+        performControl { linnGateway, room in
+            try await linnGateway.pause(room: room)
         }
     }
 
@@ -373,19 +312,21 @@ public final class Linn {
     }
 
     public func previous() {
-        guard hasPrevious, let currentIndex = playlist.currentIndex else {
+        guard hasPrevious else {
             return
         }
-
-        selectQueueIndex(currentIndex - 1, kind: .skip)
+        performControl { linnGateway, room in
+            try await linnGateway.previous(room: room)
+        }
     }
 
     public func next() {
-        guard hasNext, let currentIndex = playlist.currentIndex else {
+        guard hasNext else {
             return
         }
-
-        selectQueueIndex(currentIndex + 1, kind: .skip)
+        performControl { linnGateway, room in
+            try await linnGateway.next(room: room)
+        }
     }
 
     public func play(_ song: Song) {
@@ -393,7 +334,16 @@ public final class Linn {
             return
         }
 
-        selectQueueIndex(targetQueueIndex, optimisticSong: song, kind: .queueItem)
+        pendingQueueIndex = targetQueueIndex
+        pendingQueueExpiresAt = Date().addingTimeInterval(6)
+        performControl(onFailure: { [weak self] in
+            if self?.pendingQueueIndex == targetQueueIndex {
+                self?.pendingQueueIndex = nil
+                self?.pendingQueueExpiresAt = nil
+            }
+        }) { linnGateway, room in
+            try await linnGateway.selectPlaylistItem(at: targetQueueIndex, room: room)
+        }
     }
 
     public func setVolume(_ volume: Int) {
@@ -405,8 +355,8 @@ public final class Linn {
             target: clampedVolume,
             expiresAt: Date().addingTimeInterval(2.5)
         )
-        performControl { ciGateway, room in
-            try await ciGateway.setVolume(clampedVolume, room: room)
+        performControl { linnGateway, room in
+            try await linnGateway.setVolume(clampedVolume, room: room, group: false)
         }
     }
 
@@ -416,8 +366,8 @@ public final class Linn {
             target: isMuted,
             expiresAt: Date().addingTimeInterval(2.5)
         )
-        performControl { ciGateway, room in
-            try await ciGateway.setMuted(isMuted, room: room)
+        performControl { linnGateway, room in
+            try await linnGateway.setMuted(isMuted, room: room, group: false)
         }
     }
 
@@ -437,7 +387,7 @@ public final class Linn {
 
         libraryTask?.cancel()
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             library = Library(availability: .unavailable)
             libraryContentRevision = nil
             libraryPageCache = [:]
@@ -445,13 +395,13 @@ public final class Linn {
         }
 
         library.availability = .loading
-        libraryTask = Task { [weak self, ciGateway, room] in
+        libraryTask = Task { [weak self, linnGateway, room] in
             guard let self else {
                 return
             }
 
             do {
-                let services = try await ciGateway.mediaServices(room: room)
+                let services = try await linnGateway.mediaServices(room: room)
                 try Task.checkCancellation()
                 guard let qobuzService = services.first(where: { $0.name.localizedCaseInsensitiveCompare("Qobuz") == .orderedSame }) else {
                     let availableServices = Self.availableMediaServicesDescription(services)
@@ -461,24 +411,24 @@ public final class Linn {
                     return
                 }
 
-                let rootPage = try await ciGateway.browseMedia(
+                let rootPage = try await linnGateway.browseMedia(
                     mediaID: qobuzService.id,
                     index: 0,
                     count: 50,
                     browseType: ""
                 )
-                let libraryRootPage = LibraryPage(rootPage)
+                let libraryRootPage = rootPage
                 reconcileLibraryRevision(libraryRootPage.contentRevision)
                 cache(libraryRootPage, mediaID: qobuzService.id, browseType: "")
 
                 let sections = await buildLibrarySections(
                     rootPage: libraryRootPage,
-                    gateway: ciGateway
+                    gateway: linnGateway
                 )
                 try Task.checkCancellation()
                 library = Library(
                     availability: .available,
-                    qobuzService: LibraryService(qobuzService),
+                    qobuzService: qobuzService,
                     rootPage: libraryRootPage,
                     sections: sections
                 )
@@ -489,7 +439,7 @@ public final class Linn {
                 guard !Task.isCancelled else {
                     return
                 }
-                let message = String(describing: error)
+                let message = error.localizedDescription
                 Self.logger.error("Qobuz library load failed: \(message, privacy: .public)")
                 library.availability = .failed(message)
             }
@@ -507,12 +457,12 @@ public final class Linn {
             return cached
         }
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             throw LibraryError.unavailable
         }
 
-        let page = try await ciGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
-        let libraryPage = LibraryPage(page)
+        let page = try await linnGateway.browseMedia(mediaID: item.id, index: index, count: count, browseType: browseType)
+        let libraryPage = page
         reconcileLibraryRevision(libraryPage.contentRevision)
         if index == 0 {
             cache(libraryPage, mediaID: item.id, browseType: browseType)
@@ -530,59 +480,59 @@ public final class Linn {
         guard !trimmedQuery.isEmpty else {
             return LibraryPage(id: "search", index: index)
         }
-        guard let ciGateway, let serviceID = library.qobuzService?.id else {
+        guard let linnGateway, let serviceID = library.qobuzService?.id else {
             throw LibraryError.unavailable
         }
 
-        let page = try await ciGateway.searchMedia(
+        let page = try await linnGateway.searchMedia(
             serviceID: serviceID,
             query: trimmedQuery,
-            type: CiGateway.MediaSearchType(type),
+            type: type,
             index: index,
             count: count
         )
-        return LibraryPage(page)
+        return page
     }
 
     public func play(_ item: LibraryItem, placement: QueuePlacement = .replace) {
-        guard ciGateway != nil else {
+        guard linnGateway != nil else {
             return
         }
-
-        let startsPlaying = placement == .replace || placement == .now
-        let previewGeneration = startsPlaying ? previewMediaSelection(item) : nil
-        queueCommandGeneration += 1
-        let command = queueCommandGeneration
-        let trackCount = queuedTrackCount(for: item)
-        anticipateQueueLength(adding: trackCount, placement: placement, command: command)
-
-        performControl(onFailure: { [weak self] in
-            self?.retractQueueLength(adding: trackCount, placement: placement, command: command)
-            if let previewGeneration {
-                self?.revertMediaSelectionPreview(generation: previewGeneration)
-            }
-        }) { ciGateway, room in
-            try await ciGateway.selectMedia(
+        let serverPreview = mediaSelectionServerPreview(for: item)
+        performControl { linnGateway, room in
+            try await linnGateway.selectMedia(
                 mediaID: item.id,
                 room: room,
-                queue: CiGateway.QueuePlacement(placement)
+                queue: placement,
+                preview: serverPreview
             )
         }
     }
 
+    private func mediaSelectionServerPreview(for item: LibraryItem) -> LibraryItem? {
+        guard !item.title.isEmpty else { return nil }
+        var preview = item
+        if item.isContainer {
+            // Preserve the container type for the server's queue count logic.
+            // The server can use its first-track cache for the song preview.
+            preview.childCount = queuedTrackCount(for: item)
+        }
+        return preview
+    }
+
     public func setFavourite(_ item: LibraryItem, isFavourite: Bool) {
-        guard item.canFavourite, let ciGateway else {
+        guard item.canFavourite, item.isFavourite != nil, let linnGateway else {
             return
         }
 
         updateLibraryItem(id: item.id, isFavourite: isFavourite)
-        Task { [weak self, ciGateway] in
+        Task { [weak self, linnGateway] in
             do {
-                try await ciGateway.setMediaFavourite(mediaID: item.id, isFavourite: isFavourite)
+                try await linnGateway.setMediaFavourite(mediaID: item.id, isFavourite: isFavourite)
             } catch is CancellationError {
             } catch {
                 self?.updateLibraryItem(id: item.id, isFavourite: item.isFavourite)
-                self?.lastErrorMessage = String(describing: error)
+                self?.lastErrorMessage = error.localizedDescription
             }
         }
     }
@@ -604,7 +554,7 @@ public final class Linn {
         libraryPageCache = [:]
     }
 
-    private static func availableMediaServicesDescription(_ services: [CiGateway.MediaService]) -> String {
+    private static func availableMediaServicesDescription(_ services: [LibraryService]) -> String {
         guard !services.isEmpty else {
             return "none"
         }
@@ -765,7 +715,7 @@ public final class Linn {
         gateway: any LinnGateway
     ) async -> [LibraryItem] {
         let page = try? await gateway.browseMedia(mediaID: item.id, index: 0, count: 50, browseType: "")
-        let libraryPage = page.map(LibraryPage.init)
+        let libraryPage = page
         if let libraryPage {
             reconcileLibraryRevision(libraryPage.contentRevision)
             cache(libraryPage, mediaID: item.id, browseType: "")
@@ -855,11 +805,9 @@ public final class Linn {
         }
     }
 
-    private func apply(_ update: CiGateway.NowPlaying) {
-        let suppressNowPlayingFields = shouldSuppressNowPlayingFields(incomingQueueIndex: update.queue?.index)
-
-        playState = reconciledPlayState(incoming: PlayState(update.playback))
-        playlist.total = update.queue?.length ?? playlist.total
+    private func apply(_ update: LinnGatewayData.NowPlaying) {
+        playState = PlayState(update.playback)
+        playlist.total = update.queue?.length
         if let playlist = update.playlist {
             if let contentRevision = playlist.contentRevision, contentRevision != playlistContentRevision {
                 playlistSongsByIndex = [:]
@@ -875,39 +823,37 @@ public final class Linn {
         if let incomingQueueIndex = update.queue?.index {
             incomingCurrentSong?.queueIndex = incomingQueueIndex
         }
-        reportedSong = incomingCurrentSong
-        reportedTimeline = Timeline(update.timeline)
-
-        if !suppressNowPlayingFields {
-            let wasPreviewingMedia = isPreviewingMedia
-            // The queue position follows the device either way; only the
-            // song shown as playing is held on the preview.
-            if shouldHoldMediaSelectionPreview(incoming: incomingCurrentSong) {
-                playlist.currentIndex = update.queue?.index
-            } else {
-                // The preview already moved forward; the new queue's index
-                // says nothing about direction relative to the old one.
-                if !wasPreviewingMedia {
-                    updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
-                }
-                currentSong = incomingCurrentSong
-                if let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
-                    playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
-                }
-                playlist.currentIndex = update.queue?.index
-                timeline = reportedTimeline
-            }
+        if update.pending.queueTotal && update.pending.currentItem {
+            // A new queue starts at its first row even when its index is
+            // numerically lower than the old queue's playing row.
+            songTransitionDirection = .forward
+        } else {
+            updateSongTransitionDirection(incomingQueueIndex: update.queue?.index)
         }
-
-        reconcilePlaylistSelectionConfirmation(incomingQueueIndex: update.queue?.index)
-        reconcilePendingQueueLength()
+        currentSong = incomingCurrentSong
+        playlist.currentIndex = update.queue?.index
+        timeline = Timeline(update.timeline)
+        if !update.pending.currentItem && !update.pending.queueIndex,
+           let incomingQueueIndex = update.queue?.index, let incomingCurrentSong {
+            playlistSongsByIndex[incomingQueueIndex] = incomingCurrentSong
+        }
+        if let pendingQueueIndex,
+           (pendingQueueExpiresAt.map({ Date() >= $0 }) ?? true
+            || (!update.pending.queueIndex && update.queue?.index == pendingQueueIndex)) {
+            self.pendingQueueIndex = nil
+            pendingQueueExpiresAt = nil
+        }
         updatePlaylistSongs()
+        if let serverMaximum = update.roomState?.maximumVolume, serverMaximum > 0 {
+            maximumVolume = serverMaximum
+        }
         let incomingVolume = update.roomState?.volume.map { min($0, maximumVolume) }
         volume = reconcileOptimistic(
             &optimisticVolume,
             target: \.target,
             expiresAt: \.expiresAt,
             incoming: incomingVolume,
+            confirmed: !update.pending.volume,
             matches: { $0 == $1 }
         ) ?? incomingVolume
         let incomingMuted = update.roomState?.isMuted
@@ -916,136 +862,9 @@ public final class Linn {
             target: \.target,
             expiresAt: \.expiresAt,
             incoming: incomingMuted,
+            confirmed: !update.pending.mute,
             matches: { $0 == $1 }
         ) ?? incomingMuted
-    }
-
-    private func selectQueueIndex(
-        _ targetQueueIndex: Int,
-        optimisticSong: Song? = nil,
-        kind: PlaylistSelectionJob.Kind
-    ) {
-        if targetQueueIndex < 0 {
-            return
-        }
-        if let total = playlist.total, targetQueueIndex >= total {
-            return
-        }
-
-        switch kind {
-        case .skip:
-            optimisticallySelectQueueIndex(targetQueueIndex, song: optimisticSong ?? playlistSongsByIndex[targetQueueIndex])
-        case .queueItem:
-            pendingPlayback = .queueItem(targetIndex: targetQueueIndex)
-        }
-        enqueuePlaylistSelection(PlaylistSelectionJob(targetIndex: targetQueueIndex, kind: kind))
-    }
-
-    private func optimisticallySelectQueueIndex(_ targetQueueIndex: Int, song: Song?) {
-        updateSongTransitionDirection(incomingQueueIndex: targetQueueIndex)
-        pendingPlayback = .skip(targetIndex: targetQueueIndex, expiresAt: Date().addingTimeInterval(4))
-
-        guard var selectedSong = song else {
-            currentSong = nil
-            playlist.currentIndex = targetQueueIndex
-            timeline = nil
-            updatePlaylistSongs()
-            return
-        }
-
-        selectedSong.queueIndex = targetQueueIndex
-        playlistSongsByIndex[targetQueueIndex] = selectedSong
-        currentSong = selectedSong
-        playlist.currentIndex = targetQueueIndex
-        timeline = nil
-        updatePlaylistSongs()
-    }
-
-    private func enqueuePlaylistSelection(_ job: PlaylistSelectionJob) {
-        lastErrorMessage = nil
-
-        guard ciGateway != nil else {
-            return
-        }
-
-        if let jobToSend = playlistSelectionQueue.enqueue(job) {
-            sendPlaylistSelection(jobToSend)
-        }
-    }
-
-    private func sendPlaylistSelection(_ job: PlaylistSelectionJob) {
-        guard let ciGateway else {
-            return
-        }
-
-        playlistSelectionTimeoutTask?.cancel()
-        playlistSelectionTimeoutTask = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(6))
-            } catch {
-                // Cancelled — the selection was confirmed or superseded. A
-                // swallowed `try?` here would run the timeout body immediately.
-                return
-            }
-            self?.playlistSelectionTimedOut(job)
-        }
-
-        playlistSelectionTask = Task { [ciGateway, room] in
-            do {
-                try await ciGateway.selectPlaylistItem(at: job.targetIndex, room: room)
-            } catch is CancellationError {
-            } catch {
-                let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
-                if failure.failed {
-                    playlistSelectionTimeoutTask?.cancel()
-                    lastErrorMessage = String(describing: error)
-                    clearPendingQueueItem(failedJob: job)
-                }
-                if let nextJob = failure.next {
-                    sendPlaylistSelection(nextJob)
-                }
-            }
-        }
-    }
-
-    private func reconcilePlaylistSelectionConfirmation(incomingQueueIndex: Int?) {
-        guard let incomingQueueIndex else {
-            return
-        }
-
-        // Reaching the tapped row confirms it — unless that row's own
-        // selection is still waiting to be sent, and the device is just on
-        // it from before.
-        if case .queueItem(targetIndex: incomingQueueIndex) = pendingPlayback,
-           playlistSelectionQueue.pending?.targetIndex != incomingQueueIndex {
-            pendingPlayback = nil
-        }
-
-        let confirmation = playlistSelectionQueue.confirm(targetIndex: incomingQueueIndex)
-        if confirmation.confirmed {
-            playlistSelectionTimeoutTask?.cancel()
-        }
-        if let nextJob = confirmation.next {
-            sendPlaylistSelection(nextJob)
-        }
-    }
-
-    private func playlistSelectionTimedOut(_ job: PlaylistSelectionJob) {
-        let failure = playlistSelectionQueue.fail(targetIndex: job.targetIndex)
-        if failure.failed {
-            clearPendingQueueItem(failedJob: job)
-        }
-        if let nextJob = failure.next {
-            sendPlaylistSelection(nextJob)
-        }
-    }
-
-    /// A newer request already replaced `pendingPlayback`, so only a still
-    /// pending tap on the failed row is cleared.
-    private func clearPendingQueueItem(failedJob: PlaylistSelectionJob) {
-        if case .queueItem(targetIndex: failedJob.targetIndex) = pendingPlayback {
-            pendingPlayback = nil
-        }
     }
 
     private func updateSongTransitionDirection(incomingQueueIndex: Int?) {
@@ -1056,84 +875,7 @@ public final class Linn {
         songTransitionDirection = incomingQueueIndex > currentIndex ? .forward : .backward
     }
 
-    /// Shows `item` as the current song right away. Returns the selection's
-    /// generation, or nil when there's nothing meaningful to show.
-    private func previewMediaSelection(_ item: LibraryItem) -> Int? {
-        guard let preview = mediaSelectionPreview(for: item) else {
-            return nil
-        }
-
-        // Songs from requests this one supersedes can still reach the device
-        // (a skip already sent, an earlier start still loading); reporting
-        // them doesn't mean the selection is playing.
-        var supersededTitles: [String] = []
-        switch pendingPlayback {
-        case let .media(earlier):
-            supersededTitles = earlier.supersededTitles + [earlier.preview.title]
-            if let expectedTitle = earlier.expectedTitle {
-                supersededTitles.append(expectedTitle)
-            }
-        case .skip, .queueItem, nil:
-            break
-        }
-        let selectionTargets = [playlistSelectionQueue.inFlight, playlistSelectionQueue.pending]
-            .compactMap { $0?.targetIndex }
-        supersededTitles += selectionTargets.compactMap { playlistSongsByIndex[$0]?.title }
-        // A queued skip or row tap would otherwise be sent into the new queue.
-        playlistSelectionQueue.discardPending()
-
-        mediaSelectionGeneration += 1
-        pendingPlayback = .media(MediaSelection(
-            generation: mediaSelectionGeneration,
-            preview: preview.song,
-            expectedTitle: preview.expectedTitle,
-            replacedSong: reportedSong,
-            supersededTitles: supersededTitles,
-            playlistRevision: playlistContentRevision,
-            expiresAt: Date().addingTimeInterval(8)
-        ))
-        songTransitionDirection = .forward
-        currentSong = preview.song
-        timeline = nil
-        return mediaSelectionGeneration
-    }
-
-    private func mediaSelectionPreview(for item: LibraryItem) -> (song: Song, expectedTitle: String?)? {
-        // Hey Louie starts media by id alone.
-        guard !item.title.isEmpty else {
-            return nil
-        }
-
-        guard item.isContainer else {
-            return (Self.previewSong(item), item.title)
-        }
-
-        // An album or playlist starts at its first track. The detail screen
-        // has usually browsed it already; otherwise show the container itself
-        // until the device reports the track.
-        let firstTrack = libraryPageCache[LibraryCacheKey(mediaID: item.id, browseType: "")]?
-            .items.first { !$0.isContainer && !$0.title.isEmpty }
-        if let firstTrack {
-            return (Self.previewSong(firstTrack, container: item), firstTrack.title)
-        }
-        return (Self.previewSong(item), nil)
-    }
-
-    private static func previewSong(_ item: LibraryItem, container: LibraryItem? = nil) -> Song {
-        let artists = item.artists.isEmpty ? container?.artists ?? [] : item.artists
-        return Song(
-            id: "preview|\(item.id)",
-            title: item.title,
-            artist: artists.isEmpty ? item.subtitle : artists.joined(separator: ", "),
-            album: item.album ?? container?.title,
-            duration: item.duration,
-            artworkURL: item.artworkURL ?? container?.artworkURL
-        )
-    }
-
-    /// Songs a library item adds to the queue, when that's known without
-    /// asking the device: one for a track, the track list of an album or
-    /// playlist that was browsed or reports its size.
+    /// Passes a known track count to the server for its queue prediction.
     private func queuedTrackCount(for item: LibraryItem) -> Int? {
         if item.kind.contains("track") {
             return 1
@@ -1156,162 +898,7 @@ public final class Linn {
         return nil
     }
 
-    private func anticipateQueueLength(adding trackCount: Int?, placement: QueuePlacement, command: Int) {
-        let expiresAt = Date().addingTimeInterval(6)
-        if placement == .replace {
-            pendingQueueLength = PendingQueueLength(
-                total: trackCount,
-                currentIndex: trackCount.map { _ in 0 },
-                requiresNewRevision: true,
-                revisionAtRequest: playlistContentRevision,
-                replaceCommand: command,
-                expiresAt: expiresAt
-            )
-            return
-        }
-        // An addition of unknown size only delays the count until the device
-        // reports it; one that starts playing changes what's left.
-        if trackCount == nil, placement != .now {
-            return
-        }
-
-        // Additions stack on anything still pending.
-        let pending = pendingQueueLength
-        let baseTotal = pending.map(\.total) ?? playlist.total ?? 0
-        var currentIndex = pending?.currentIndex
-        if placement == .now {
-            currentIndex = (currentIndex ?? pendingQueueIndex ?? playlist.currentIndex ?? -1) + 1
-        }
-        pendingQueueLength = PendingQueueLength(
-            total: baseTotal.flatMap { total in trackCount.map { total + $0 } },
-            currentIndex: currentIndex,
-            requiresNewRevision: pending?.requiresNewRevision ?? (trackCount == nil),
-            revisionAtRequest: pending?.revisionAtRequest ?? playlistContentRevision,
-            replaceCommand: pending?.replaceCommand,
-            expiresAt: expiresAt
-        )
-    }
-
-    /// Takes a failed command's share back out of the anticipated count.
-    private func retractQueueLength(adding trackCount: Int?, placement: QueuePlacement, command: Int) {
-        guard var pending = pendingQueueLength else {
-            return
-        }
-
-        switch placement {
-        case .replace:
-            // A newer replace owns the count now.
-            if pending.replaceCommand == command {
-                pendingQueueLength = nil
-            }
-        case .now:
-            // It also moved where the count starts; the device's is safe.
-            pendingQueueLength = nil
-        case .next, .last:
-            let stillCounted = pending.replaceCommand.map { command > $0 } ?? true
-            guard stillCounted, let trackCount, let total = pending.total else {
-                return
-            }
-            pending.total = total - trackCount
-            pendingQueueLength = pending
-        }
-    }
-
-    private func reconcilePendingQueueLength() {
-        guard let pending = pendingQueueLength else {
-            return
-        }
-
-        let landed = (pending.total == nil || playlist.total == pending.total)
-            && (!pending.requiresNewRevision || playlistContentRevision != pending.revisionAtRequest)
-        if landed || Date() >= pending.expiresAt {
-            pendingQueueLength = nil
-        }
-    }
-
-    private func revertMediaSelectionPreview(generation: Int) {
-        guard case let .media(selection) = pendingPlayback, selection.generation == generation else {
-            return
-        }
-
-        pendingPlayback = nil
-        songTransitionDirection = .backward
-        currentSong = reportedSong
-        timeline = reportedTimeline
-    }
-
-    /// Keeps the preview while the device reports nothing (loading) or a song
-    /// that isn't the selection yet. Until the queue revision changes, only
-    /// the expected track counts as playing; after it, any song that isn't
-    /// left over from before — or one the new queue confirms at its index,
-    /// which covers restarting what was already playing.
-    private func shouldHoldMediaSelectionPreview(incoming: Song?) -> Bool {
-        guard case let .media(selection) = pendingPlayback else {
-            return false
-        }
-
-        if Date() >= selection.expiresAt {
-            pendingPlayback = nil
-            return false
-        }
-
-        guard let incoming else {
-            return true
-        }
-
-        func sameTitle(_ title: String) -> Bool {
-            incoming.title.localizedCaseInsensitiveCompare(title) == .orderedSame
-        }
-
-        let isStale = selection.replacedSong.map { replaced in
-            incoming.title == replaced.title && incoming.artist == replaced.artist
-        } ?? false || selection.supersededTitles.contains(where: sameTitle)
-        let isExpected = selection.expectedTitle.map(sameTitle) ?? false
-
-        let released: Bool
-        if selection.playlistRevision == nil {
-            // No revisions from this gateway: the best signal is a new song.
-            released = !isStale
-        } else if playlistContentRevision == selection.playlistRevision {
-            released = isExpected && !isStale
-        } else {
-            let matchesNewQueue = incoming.queueIndex
-                .flatMap { playlistSongsByIndex[$0] }
-                .map { sameTitle($0.title) } ?? false
-            released = !isStale || isExpected || matchesNewQueue
-        }
-
-        if released {
-            pendingPlayback = nil
-        }
-        return !released
-    }
-
-    /// After previous/next, ignores stale updates until the device reaches
-    /// the target index or the skip expires.
-    private func shouldSuppressNowPlayingFields(incomingQueueIndex: Int?) -> Bool {
-        guard case let .skip(targetIndex, expiresAt) = pendingPlayback else {
-            return false
-        }
-
-        if Date() >= expiresAt || incomingQueueIndex == targetIndex {
-            pendingPlayback = nil
-            return false
-        }
-        return true
-    }
-
-    private func reconciledPlayState(incoming: PlayState?) -> PlayState? {
-        reconcileOptimistic(
-            &optimisticPlayState,
-            target: \.targetState,
-            expiresAt: \.expiresAt,
-            incoming: incoming,
-            matches: { $0 == $1 }
-        ) ?? incoming
-    }
-
-    /// Holds an optimistic value (play state, volume, mute) until either:
+    /// Holds a local control value (volume or mute) until either:
     /// the device reports a matching state (clear, accept it), the optimistic
     /// expires (clear, accept whatever just arrived), or neither (keep holding).
     /// Returns the target value while holding, otherwise nil.
@@ -1320,6 +907,7 @@ public final class Linn {
         target: (State) -> Target,
         expiresAt: (State) -> Date,
         incoming: Incoming,
+        confirmed: Bool = true,
         matches: (Incoming, Target) -> Bool
     ) -> Target? {
         guard let current = state else {
@@ -1331,7 +919,7 @@ public final class Linn {
             return nil
         }
 
-        if matches(incoming, target(current)) {
+        if confirmed && matches(incoming, target(current)) {
             state = nil
             return nil
         }
@@ -1361,22 +949,12 @@ public final class Linn {
     }
 
     private func performControl(
-        optimisticState: PlayState? = nil,
         onFailure: (@MainActor () -> Void)? = nil,
         operation: @escaping (any LinnGateway, String) async throws -> Void
     ) {
-        let previousPlayState = playState
-        if let optimisticState {
-            optimisticPlayState = OptimisticPlayState(
-                targetState: optimisticState,
-                previousState: previousPlayState,
-                expiresAt: Date().addingTimeInterval(4)
-            )
-            playState = optimisticState
-        }
         lastErrorMessage = nil
 
-        guard let ciGateway else {
+        guard let linnGateway else {
             return
         }
 
@@ -1384,20 +962,20 @@ public final class Linn {
         // favourites must not cancel each other. (Rapid Enqueue-then-pause used
         // to silently drop the enqueue.) Each command is short-lived — the
         // gateway acks or times out within seconds.
-        Task { [weak self, ciGateway, room] in
+        Task { [weak self, linnGateway, room] in
             do {
-                try await operation(ciGateway, room)
+                try await operation(linnGateway, room)
             } catch is CancellationError {
+                onFailure?()
             } catch {
                 guard let self else {
                     return
                 }
-                if let optimisticState, self.optimisticPlayState?.targetState == optimisticState {
-                    self.playState = self.optimisticPlayState?.previousState
-                    self.optimisticPlayState = nil
+                if let serverError = error as? PiLinnRPCError, serverError.reason == .linnRejected {
+                    Self.logger.error("Linn rejected command: \(serverError.message, privacy: .private)")
                 }
                 onFailure?()
-                self.lastErrorMessage = String(describing: error)
+                self.lastErrorMessage = error.localizedDescription
             }
         }
     }
@@ -1426,7 +1004,7 @@ public final class Linn {
 
         /// Preview/mock-only adapter from button availability flags to the internal queue shape.
         ///
-        /// Production state comes from `CiGateway.NowPlaying.Queue`, where `hasPrevious`
+        /// Production state comes from `LinnGatewayData.NowPlaying.Queue`, where `hasPrevious`
         /// and `hasNext` are derived from the playlist current index and total. The debug mock
         /// initializer accepts direct booleans because previews usually care about the
         /// visible button states, not a realistic queue position.

@@ -209,7 +209,6 @@
 			mainGroup = 241AC60D2FB3177900C7A37D;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				241AC65A2FB395E800C7A37D /* XCLocalSwiftPackageReference "Packages/LinnCiGateway" */,
 				241AC65D2FB3960800C7A37D /* XCLocalSwiftPackageReference "Packages/Linn" */,
 				24CAE00C2FB884D30085ADFF /* XCRemoteSwiftPackageReference "Nuke" */,
 				248FC7FA2FC5C2C900066145 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
@@ -597,10 +596,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		241AC65A2FB395E800C7A37D /* XCLocalSwiftPackageReference "Packages/LinnCiGateway" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/LinnCiGateway;
-		};
 		241AC65D2FB3960800C7A37D /* XCLocalSwiftPackageReference "Packages/Linn" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/Linn;

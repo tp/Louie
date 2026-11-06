@@ -1,112 +1,46 @@
 import Foundation
 @testable import Linn
-import LinnCiGateway
 import Testing
 
 @Test
 @MainActor
-func nextUsesForwardDirectionAndSuppressesStaleNowPlayingFields() async throws {
+func predictedSongClearsThePreviousTrackTimeline() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
     linn.start()
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "One"
-    }
+    await gateway.send(nowPlaying(index: 0, titles: ["First", "Second"], position: 45))
+    try await waitUntil { linn.timeline?.position == 45 }
 
-    linn.next()
-
-    #expect(linn.songTransitionDirection == .forward)
-    #expect(linn.currentSong?.title == "Two")
+    var predicted = nowPlaying(index: 1, titles: ["First", "Second"], position: 0)
+    predicted.timeline = nil
+    predicted.pending.playback = true
+    predicted.pending.queue = true
+    predicted.pending.queueIndex = true
+    predicted.pending.currentItem = true
+    predicted.pending.timeline = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "Second" }
     #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-
-    #expect(linn.currentSong?.title == "Two")
-    #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 2, titles: titles, position: 9, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-
-    #expect(linn.currentSong?.title == "Two")
-    #expect(linn.timeline?.position == 9)
-    #expect(await gateway.selectedPlaylistIndexes() == [2])
-    #expect(await gateway.nextCallCount() == 0)
 }
 
 @Test
 @MainActor
-func previousUsesBackwardDirectionAndSuppressesStaleNowPlayingFields() async throws {
+func aDisconnectedServerSnapshotCanRecoverWithoutRestartingLinn() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
     linn.start()
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "One"
-    }
 
-    linn.previous()
+    await gateway.send(nowPlaying(index: 0, titles: ["First"], volume: 10))
+    try await waitUntil { linn.connectionState == .connected }
 
-    #expect(linn.songTransitionDirection == .backward)
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline == nil)
+    var disconnected = LinnGatewayData.NowPlaying(room: "Linn", session: "")
+    disconnected.connectionStatus = .disconnected
+    await gateway.send(disconnected)
+    try await waitUntil { linn.connectionState == .linnUnavailable(nil) }
+    #expect(linn.currentSong?.title == "First")
 
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline == nil)
-
-    await gateway.send(nowPlaying(index: 0, titles: titles, position: 7, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline?.position == 7)
-    #expect(await gateway.selectedPlaylistIndexes() == [0])
-    #expect(await gateway.previousCallCount() == 0)
-}
-
-@Test
-@MainActor
-func previousCanUseCurrentSongCachedFromEarlierUpdates() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles, playlistIndexes: [1, 2]))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.next()
-    #expect(linn.currentSong?.title == "One")
-
-    await gateway.send(nowPlaying(index: 1, titles: titles, playlistIndexes: [2]))
-    try await waitUntil {
-        linn.timeline?.position == 1
-    }
-
-    #expect(linn.playlist.songs.map(\.title) == ["Zero", "One", "Two"])
-    #expect(linn.playlist.currentIndex == 1)
-
-    linn.previous()
-
-    #expect(linn.songTransitionDirection == .backward)
-    #expect(linn.currentSong?.title == "Zero")
+    await gateway.send(nowPlaying(index: 0, titles: ["Second"], volume: 12))
+    try await waitUntil { linn.connectionState == .connected && linn.currentSong?.title == "Second" }
 }
 
 @Test
@@ -196,97 +130,6 @@ func playlistTracksDeviceCurrentIndexAndKeepsPreviousItems() async throws {
 
 @Test
 @MainActor
-func rapidPlaylistSelectionsSendOnlyFirstAndLatestPendingTarget() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    await gateway.suspendSelections()
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.next()
-    linn.next()
-    linn.next()
-
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1]
-    }
-
-    await gateway.send(nowPlaying(index: 1, titles: titles))
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1, 3]
-    }
-
-    await gateway.resumeSelections()
-}
-
-@Test
-@MainActor
-func rapidQueueItemSelectionsShowLatestPendingTarget() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.playlist.songs.count == 4
-    }
-
-    let one = try #require(linn.playlist.songs.first { $0.title == "One" })
-    let three = try #require(linn.playlist.songs.first { $0.title == "Three" })
-
-    linn.play(one)
-    linn.play(three)
-
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.pendingQueueIndex == 3)
-    #expect(linn.remainingQueueCount == 0)
-
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1]
-    }
-
-    await gateway.send(nowPlaying(index: 1, titles: titles))
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [1, 3]
-    }
-
-    #expect(linn.pendingQueueIndex == 3)
-
-    await gateway.send(nowPlaying(index: 3, titles: titles))
-    try await waitUntil {
-        linn.pendingQueueIndex == nil
-    }
-
-    #expect(linn.currentSong?.title == "Three")
-}
-
-@Test
-@MainActor
-func remainingQueueCountTracksOptimisticSkipPosition() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.remainingQueueCount == 3
-    }
-
-    linn.next()
-
-    #expect(linn.playlist.currentIndex == 1)
-    #expect(linn.remainingQueueCount == 2)
-}
-
-@Test
-@MainActor
 func libraryDiscoversQobuzAndUsesCachedBrowsedSections() async throws {
     let gateway = TestGateway()
     await gateway.seedQobuzLibrary(contentRevision: 1)
@@ -371,7 +214,7 @@ func qobuzRootFoldersExposeSectionsWithoutBrowsingMediaItems() async throws {
 func libraryReportsAvailableServicesWhenQobuzIsMissing() async throws {
     let gateway = TestGateway()
     await gateway.seedMediaServices([
-        CiGateway.MediaService(id: "service-airable", name: "Airable", kind: "md.airable"),
+        LinnGatewayData.MediaService(id: "service-airable", name: "Airable", kind: "md.airable"),
     ])
     let linn = Linn(gateway: gateway)
 
@@ -672,20 +515,20 @@ func rapidCommandsRunIndependentlyWithoutCancellingEachOther() async throws {
 @Test
 @MainActor
 func queueSongIdentityIsContentBasedAndStableAcrossSources() async throws {
-    func update(index: Int, volume: Int) -> CiGateway.NowPlaying {
+    func update(index: Int, volume: Int) -> LinnGatewayData.NowPlaying {
         let names = ["Same", "Same", "Other"]
-        var nowPlaying = CiGateway.NowPlaying(room: "Linn", session: "test-session")
-        nowPlaying.playback = CiGateway.NowPlaying.Playback(transportState: .play)
-        nowPlaying.queue = CiGateway.NowPlaying.Queue(index: index, length: 3)
-        nowPlaying.currentItem = CiGateway.NowPlaying.CurrentItem(
+        var nowPlaying = LinnGatewayData.NowPlaying(room: "Linn", session: "test-session")
+        nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: .play)
+        nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: index, length: 3)
+        nowPlaying.currentItem = LinnGatewayData.NowPlaying.CurrentItem(
             id: "media-\(index)",
             kind: "md.track",
             displayName: names[index],
-            track: CiGateway.NowPlaying.Track(title: names[index], album: "Album", artist: "Artist")
+            track: LinnGatewayData.NowPlaying.Track(title: names[index], album: "Album", artist: "Artist")
         )
-        nowPlaying.playlist = CiGateway.NowPlaying.Playlist(
+        nowPlaying.playlist = LinnGatewayData.NowPlaying.Playlist(
             items: names.indices.map { i in
-                CiGateway.NowPlaying.PlaylistItem(
+                LinnGatewayData.NowPlaying.PlaylistItem(
                     index: i,
                     displayName: names[i],
                     album: "Album",
@@ -696,7 +539,7 @@ func queueSongIdentityIsContentBasedAndStableAcrossSources() async throws {
             total: 3,
             contentRevision: 1
         )
-        nowPlaying.roomState = CiGateway.NowPlaying.RoomState(volume: volume, isMuted: false)
+        nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: false)
         return nowPlaying
     }
 
@@ -776,7 +619,7 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
     #expect(linn.isMuted == true)
 
     var stale = nowPlaying(index: 0, titles: titles, position: 2, volume: 10)
-    stale.roomState = CiGateway.NowPlaying.RoomState(volume: 10, isMuted: false)
+    stale.roomState = LinnGatewayData.NowPlaying.RoomState(volume: 10, isMuted: false)
     await gateway.send(stale)
     try await waitUntil {
         linn.timeline?.position == 2
@@ -784,7 +627,7 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
     #expect(linn.isMuted == true)
 
     var confirmed = nowPlaying(index: 0, titles: titles, position: 3, volume: 10)
-    confirmed.roomState = CiGateway.NowPlaying.RoomState(volume: 10, isMuted: true)
+    confirmed.roomState = LinnGatewayData.NowPlaying.RoomState(volume: 10, isMuted: true)
     await gateway.send(confirmed)
     try await waitUntil {
         linn.timeline?.position == 3
@@ -792,125 +635,11 @@ func optimisticMuteHoldsAgainstStaleUpdates() async throws {
     #expect(linn.isMuted == true)
 
     var unmuted = nowPlaying(index: 0, titles: titles, position: 4, volume: 10)
-    unmuted.roomState = CiGateway.NowPlaying.RoomState(volume: 10, isMuted: false)
+    unmuted.roomState = LinnGatewayData.NowPlaying.RoomState(volume: 10, isMuted: false)
     await gateway.send(unmuted)
     try await waitUntil {
         linn.isMuted == false
     }
-}
-
-@Test
-@MainActor
-func startingALibraryTrackShowsItUntilTheDevicePlaysIt() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    let artwork = URL(string: "https://example.com/lunch.jpg")
-    let track = Linn.LibraryItem(
-        id: "track-lunch",
-        kind: "md.track.qobuz",
-        title: "Lunch",
-        album: "HIT ME HARD AND SOFT",
-        artists: ["Billie Eilish"],
-        artworkURL: artwork
-    )
-    linn.play(track, placement: .replace)
-
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.currentSong?.artist == "Billie Eilish")
-    #expect(linn.currentSong?.artworkURL == artwork)
-    #expect(linn.songTransitionDirection == .forward)
-    #expect(linn.timeline == nil)
-
-    // Before acting on the command the device keeps reporting the old song.
-    await gateway.send(nowPlaying(index: 0, titles: titles, position: 5, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.timeline == nil)
-
-    // Then it loads the new queue and reports no song at all.
-    var loading = nowPlaying(index: 0, titles: ["Lunch"], volume: 12)
-    loading.currentItem = nil
-    loading.playback = CiGateway.NowPlaying.Playback(transportState: .buffering)
-    loading.playlist?.contentRevision = 2
-    await gateway.send(loading)
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.playState == .buffering)
-
-    var playing = nowPlaying(index: 0, titles: ["Lunch"], position: 1, volume: 13)
-    playing.playlist?.contentRevision = 2
-    await gateway.send(playing)
-    try await waitUntil {
-        linn.volume == 13
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.currentSong?.artist == "Artist 0")
-    #expect(linn.timeline?.position == 1)
-    #expect(await gateway.selectedMediaItems() == [
-        TestGateway.SelectedMediaItem(mediaID: "track-lunch", room: "Linn", queue: .replace),
-    ])
-}
-
-@Test
-@MainActor
-func startingABrowsedAlbumShowsItsFirstTrack() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let albumArtwork = URL(string: "https://example.com/album.jpg")
-    await gateway.seedMediaPage(
-        CiGateway.MediaPage(
-            id: "album-x",
-            index: 0,
-            count: 2,
-            total: 2,
-            children: [
-                CiGateway.MediaItem(id: "track-1", kind: "md.track.qobuz", name: "Opener", duration: 201),
-                CiGateway.MediaItem(id: "track-2", kind: "md.track.qobuz", name: "Second"),
-            ]
-        ),
-        for: "album-x"
-    )
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"]))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    let album = Linn.LibraryItem(
-        id: "album-x",
-        kind: "md.album.qobuz",
-        title: "Album X",
-        artists: ["The Band"],
-        artworkURL: albumArtwork
-    )
-    _ = try await linn.browse(album)
-    linn.play(album, placement: .replace)
-
-    #expect(linn.currentSong?.title == "Opener")
-    #expect(linn.currentSong?.artist == "The Band")
-    #expect(linn.currentSong?.album == "Album X")
-    #expect(linn.currentSong?.artworkURL == albumArtwork)
-    #expect(linn.currentSong?.duration == 201)
-
-    // Not browsed yet: the album itself stands in until the device reports
-    // its first track.
-    let other = Linn.LibraryItem(id: "album-y", kind: "md.album.qobuz", title: "Album Y", artists: ["Someone"])
-    linn.play(other, placement: .now)
-    #expect(linn.currentSong?.title == "Album Y")
-    #expect(linn.currentSong?.artist == "Someone")
 }
 
 @Test
@@ -935,397 +664,98 @@ func enqueueingALibraryItemKeepsTheCurrentSong() async throws {
 
 @Test
 @MainActor
-func failedLibraryStartFallsBackToTheDevicesSong() async throws {
+func serverPredictionIsReplacedByTheNextServerState() async throws {
     let gateway = TestGateway()
-    await gateway.failMediaSelections()
     let linn = Linn(gateway: gateway)
-
     linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"], position: 42))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
+    await gateway.send(nowPlaying(index: 0, titles: ["Old", "Other"], volume: 10))
+    try await waitUntil { linn.currentSong?.title == "Old" }
 
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .replace)
-    #expect(linn.currentSong?.title == "Lunch")
+    var predicted = nowPlaying(index: 1, titles: ["Old", "Predicted"], position: 0, volume: 10)
+    predicted.pending.currentItem = true
+    predicted.pending.queueIndex = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "Predicted" }
+    #expect(linn.playlist.currentIndex == 1)
+    #expect(linn.songTransitionDirection == .forward)
 
-    try await waitUntil {
-        linn.lastErrorMessage != nil
-    }
-    #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline?.position == 42)
+    await gateway.send(nowPlaying(index: 0, titles: ["Actual", "Other"], position: 7, volume: 10))
+    try await waitUntil { linn.currentSong?.title == "Actual" }
+    #expect(linn.playlist.currentIndex == 0)
+    #expect(linn.timeline?.position == 7)
     #expect(linn.songTransitionDirection == .backward)
 }
 
 @Test
 @MainActor
-func restartingThePlayingSongWaitsForTheReplacedQueue() async throws {
+func predictedQueueReplaceAnimatesForwardFromAnEarlierIndex() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
-
     linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"], volume: 10))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
+    await gateway.send(nowPlaying(index: 2, titles: ["Zero", "One", "Old"]))
+    try await waitUntil { linn.currentSong?.title == "Old" }
 
-    let sameTrack = Linn.LibraryItem(id: "track-zero", kind: "md.track.qobuz", title: "Zero", artists: ["Artist 0"])
-    linn.play(sameTrack, placement: .replace)
+    var predicted = nowPlaying(index: 0, titles: ["New", "Second"])
+    predicted.pending.queueTotal = true
+    predicted.pending.currentItem = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "New" }
+    #expect(linn.songTransitionDirection == .forward)
+}
 
-    // The device's report of the same song can't be told apart from the
-    // stale one until the queue was actually replaced.
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero"], position: 30, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.timeline == nil)
+@Test
+@MainActor
+func doubleSkipIsSentToTheServerWithoutLocalQueuePrediction() async throws {
+    let gateway = TestGateway()
+    let linn = Linn(gateway: gateway)
+    linn.start()
+    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two"]))
+    try await waitUntil { linn.currentSong?.title == "Zero" }
 
-    var restarted = nowPlaying(index: 0, titles: ["Zero"], position: 0, volume: 12)
-    restarted.playlist?.contentRevision = 2
-    await gateway.send(restarted)
-    try await waitUntil {
-        linn.volume == 12
-    }
+    linn.next()
+    linn.next()
+    try await waitUntil { await gateway.nextCallCount() == 2 }
     #expect(linn.currentSong?.title == "Zero")
-    #expect(linn.timeline?.position == 0)
-}
+    #expect(linn.playlist.currentIndex == 0)
 
-@Test
-@MainActor
-func skippingAfterStartingALibraryItemReplacesItsPreview() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .replace)
-    #expect(linn.currentSong?.title == "Lunch")
-
-    linn.next()
-    #expect(linn.currentSong?.title == "One")
-
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.currentSong?.title == "One")
-}
-
-@Test
-@MainActor
-func aSupersededSkipLandingDoesNotEndTheLibraryPreview() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-
-    linn.next()
-    linn.next()
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .replace)
-    #expect(linn.currentSong?.title == "Lunch")
-
-    // The first skip was already sent and lands in the old queue.
-    await gateway.send(nowPlaying(index: 1, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    // The second one was still queued and must not follow into the new queue.
-    #expect(await gateway.selectedPlaylistIndexes() == [1])
-
-    var swapped = nowPlaying(index: 0, titles: ["Lunch"], position: 1, volume: 12)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.currentSong?.title == "Lunch")
-    #expect(linn.timeline?.position == 1)
-}
-
-@Test
-@MainActor
-func theNewQueueStartingEarlierStillSlidesForward() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
     await gateway.send(nowPlaying(index: 2, titles: ["Zero", "One", "Two"]))
-    try await waitUntil {
-        linn.currentSong?.title == "Two"
-    }
-
-    linn.play(Linn.LibraryItem(id: "album-y", kind: "md.album.qobuz", title: "Album Y"), placement: .replace)
-    #expect(linn.songTransitionDirection == .forward)
-
-    var swapped = nowPlaying(index: 0, titles: ["Opener", "Second"], volume: 11)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.currentSong?.title == "Opener"
-    }
-    #expect(linn.songTransitionDirection == .forward)
+    try await waitUntil { linn.currentSong?.title == "Two" }
+    #expect(linn.remainingQueueCount == 0)
 }
 
 @Test
 @MainActor
-func replayingTheCurrentAlbumReleasesOnceTheNewQueueConfirmsIt() async throws {
+func queueRowTapShowsLocalPendingMarkerUntilServerConfirms() async throws {
     let gateway = TestGateway()
     let linn = Linn(gateway: gateway)
-
     linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"], position: 40))
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
+    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two"]))
+    try await waitUntil { linn.currentSong?.title == "Zero" }
 
-    // Not browsed: the preview is the album itself, with no expected title.
-    linn.play(Linn.LibraryItem(id: "album-zero", kind: "md.album.qobuz", title: "Zero's Album"), placement: .replace)
-    #expect(linn.currentSong?.title == "Zero's Album")
+    linn.play(try #require(linn.playlist.songs.first(where: { $0.queueIndex == 2 })))
+    #expect(linn.pendingQueueIndex == 2)
+    #expect(linn.currentSong?.title == "Zero")
+    try await waitUntil { await gateway.selectedPlaylistIndexes() == [2] }
 
-    var swapped = nowPlaying(index: 0, titles: ["Zero", "One"], position: 0)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.currentSong?.title == "Zero"
-    }
-    #expect(linn.timeline?.position == 0)
+    var predicted = nowPlaying(index: 2, titles: ["Zero", "One", "Two"])
+    predicted.pending.queueIndex = true
+    await gateway.send(predicted)
+    try await waitUntil { linn.currentSong?.title == "Two" }
+    #expect(linn.pendingQueueIndex == 2)
+
+    await gateway.send(nowPlaying(index: 2, titles: ["Zero", "One", "Two"]))
+    try await waitUntil { linn.pendingQueueIndex == nil }
 }
 
-@Test
-@MainActor
-func tappingThePlayingRowWhileAnotherTapIsInFlightStaysPending() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let titles = ["Zero", "One", "Two", "Three"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: titles))
-    try await waitUntil {
-        linn.playlist.songs.count == 4
-    }
-
-    let zero = try #require(linn.playlist.songs.first { $0.title == "Zero" })
-    let three = try #require(linn.playlist.songs.first { $0.title == "Three" })
-    linn.play(three)
-    linn.play(zero)
-    #expect(linn.pendingQueueIndex == 0)
-
-    // Still on row 0 from before: not a confirmation of the queued tap.
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.pendingQueueIndex == 0)
-
-    await gateway.send(nowPlaying(index: 3, titles: titles, volume: 12))
-    try await waitUntil {
-        await gateway.selectedPlaylistIndexes() == [3, 0]
-    }
-    #expect(linn.pendingQueueIndex == 0)
-
-    await gateway.send(nowPlaying(index: 0, titles: titles, volume: 13))
-    try await waitUntil {
-        linn.pendingQueueIndex == nil
-    }
-}
-
-@Test
-@MainActor
-func addingLibraryItemsCountsThemInTheQueueRightAway() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    await gateway.seedMediaPage(threeTrackAlbumPage, for: "album-x")
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"], volume: 10))
-    try await waitUntil {
-        linn.remainingQueueCount == 1
-    }
-
-    let album = Linn.LibraryItem(id: "album-x", kind: "md.album.qobuz", title: "Album X")
-    _ = try await linn.browse(album)
-    linn.play(album, placement: .last)
-    linn.play(Linn.LibraryItem(id: "track-lunch", kind: "md.track.qobuz", title: "Lunch"), placement: .next)
-    #expect(linn.remainingQueueCount == 5)
-
-    // Stale lengths don't undo it; the device's own count takes over once
-    // it reports the grown queue.
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"], volume: 11))
-    try await waitUntil {
-        linn.volume == 11
-    }
-    #expect(linn.remainingQueueCount == 5)
-
-    let grown = ["Zero", "Lunch", "One", "A", "B", "C"]
-    await gateway.send(nowPlaying(index: 0, titles: grown, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.remainingQueueCount == 5)
-
-    await gateway.send(nowPlaying(index: 1, titles: grown, volume: 13))
-    try await waitUntil {
-        linn.remainingQueueCount == 4
-    }
-}
-
-@Test
-@MainActor
-func replacingTheQueueCountsTheNewTrackListRightAway() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    await gateway.seedMediaPage(threeTrackAlbumPage, for: "album-x")
-    let current = ["Zero", "One", "Two"]
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: current, volume: 10))
-    try await waitUntil {
-        linn.remainingQueueCount == 2
-    }
-
-    let album = Linn.LibraryItem(id: "album-x", kind: "md.album.qobuz", title: "Album X")
-    _ = try await linn.browse(album)
-    await gateway.send(nowPlaying(index: 2, titles: current, volume: 11))
-    try await waitUntil {
-        linn.remainingQueueCount == 0
-    }
-
-    linn.play(album, placement: .replace)
-    #expect(linn.remainingQueueCount == 2)
-
-    // Same length as the old queue: only the new revision proves the swap.
-    await gateway.send(nowPlaying(index: 2, titles: current, volume: 12))
-    try await waitUntil {
-        linn.volume == 12
-    }
-    #expect(linn.remainingQueueCount == 2)
-
-    var swapped = nowPlaying(index: 0, titles: ["A", "B", "C"], volume: 13)
-    swapped.playlist?.contentRevision = 2
-    await gateway.send(swapped)
-    try await waitUntil {
-        linn.volume == 13
-    }
-    #expect(linn.remainingQueueCount == 2)
-}
-
-@Test
-@MainActor
-func playingAnUnbrowsedAlbumCountsItsReportedTracks() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-    let current = (0 ..< 50).map { "Song \($0)" }
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: current))
-    try await waitUntil {
-        linn.remainingQueueCount == 49
-    }
-
-    // Shape of a real Qobuz album from the gateway: its track count comes
-    // with the item, no browse needed.
-    let album = Linn.LibraryItem(
-        id: "qobuz-album-a-star-is-born",
-        kind: "md.album.qobuz",
-        title: "A Star Is Born Soundtrack",
-        childCount: 19
-    )
-    linn.play(album, placement: .replace)
-    #expect(linn.remainingQueueCount == 18)
-}
-
-@Test
-@MainActor
-func unknownSizeCommandsLeaveTheCountToTheDevice() async throws {
-    let gateway = TestGateway()
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"]))
-    try await waitUntil {
-        linn.remainingQueueCount == 1
-    }
-
-    let artist = Linn.LibraryItem(id: "artist-1", kind: "md.artist.qobuz", title: "Someone")
-    linn.play(artist, placement: .last)
-    #expect(linn.remainingQueueCount == 1)
-
-    // A replace of unknown size voids earlier anticipated additions, and
-    // later ones can't be counted on top of a queue that's about to go.
-    linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
-    #expect(linn.remainingQueueCount == 2)
-    linn.play(artist, placement: .replace)
-    #expect(linn.remainingQueueCount == 1)
-    linn.play(Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"), placement: .last)
-    #expect(linn.remainingQueueCount == 1)
-}
-
-@Test
-@MainActor
-func aFailedAdditionTakesBackOnlyItsOwnTracks() async throws {
-    let gateway = TestGateway()
-    await gateway.failMediaSelections(for: ["track-a"])
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One"]))
-    try await waitUntil {
-        linn.remainingQueueCount == 1
-    }
-
-    linn.play(Linn.LibraryItem(id: "track-a", kind: "md.track.qobuz", title: "A"), placement: .last)
-    linn.play(Linn.LibraryItem(id: "track-b", kind: "md.track.qobuz", title: "B"), placement: .last)
-    #expect(linn.remainingQueueCount == 3)
-
-    try await waitUntil {
-        linn.lastErrorMessage != nil
-    }
-    #expect(linn.remainingQueueCount == 2)
-}
-
-@Test
-@MainActor
-func aFailedReplaceDoesNotUndoTheNewerOne() async throws {
-    let gateway = TestGateway()
-    await gateway.failMediaSelections(for: ["album-first"])
-    let linn = Linn(gateway: gateway)
-
-    linn.start()
-    await gateway.send(nowPlaying(index: 0, titles: ["Zero", "One", "Two", "Three", "Four"]))
-    try await waitUntil {
-        linn.remainingQueueCount == 4
-    }
-
-    linn.play(Linn.LibraryItem(id: "album-first", kind: "md.album.qobuz", title: "First", childCount: 9), placement: .replace)
-    linn.play(Linn.LibraryItem(id: "album-second", kind: "md.album.qobuz", title: "Second", childCount: 3), placement: .replace)
-    #expect(linn.remainingQueueCount == 2)
-
-    try await waitUntil {
-        linn.lastErrorMessage != nil
-    }
-    #expect(linn.remainingQueueCount == 2)
-}
-
-private let threeTrackAlbumPage = CiGateway.MediaPage(
+private let threeTrackAlbumPage = LinnGatewayData.MediaPage(
     id: "album-x",
     index: 0,
     count: 3,
     total: 3,
     children: [
-        CiGateway.MediaItem(id: "track-a", kind: "md.track.qobuz", name: "A"),
-        CiGateway.MediaItem(id: "track-b", kind: "md.track.qobuz", name: "B"),
-        CiGateway.MediaItem(id: "track-c", kind: "md.track.qobuz", name: "C"),
+        LinnGatewayData.MediaItem(id: "track-a", kind: "md.track.qobuz", name: "A"),
+        LinnGatewayData.MediaItem(id: "track-b", kind: "md.track.qobuz", name: "B"),
+        LinnGatewayData.MediaItem(id: "track-c", kind: "md.track.qobuz", name: "C"),
     ]
 )
 
@@ -1335,7 +765,7 @@ private actor TestGateway: LinnGateway {
     struct SelectedMediaItem: Sendable, Equatable {
         var mediaID: String
         var room: String
-        var queue: CiGateway.QueuePlacement
+        var queue: Linn.QueuePlacement
     }
 
     struct FavouriteRequest: Sendable, Equatable {
@@ -1343,10 +773,11 @@ private actor TestGateway: LinnGateway {
         var isFavourite: Bool
     }
 
-    private let stream: AsyncThrowingStream<CiGateway.NowPlaying, Error>
-    private let continuation: AsyncThrowingStream<CiGateway.NowPlaying, Error>.Continuation
+    private let stream: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>
+    private let continuation: AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.Continuation
     private var selectedIndexes: [Int] = []
     private var selectedMedia: [SelectedMediaItem] = []
+    private var mediaPreviews: [Linn.LibraryItem?] = []
     private var favourites: [FavouriteRequest] = []
     private var previousCalls = 0
     private var nextCalls = 0
@@ -1358,12 +789,12 @@ private actor TestGateway: LinnGateway {
     private var failingMediaIDs: Set<String> = []
     private var shouldSuspendMediaServices = false
     private var suspendedMediaServices: [CheckedContinuation<Void, Never>] = []
-    private var services: [CiGateway.MediaService] = []
-    private var mediaPages: [String: CiGateway.MediaPage] = [:]
+    private var services: [LinnGatewayData.MediaService] = []
+    private var mediaPages: [String: LinnGatewayData.MediaPage] = [:]
     private var browseCounts: [String: Int] = [:]
 
     init() {
-        let source = AsyncThrowingStream<CiGateway.NowPlaying, Error>.makeStream()
+        let source = AsyncThrowingStream<LinnGatewayData.NowPlaying, Error>.makeStream()
         stream = source.stream
         continuation = source.continuation
     }
@@ -1371,7 +802,7 @@ private actor TestGateway: LinnGateway {
     func nowPlayingUpdates(
         room _: String?,
         updateInterval _: Int
-    ) async -> AsyncThrowingStream<CiGateway.NowPlaying, Error> {
+    ) async -> AsyncThrowingStream<LinnGatewayData.NowPlaying, Error> {
         stream
     }
 
@@ -1404,47 +835,52 @@ private actor TestGateway: LinnGateway {
 
     func setMuted(_: Bool, room _: String, group _: Bool) async throws {}
 
-    func mediaServices(room _: String) async throws -> [CiGateway.MediaService] {
+    func mediaServices(room _: String) async throws -> [Linn.LibraryService] {
         if shouldSuspendMediaServices {
             await withCheckedContinuation { continuation in
                 suspendedMediaServices.append(continuation)
             }
         }
-        return services
+        return services.map(Linn.LibraryService.init)
     }
 
-    func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> CiGateway.MediaPage {
+    func browseMedia(mediaID: String, index _: Int, count _: Int, browseType _: String) async throws -> Linn.LibraryPage {
         browseCounts[mediaID, default: 0] += 1
-        return mediaPages[mediaID] ?? CiGateway.MediaPage(id: mediaID)
+        return Linn.LibraryPage(mediaPages[mediaID] ?? LinnGatewayData.MediaPage(id: mediaID))
     }
 
     func searchMedia(
         serviceID _: String,
         query: String,
-        type _: CiGateway.MediaSearchType,
+        type _: Linn.SearchType,
         index _: Int,
         count _: Int
-    ) async throws -> CiGateway.MediaPage {
+    ) async throws -> Linn.LibraryPage {
         let allItems = mediaPages.values.flatMap(\.children)
         let matches = allItems.filter {
             ($0.displayTitle ?? "").localizedCaseInsensitiveContains(query)
                 || $0.artists.joined(separator: " ").localizedCaseInsensitiveContains(query)
         }
-        return CiGateway.MediaPage(
+        return Linn.LibraryPage(LinnGatewayData.MediaPage(
             id: "search",
             contentRevision: mediaPages["service-qobuz"]?.contentRevision,
             index: 0,
             count: matches.count,
             total: matches.count,
             children: matches
-        )
+        ))
     }
 
-    func selectMedia(mediaID: String, room: String, queue: CiGateway.QueuePlacement) async throws {
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement) async throws {
         selectedMedia.append(SelectedMediaItem(mediaID: mediaID, room: room, queue: queue))
         if shouldFailMediaSelections || failingMediaIDs.contains(mediaID) {
             throw MediaSelectionFailed()
         }
+    }
+
+    func selectMedia(mediaID: String, room: String, queue: Linn.QueuePlacement, preview: Linn.LibraryItem?) async throws {
+        mediaPreviews.append(preview)
+        try await selectMedia(mediaID: mediaID, room: room, queue: queue)
     }
 
     func failMediaSelections(for mediaIDs: Set<String>) {
@@ -1455,7 +891,7 @@ private actor TestGateway: LinnGateway {
         shouldFailMediaSelections = true
     }
 
-    func seedMediaPage(_ page: CiGateway.MediaPage, for mediaID: String) {
+    func seedMediaPage(_ page: LinnGatewayData.MediaPage, for mediaID: String) {
         mediaPages[mediaID] = page
     }
 
@@ -1463,7 +899,7 @@ private actor TestGateway: LinnGateway {
         favourites.append(FavouriteRequest(mediaID: mediaID, isFavourite: isFavourite))
     }
 
-    func send(_ update: CiGateway.NowPlaying) {
+    func send(_ update: LinnGatewayData.NowPlaying) {
         continuation.yield(update)
     }
 
@@ -1475,6 +911,10 @@ private actor TestGateway: LinnGateway {
         selectedMedia
     }
 
+    func selectedMediaPreviews() -> [Linn.LibraryItem?] {
+        mediaPreviews
+    }
+
     func favouriteRequests() -> [FavouriteRequest] {
         favourites
     }
@@ -1483,7 +923,7 @@ private actor TestGateway: LinnGateway {
         browseCounts[mediaID] ?? 0
     }
 
-    func seedMediaServices(_ services: [CiGateway.MediaService]) {
+    func seedMediaServices(_ services: [LinnGatewayData.MediaService]) {
         self.services = services
     }
 
@@ -1531,53 +971,53 @@ private actor TestGateway: LinnGateway {
 
     func seedQobuzLibrary(contentRevision: Int) {
         services = [
-            CiGateway.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
+            LinnGatewayData.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.service"),
         ]
         mediaPages = [
-            "service-qobuz": CiGateway.MediaPage(
+            "service-qobuz": LinnGatewayData.MediaPage(
                 id: "service-qobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
                 children: [
-                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                    LinnGatewayData.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    LinnGatewayData.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    LinnGatewayData.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
                 ]
             ),
-            "qobuz-myqobuz": CiGateway.MediaPage(
+            "qobuz-myqobuz": LinnGatewayData.MediaPage(
                 id: "qobuz-myqobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
                 children: [
-                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    LinnGatewayData.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
                 ]
             ),
-            "qobuz-favourites": CiGateway.MediaPage(
+            "qobuz-favourites": LinnGatewayData.MediaPage(
                 id: "qobuz-favourites",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
                 children: [
-                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
                 ]
             ),
-            "qobuz-favourite-albums": CiGateway.MediaPage(
+            "qobuz-favourite-albums": LinnGatewayData.MediaPage(
                 id: "qobuz-favourite-albums",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 2,
                 total: 2,
                 children: [
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-album-happy-christmas",
                         kind: "md.album.qobuz",
                         name: "Happy Christmas",
@@ -1587,9 +1027,9 @@ private actor TestGateway: LinnGateway {
                         containedKinds: ["md.track.qobuz"],
                         childCount: 50,
                         isFavourite: true,
-                        disabledActions: ["a46"]
+                        canFavourite: true
                     ),
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-album-shostakovich-quartets",
                         kind: "md.album.qobuz",
                         name: "Shostakovich: Complete String Quartets, Vol. 2, Nos. 6-12",
@@ -1602,14 +1042,14 @@ private actor TestGateway: LinnGateway {
                     ),
                 ]
             ),
-            "qobuz-favourite-artists": CiGateway.MediaPage(
+            "qobuz-favourite-artists": LinnGatewayData.MediaPage(
                 id: "qobuz-favourite-artists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 1,
                 total: 1,
                 children: [
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-artist-qrion",
                         kind: "md.artist.qobuz",
                         name: "Qrion",
@@ -1619,14 +1059,14 @@ private actor TestGateway: LinnGateway {
                     ),
                 ]
             ),
-            "qobuz-favourite-playlists": CiGateway.MediaPage(
+            "qobuz-favourite-playlists": LinnGatewayData.MediaPage(
                 id: "qobuz-favourite-playlists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 2,
                 total: 2,
                 children: [
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-playlist-willkommen",
                         kind: "md.playlist.qobuz",
                         name: "Willkommen bei Qobuz",
@@ -1634,7 +1074,7 @@ private actor TestGateway: LinnGateway {
                         containedKinds: ["md.track.qobuz"],
                         childCount: 125
                     ),
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-playlist-true-sound-covers",
                         kind: "md.playlist.qobuz",
                         name: "True Sound Covers",
@@ -1644,14 +1084,14 @@ private actor TestGateway: LinnGateway {
                     ),
                 ]
             ),
-            "qobuz-my-playlists": CiGateway.MediaPage(
+            "qobuz-my-playlists": LinnGatewayData.MediaPage(
                 id: "qobuz-my-playlists",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 2,
                 total: 2,
                 children: [
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-playlist-demo",
                         kind: "md.playlist.qobuz",
                         name: "Demo",
@@ -1659,7 +1099,7 @@ private actor TestGateway: LinnGateway {
                         containedKinds: ["md.track.qobuz"],
                         childCount: 17
                     ),
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-playlist-cello-henry-bedtime",
                         kind: "md.playlist.qobuz",
                         name: "\"Cello\" (Henry bedtime)",
@@ -1669,14 +1109,14 @@ private actor TestGateway: LinnGateway {
                     ),
                 ]
             ),
-            "qobuz-purchased": CiGateway.MediaPage(
+            "qobuz-purchased": LinnGatewayData.MediaPage(
                 id: "qobuz-purchased",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 1,
                 total: 1,
                 children: [
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-album-hit-me-hard-and-soft",
                         kind: "md.album.qobuz",
                         name: "HIT ME HARD AND SOFT",
@@ -1686,7 +1126,7 @@ private actor TestGateway: LinnGateway {
                         containedKinds: ["md.track.qobuz"],
                         childCount: 10,
                         isFavourite: true,
-                        disabledActions: ["a46"]
+                        canFavourite: true
                     ),
                 ]
             ),
@@ -1695,53 +1135,53 @@ private actor TestGateway: LinnGateway {
 
     func seedNestedQobuzLibrary(contentRevision: Int) {
         services = [
-            CiGateway.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.qobuz"),
+            LinnGatewayData.MediaService(id: "service-qobuz", name: "Qobuz", kind: "md.qobuz"),
         ]
         mediaPages = [
-            "service-qobuz": CiGateway.MediaPage(
+            "service-qobuz": LinnGatewayData.MediaPage(
                 id: "service-qobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
                 children: [
-                    CiGateway.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
-                    CiGateway.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
-                    CiGateway.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
+                    LinnGatewayData.MediaItem(id: "qobuz-discover", kind: "md.qobuz.discover", name: "Discover"),
+                    LinnGatewayData.MediaItem(id: "qobuz-genres", kind: "md.qobuz.genres", name: "Genres"),
+                    LinnGatewayData.MediaItem(id: "qobuz-myqobuz", kind: "md.qobuz.myqobuz", name: "My Qobuz"),
                 ]
             ),
-            "qobuz-myqobuz": CiGateway.MediaPage(
+            "qobuz-myqobuz": LinnGatewayData.MediaPage(
                 id: "qobuz-myqobuz",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
                 children: [
-                    CiGateway.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
-                    CiGateway.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
-                    CiGateway.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourites", kind: "md.container", name: "Favourites"),
+                    LinnGatewayData.MediaItem(id: "qobuz-my-playlists", kind: "md.container.qobuz.playlist", name: "My Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-purchased", kind: "md.container", name: "Purchased"),
                 ]
             ),
-            "qobuz-favourites": CiGateway.MediaPage(
+            "qobuz-favourites": LinnGatewayData.MediaPage(
                 id: "qobuz-favourites",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 3,
                 total: 3,
                 children: [
-                    CiGateway.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
-                    CiGateway.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-albums", kind: "md.container.qobuz.album", name: "Albums"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-artists", kind: "md.container", name: "Artist"),
+                    LinnGatewayData.MediaItem(id: "qobuz-favourite-playlists", kind: "md.container", name: "Playlists"),
                 ]
             ),
-            "qobuz-favourite-albums": CiGateway.MediaPage(
+            "qobuz-favourite-albums": LinnGatewayData.MediaPage(
                 id: "qobuz-favourite-albums",
                 contentRevision: contentRevision,
                 index: 0,
                 count: 1,
                 total: 1,
                 children: [
-                    CiGateway.MediaItem(
+                    LinnGatewayData.MediaItem(
                         id: "qobuz-album-chopin-nocturnes",
                         kind: "md.album.qobuz",
                         name: "Chopin: The Complete Nocturnes",
@@ -1754,7 +1194,7 @@ private actor TestGateway: LinnGateway {
                     ),
                 ]
             ),
-            "qobuz-favourite-artists": CiGateway.MediaPage(
+            "qobuz-favourite-artists": LinnGatewayData.MediaPage(
                 id: "qobuz-favourite-artists",
                 contentRevision: contentRevision,
                 index: 0,
@@ -1762,7 +1202,7 @@ private actor TestGateway: LinnGateway {
                 total: 0,
                 children: []
             ),
-            "qobuz-favourite-playlists": CiGateway.MediaPage(
+            "qobuz-favourite-playlists": LinnGatewayData.MediaPage(
                 id: "qobuz-favourite-playlists",
                 contentRevision: contentRevision,
                 index: 0,
@@ -1770,7 +1210,7 @@ private actor TestGateway: LinnGateway {
                 total: 0,
                 children: []
             ),
-            "qobuz-my-playlists": CiGateway.MediaPage(
+            "qobuz-my-playlists": LinnGatewayData.MediaPage(
                 id: "qobuz-my-playlists",
                 contentRevision: contentRevision,
                 index: 0,
@@ -1778,7 +1218,7 @@ private actor TestGateway: LinnGateway {
                 total: 0,
                 children: []
             ),
-            "qobuz-purchased": CiGateway.MediaPage(
+            "qobuz-purchased": LinnGatewayData.MediaPage(
                 id: "qobuz-purchased",
                 contentRevision: contentRevision,
                 index: 0,
@@ -1796,25 +1236,25 @@ private func nowPlaying(
     playlistIndexes: [Int]? = nil,
     position: Int = 1,
     volume: Int = 10
-) -> CiGateway.NowPlaying {
+) -> LinnGatewayData.NowPlaying {
     let title = titles[index]
     let playlistIndexes = playlistIndexes ?? Array(titles.indices)
-    var nowPlaying = CiGateway.NowPlaying(room: "Linn", session: "test-session")
-    nowPlaying.playback = CiGateway.NowPlaying.Playback(transportState: .play)
-    nowPlaying.queue = CiGateway.NowPlaying.Queue(index: index, length: titles.count)
-    nowPlaying.currentItem = CiGateway.NowPlaying.CurrentItem(
+    var nowPlaying = LinnGatewayData.NowPlaying(room: "Linn", session: "test-session")
+    nowPlaying.playback = LinnGatewayData.NowPlaying.Playback(transportState: .play)
+    nowPlaying.queue = LinnGatewayData.NowPlaying.Queue(index: index, length: titles.count)
+    nowPlaying.currentItem = LinnGatewayData.NowPlaying.CurrentItem(
         id: "song-\(index)",
         kind: "md.track",
         displayName: title,
-        track: CiGateway.NowPlaying.Track(
+        track: LinnGatewayData.NowPlaying.Track(
             title: title,
             album: "Album \(index)",
             artist: "Artist \(index)"
         )
     )
-    nowPlaying.playlist = CiGateway.NowPlaying.Playlist(
+    nowPlaying.playlist = LinnGatewayData.NowPlaying.Playlist(
         items: playlistIndexes.map { index in
-            CiGateway.NowPlaying.PlaylistItem(
+            LinnGatewayData.NowPlaying.PlaylistItem(
                 index: index,
                 displayName: titles[index],
                 album: "Album \(index)",
@@ -1825,8 +1265,8 @@ private func nowPlaying(
         total: titles.count,
         contentRevision: 1
     )
-    nowPlaying.timeline = CiGateway.NowPlaying.Timeline(position: position, duration: 180)
-    nowPlaying.roomState = CiGateway.NowPlaying.RoomState(volume: volume, isMuted: false)
+    nowPlaying.timeline = LinnGatewayData.NowPlaying.Timeline(position: position, duration: 180)
+    nowPlaying.roomState = LinnGatewayData.NowPlaying.RoomState(volume: volume, isMuted: false)
     return nowPlaying
 }
 

@@ -155,6 +155,10 @@ struct HomeView: View {
             "No song"
         case .connecting:
             "Connecting"
+        case .serverUnreachable:
+            "Home server unavailable"
+        case .linnUnavailable:
+            "Linn unavailable"
         case .connected:
             "No song"
         case .failed:
@@ -163,7 +167,7 @@ struct HomeView: View {
     }
 
     private var statusSubtitle: String? {
-        if let message = linn.lastErrorMessage {
+        if linn.connectionState == .connected, let message = linn.lastErrorMessage {
             return message
         }
 
@@ -172,6 +176,10 @@ struct HomeView: View {
             nil
         case .connecting:
             "Waiting for gateway"
+        case .serverUnreachable:
+            "Can't reach Louie Home Server"
+        case .linnUnavailable:
+            "Louie Home Server is reconnecting to Linn"
         case .connected:
             "No now playing info"
         case let .failed(message):

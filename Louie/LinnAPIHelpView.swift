@@ -2,9 +2,7 @@
 //  LinnAPIHelpView.swift
 //  Louie
 //
-//  Setup help for Linn's CI ("Custom Installation") Gateway API — it is not
-//  enabled out of the box, and the first-run experience is finicky enough
-//  that the connect screen links here. Steps follow LinnDocs (CI-Gateway).
+//  Setup help for the Raspberry Pi server and its Linn CI Gateway connection.
 //
 
 import SwiftUI
@@ -19,14 +17,14 @@ struct LinnAPIHelpView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("Louie uses Linn's CI Gateway — a websocket API that runs on the DSM itself. It's off by default, so a one-time setup is needed. One gateway controls every Linn player in the house.")
+                    Text("Louie Home Server keeps the connection to Linn's CI Gateway. Your devices connect to the home server on the local network.")
                         .foregroundStyle(.secondary)
 
                     step(1, "Open Manage Systems", "Sign in with your Linn account and select the DS/DSM that should run the gateway.")
                     step(2, "Turn on the CI Gateway", "On the device's Advanced tab, switch CI Gateway on. If the option is missing, update the firmware first (Davaar 100 or later).")
                     step(3, "Reboot the device", "Power-cycle the DSM when prompted. The gateway comes up about 3 minutes after the restart — don't worry if it's not reachable right away.")
-                    step(4, "Check it's running", "Open http://<address>:4100 in a browser on the same network. That's the gateway's configuration page; Louie itself connects on port 8088.")
-                    step(5, "Connect Louie", "Enter the device's address here, and allow local network access when the system asks — Louie keeps retrying while the prompt is up.")
+                    step(4, "Check Louie Home Server", "SSH to your home server and run systemctl --user status louie.service. Louie connects on port 50051.")
+                    step(5, "Connect Louie", "Use your home server's hostname or reserved IP address, and allow local network access when asked.")
 
                     VStack(alignment: .leading, spacing: 10) {
                         Link(destination: manageSystemsURL) {
@@ -38,7 +36,7 @@ struct LinnAPIHelpView: View {
                     }
                     .font(.callout)
 
-                    Text("No DSM with recent firmware? Kazoo Server on a PC, Mac, or NAS can provide the same Gateway API — it listens on port 4100 instead.")
+                    Text("The Linn CI Gateway must be enabled on the DSM for Louie Home Server to observe playback.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -46,7 +44,7 @@ struct LinnAPIHelpView: View {
                 .frame(maxWidth: 560, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .navigationTitle("Enable the Linn API")
+            .navigationTitle("Connect to Louie Home Server")
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif

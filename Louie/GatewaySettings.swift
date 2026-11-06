@@ -2,10 +2,8 @@
 //  GatewaySettings.swift
 //  Louie
 //
-//  Where the CI gateway lives on the home network. The address is stored
-//  locally in UserDefaults — nothing leaves the device. The gateway machine
-//  should keep a fixed IP (static lease / DHCP reservation in the router),
-//  since the app reconnects to the stored address.
+//  The Louie Home Server's local address. Kept separate from the former
+//  direct Linn CI Gateway setting so old DSM addresses are not reused.
 //
 
 import Foundation
@@ -15,8 +13,10 @@ import Observation
 @MainActor
 @Observable
 final class GatewaySettings {
-    private static let hostKey = "gateway.host"
-    private static let portKey = "gateway.port"
+    private static let hostKey = "homeServer.host"
+    private static let portKey = "homeServer.port"
+    private static let legacyHostKey = "pi.host"
+    private static let legacyPortKey = "pi.port"
 
     var host: String {
         didSet {
@@ -31,20 +31,25 @@ final class GatewaySettings {
     }
 
     init() {
-        host = UserDefaults.standard.string(forKey: Self.hostKey) ?? ""
+        let fallback = try? Linn.Configuration.local()
+        host = UserDefaults.standard.string(forKey: Self.hostKey)
+            ?? UserDefaults.standard.string(forKey: Self.legacyHostKey)
+            ?? fallback?.serverURL.host()
+            ?? "louie-pi.local"
         let storedPort = UserDefaults.standard.integer(forKey: Self.portKey)
-        port = storedPort == 0 ? 8088 : storedPort
+        let legacyPort = UserDefaults.standard.integer(forKey: Self.legacyPortKey)
+        port = storedPort != 0 ? storedPort : legacyPort != 0 ? legacyPort : fallback?.serverURL.port ?? 50051
     }
 
-    /// The stored address wins; the developer `.env` fallback
-    /// (`LINN_CI_GATEWAY_WS_URL`) keeps working when nothing is stored.
+    /// The stored address wins over the developer `LOUIE_SERVER_URL` fallback.
     var configuration: Linn.Configuration? {
         let trimmedHost = host.trimmingCharacters(in: .whitespaces)
-        if !trimmedHost.isEmpty,
-           let url = URL(string: "ws://\(trimmedHost):\(port)/ws"),
-           url.host() != nil {
-            return Linn.Configuration(ciGatewayWebSocketURL: url)
+        guard !trimmedHost.isEmpty, !trimmedHost.contains(":"),
+              (1 ... 65_535).contains(port),
+              let url = URL(string: "http://\(trimmedHost):\(port)"),
+              url.host()?.lowercased() == trimmedHost.lowercased() else {
+            return nil
         }
-        return try? Linn.Configuration.local()
+        return Linn.Configuration(serverURL: url)
     }
 }

@@ -175,7 +175,7 @@ struct ConnectionGateView: View {
 
     private var gateOverlay: some View {
         ZStack {
-            Color(white: 0.97)
+            gateBackground
                 .ignoresSafeArea()
 
             Group {
@@ -218,15 +218,23 @@ struct ConnectionGateView: View {
 
     // MARK: - Pieces
 
+    private var gateBackground: Color {
+        #if os(macOS)
+            Color(nsColor: .windowBackgroundColor)
+        #else
+            Color(uiColor: .systemGroupedBackground)
+        #endif
+    }
+
     private var header: some View {
         VStack(spacing: 10) {
             WordmarkViewport(width: 180)
                 .frame(width: 152, alignment: .center)
 
-            Text("Connect to Linn DSM")
+            Text("Connect to Louie Home Server")
                 .font(.title2.weight(.semibold))
 
-            Text("Louie talks to your Linn system over its CI Gateway API on your home network.")
+            Text("Louie Home Server keeps your Linn system in sync across your devices.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -236,7 +244,7 @@ struct ConnectionGateView: View {
     private var addressCard: some View {
         VStack(spacing: 16) {
             VStack(spacing: 0) {
-                TextField("Address, e.g. 192.168.1.50", text: $settings.host)
+                TextField("Hostname or IPv4 address", text: $settings.host)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
                 #if os(iOS)
@@ -259,7 +267,7 @@ struct ConnectionGateView: View {
             }
             .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 12))
 
-            Text("The IP address (or hostname) of the Linn DSM running the CI Gateway. If you use an IP, give the device a DHCP reservation in your router so it doesn't move. Stored only on this device.")
+            Text("The hostname or reserved IPv4 address of your Louie Home Server. Stored only on this device.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -279,7 +287,7 @@ struct ConnectionGateView: View {
     private var connectingCard: some View {
         VStack(spacing: 16) {
             if let message = failureMessage {
-                Label("Can't reach \(displayAddress) yet", systemImage: "wifi.exclamationmark")
+                Label(failureTitle, systemImage: "wifi.exclamationmark")
                     .font(.headline)
 
                 Text(message)
@@ -288,7 +296,14 @@ struct ConnectionGateView: View {
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
 
-                Text("If the system asked about finding devices on your local network, allow it — Louie retries automatically. Also make sure the Linn API is enabled and the address is right.")
+                if let diagnosticMessage {
+                    Text("Details: \(diagnosticMessage)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+
+                Text(failureHelp)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -299,7 +314,7 @@ struct ConnectionGateView: View {
                 Text("Still connecting to \(displayAddress)…")
                     .font(.headline)
 
-                Text("If the system asks about finding devices on your local network, allow it — that's how Louie reaches your Linn. After enabling the CI Gateway, the device takes a few minutes to come up.")
+                Text("If asked about local network access, allow it. Louie retries while the home server starts.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -313,11 +328,13 @@ struct ConnectionGateView: View {
                     .buttonStyle(.borderedProminent)
 
                     #if os(iOS)
+                    if case .serverUnreachable = linn?.connectionState {
                         Button("Open Settings") {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
                             }
                         }
+                    }
                     #endif
                 }
 
@@ -332,7 +349,7 @@ struct ConnectionGateView: View {
         Button {
             isShowingHelp = true
         } label: {
-            Label("How do I enable the Linn API?", systemImage: "questionmark.circle")
+            Label("How do I connect Louie Home Server?", systemImage: "questionmark.circle")
                 .font(.footnote)
         }
         .buttonStyle(.plain)
@@ -341,14 +358,47 @@ struct ConnectionGateView: View {
 
     private var displayAddress: String {
         let trimmedHost = settings.host.trimmingCharacters(in: .whitespaces)
-        return trimmedHost.isEmpty ? "the gateway" : trimmedHost
+        return trimmedHost.isEmpty ? "the home server" : trimmedHost
     }
 
     private var failureMessage: String? {
-        if case let .failed(message) = linn?.connectionState {
+        switch linn?.connectionState {
+        case .serverUnreachable:
+            return "The home server isn't answering."
+        case .linnUnavailable:
+            return "The home server is running but Linn isn't connected."
+        case let .failed(message):
+            return message
+        default:
+            return nil
+        }
+    }
+
+    private var diagnosticMessage: String? {
+        if case let .linnUnavailable(message) = linn?.connectionState {
             return message
         }
         return nil
+    }
+
+    private var failureTitle: String {
+        if case .linnUnavailable = linn?.connectionState {
+            return "Linn isn't connected"
+        }
+        if case .failed = linn?.connectionState {
+            return "Connection failed"
+        }
+        return "Can't reach \(displayAddress) yet"
+    }
+
+    private var failureHelp: String {
+        if case .linnUnavailable = linn?.connectionState {
+            return "Check that the Linn DSM and its CI Gateway are running. Louie Home Server will reconnect automatically."
+        }
+        if case .failed = linn?.connectionState {
+            return "Check the Louie Home Server address, then try again. If it still fails, update the app and home server."
+        }
+        return "If asked about local network access, allow it. Check the address and that louie.service is running on your home server."
     }
 }
 
