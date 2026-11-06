@@ -77,7 +77,7 @@ pub struct Prediction {
     baseline: NowPlayingState,
     queue_change: bool,
     expected_total: Option<i32>,
-    saw_track_seek: bool,
+    track_position: Option<i32>,
     saw_transport: bool,
 }
 
@@ -136,11 +136,16 @@ impl Prediction {
                     );
                 }
                 if matches!(placement.as_str(), "now" | "replace") {
-                    p.transport = Some(TransportState::Playing as i32);
                     p.item = Some(preview.clone());
                     p.timeline = Some(None);
                 }
             }
+        }
+        if command.changes_track() {
+            p.transport = Some(TransportState::Playing as i32);
+            // An unchanged transport state need not be pushed again. A later
+            // stopped/loading event invalidates this standing evidence.
+            p.saw_transport = p.baseline.transport_state == p.transport;
         }
         p.expected_total = p.total.flatten();
         p
@@ -235,17 +240,23 @@ impl Prediction {
                         }
                     } else {
                         let position = actual.timeline.and_then(|t| t.position_seconds);
-                        // A normal old-song tick (40 -> 41) is not evidence
-                        // of the new track. Only the latest near-zero sample can
-                        // release a track-change hold; do not latch an earlier
-                        // reset if a stale nonzero frame subsequently replaces it.
-                        self.saw_track_seek = position.is_some_and(|p| (0..=2).contains(&p));
+                        // Anchor at a reset. Continue beyond it only after
+                        // the new song's metadata confirms: during a quick
+                        // second skip, low ticks may still belong to song one.
+                        // A jump away from the sequence invalidates the anchor.
+                        self.track_position = position.filter(|p| {
+                            (0..=2).contains(p)
+                                || (self.item.is_none()
+                                    && self.track_position.is_some_and(|last| {
+                                        (last..=last.saturating_add(2)).contains(p)
+                                    }))
+                        });
                     }
                 }
             }
             _ => {}
         }
-        // During an album start, an early "playing" frame may still describe
+        // During a track start, an early "playing" frame may still describe
         // the old song. Keep the requested transport through stop/loading until
         // the queue/song have settled and transport evidence agrees.
         if self.saw_transport && self.item.is_none() && self.index.is_none() && !self.queue_change {
@@ -256,7 +267,7 @@ impl Prediction {
         if self.timeline == Some(None)
             && self.item.is_none()
             && self.index.is_none()
-            && self.saw_track_seek
+            && self.track_position.is_some()
         {
             self.timeline = None;
         }

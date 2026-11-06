@@ -34,6 +34,16 @@ its fields, the gateway rejects it, or the confirmation deadline expires. Eviden
 may arrive before the acknowledgement. Playlist, metadata, transport and seek
 updates confirm their own fields independently, in either arrival order.
 
+Row selection, skip and immediate media playback predict playing, including when
+starting from pause. That prediction survives intermediate paused/loading frames
+until transport confirms it or the command fails/expires. Already-playing transport
+is standing evidence; a later stopped/loading event invalidates it and requires a
+new playing event. A track's timeline is anchored by a near-zero position sample.
+Continuous progress beyond that reset counts only after the new song's metadata
+confirms; a jump away from the sequence discards the evidence. This lets a delayed
+playlist update confirm after the new song has advanced beyond two seconds without
+extending old-song progress during a quick second skip.
+
 The bounded waiting queue preserves additions and dependent actions. Only adjacent
 compatible actions replace each other: row selections, seeks, play/pause, and album
 replacements. Replaced calls receive `CANCELLED` with `louie-error-reason: superseded`.

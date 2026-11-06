@@ -544,6 +544,7 @@ fn old_tick_after_reset_does_not_reuse_stale_seek_evidence() {
     s.send();
     s.position(0);
     s.position(41);
+    s.position(42); // Continuing old-song progress must not re-anchor evidence.
     s.ack("row");
     s.playlist(1, 2, 4);
     s.metadata(1);
@@ -567,4 +568,170 @@ fn delayed_playlist_confirmation_does_not_trigger_read_back() {
     assert_eq!(s.view().pending, Some(PendingState::default()));
     s.enqueue("next", Command::Select(2));
     assert_eq!(s.send(), ["next"]);
+}
+
+#[test]
+fn review_delayed_playlist_retains_continuous_new_song_progress() {
+    let mut s = Script::new();
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.ack("row");
+    s.transport(TransportState::Playing as i32);
+    s.metadata(1);
+    s.position(2);
+    s.now += Duration::from_millis(1000);
+    s.position(3);
+    s.now += Duration::from_millis(2250);
+    s.playlist(1, 2, 4);
+    assert_eq!(s.view().pending, Some(PendingState::default()));
+}
+
+#[test]
+fn review_seek_after_row_survives_delayed_playlist() {
+    let mut s = Script::new();
+    s.enqueue("row", Command::Select(1));
+    assert_eq!(s.send(), ["row"]);
+    s.enqueue("seek", Command::Seek(60));
+    s.ack("row");
+    s.transport(TransportState::Playing as i32);
+    s.metadata(1);
+    for position in 0..=3 {
+        s.position(position);
+        s.now += Duration::from_secs(1);
+    }
+    s.playlist(1, 2, 4);
+    s.position(4);
+    s.now += Duration::from_secs(1);
+    assert!(!s.scheduler.tick(s.now));
+    assert!(s.scheduler.take_completed().is_empty());
+    assert_eq!(s.send(), ["seek"]);
+}
+
+#[test]
+fn paused_track_changes_predict_playing_until_transport_confirms() {
+    for command in [Command::Select(1), Command::Skip] {
+        let mut s = Script::new();
+        s.transport(TransportState::Paused as i32);
+        s.enqueue("next", command);
+        assert_eq!(
+            s.view().now_playing.unwrap().transport_state,
+            Some(TransportState::Playing as i32)
+        );
+        assert_eq!(s.send(), ["next"]);
+        s.ack("next");
+        for state in [
+            TransportState::Paused,
+            TransportState::Stopped,
+            TransportState::Buffering,
+        ] {
+            s.transport(state as i32);
+            assert_eq!(
+                s.view().now_playing.unwrap().transport_state,
+                Some(TransportState::Playing as i32)
+            );
+        }
+        s.playlist(1, 2, 4);
+        s.metadata(1);
+        s.position(0);
+        assert!(s.view().pending.unwrap().transport);
+        s.transport(TransportState::Playing as i32);
+        assert_eq!(s.view().pending, Some(PendingState::default()));
+    }
+}
+
+#[test]
+fn rejected_paused_track_change_restores_observed_transport() {
+    let mut s = Script::new();
+    s.transport(TransportState::Paused as i32);
+    s.enqueue("next", Command::Select(1));
+    s.send();
+    assert_eq!(
+        s.view().now_playing.unwrap().transport_state,
+        Some(TransportState::Playing as i32)
+    );
+    s.scheduler.reject("next");
+    assert_eq!(s.view().now_playing, s.observed.now_playing);
+    assert_eq!(s.view().pending, Some(PendingState::default()));
+}
+
+#[test]
+fn review_row_tap_while_playing_settles_without_a_repeated_play_frame() {
+    let mut s = Script::new(); // Linn is already playing Song 0.
+    s.enqueue("row", Command::Select(1));
+    assert_eq!(s.send(), ["row"]);
+    s.enqueue("seek", Command::Seek(60));
+    s.ack("row");
+    // Transport never left "play", so Linn has no transport change to push.
+    s.playlist(1, 2, 4);
+    s.metadata(1);
+    s.position(0);
+    assert!(
+        !s.view().pending.unwrap().transport,
+        "row tap while playing is still waiting for a transport frame"
+    );
+    s.now += Duration::from_secs(5);
+    assert!(
+        !s.scheduler.tick(s.now),
+        "confirmed row tap timed out into a read-back"
+    );
+    let failed: Vec<_> = s
+        .scheduler
+        .take_completed()
+        .into_iter()
+        .map(|(tag, result)| (tag, result.err().map(|e| e.message().to_owned())))
+        .collect();
+    assert!(failed.is_empty(), "seek was failed: {failed:?}");
+    assert_eq!(s.send(), ["seek"]);
+}
+#[test]
+fn review_double_skip_while_playing_dispatches_second_skip_on_track_evidence() {
+    let mut s = Script::new(); // Linn is already playing Song 0.
+    s.enqueue("first", Command::Select(1));
+    assert_eq!(s.send(), ["first"]);
+    s.enqueue("second", Command::Select(2));
+    s.ack("first");
+    s.playlist(1, 2, 4);
+    s.metadata(1);
+    s.position(0);
+    assert_eq!(
+        s.send(),
+        ["second"],
+        "second skip is held behind a transport frame Linn does not send"
+    );
+}
+
+#[test]
+fn review_double_skip_does_not_show_previous_songs_progress_for_next_song() {
+    // Double skip, and two row taps in quick succession.
+    for (first, second) in [
+        (Command::Skip, Command::Skip),
+        (Command::Select(1), Command::Select(2)),
+    ] {
+        let mut s = Script::new();
+        s.enqueue("first", first);
+        assert_eq!(s.send(), ["first"]);
+        s.enqueue("second", second);
+        // Song 1 starts and settles the first change at its reset sample.
+        s.ack("first");
+        s.transport(TransportState::Playing as i32);
+        s.playlist(1, 1, 4);
+        s.metadata(1);
+        s.position(0);
+        assert_eq!(s.send(), ["second"]);
+        s.ack("second");
+        // Linn takes ~3 s to change track; song 1 keeps ticking meanwhile.
+        for position in 1..=3 {
+            s.position(position);
+        }
+        s.transport(TransportState::Playing as i32);
+        s.playlist(2, 1, 4);
+        s.metadata(2);
+        // Song 2 is confirmed, but no song-2 seek sample has arrived yet.
+        let view = s.view();
+        assert!(
+            view.pending.unwrap().timeline,
+            "song 1's progress (0:03) must not be published as song 2's timeline"
+        );
+        assert!(view.now_playing.unwrap().timeline.is_none());
+    }
 }

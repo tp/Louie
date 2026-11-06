@@ -357,3 +357,95 @@ async fn row_tap_does_not_publish_old_song_position_for_new_song() {
     wire.update(seek(0)).await;
     wire.wait(|s| !s.pending.as_ref().unwrap().timeline).await;
 }
+
+#[tokio::test]
+async fn review_late_playlist_after_new_song_progress_does_not_force_read_back() {
+    let mut wire = Wire::new().await;
+    let row = wire.row(1);
+    let request = wire.next().await;
+    wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
+    row.await.unwrap().unwrap();
+    wire.update(metadata(1)).await;
+    for position in 0..=3 {
+        wire.update(seek(position)).await;
+    }
+    wire.update(playlist(1, 2)).await;
+    wire.wait(|s| !s.pending.as_ref().unwrap().queue_index)
+        .await;
+    let next = wire.row(2);
+    let request = wire.next().await;
+    assert!(
+        request["tag"].as_str().unwrap().starts_with("pi-"),
+        "confirmed row timed out into read-back: {request}"
+    );
+    assert_eq!(request["index"], 2);
+    wire.ack(&request).await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
+    next.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn paused_next_publishes_playing_before_gateway_ack() {
+    let mut wire = Wire::new().await;
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"pause"}}))
+        .await;
+    wire.wait(|s| {
+        s.now_playing.as_ref().unwrap().transport_state == Some(TransportState::Paused as i32)
+    })
+    .await;
+    let gateway = wire.gateway.clone();
+    let next = tokio::spawn(async move { gateway.skip(1).await });
+    let request = wire.next().await;
+    assert_eq!(request["index"], 1);
+    wire.wait(|s| {
+        s.pending.as_ref().unwrap().transport
+            && s.now_playing.as_ref().unwrap().transport_state
+                == Some(TransportState::Playing as i32)
+    })
+    .await;
+    wire.ack(&request).await;
+    next.await.unwrap().unwrap();
+    wire.update(
+        json!({"requestPath":"/V2/transport/status","data":{"transport_state":"buffering"}}),
+    )
+    .await;
+    wire.update(playlist(1, 2)).await;
+    wire.update(metadata(1)).await;
+    wire.update(seek(0)).await;
+    wire.wait(|s| !s.pending.as_ref().unwrap().timeline).await;
+    assert_eq!(
+        wire.gateway.snapshot().now_playing.unwrap().transport_state,
+        Some(TransportState::Playing as i32)
+    );
+    assert!(wire.gateway.snapshot().pending.unwrap().transport);
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"play"}}))
+        .await;
+    wire.wait(|s| s.pending == Some(PendingState::default()))
+        .await;
+}
+
+#[tokio::test]
+async fn review_row_tap_while_playing_confirms_without_a_repeated_play_frame() {
+    // The fake Linn reports "play" at startup and, like an update subscription,
+    // pushes nothing further because the transport state never changes.
+    let mut wire = Wire::new().await;
+    let row = wire.row(1);
+    let request = wire.next().await;
+    wire.ack(&request).await;
+    row.await.unwrap().unwrap();
+    wire.update(playlist(1, 2)).await;
+    wire.update(metadata(1)).await;
+    wire.update(seek(0)).await;
+    let next = wire.row(2);
+    let request = wire.next().await;
+    assert!(
+        request["tag"].as_str().unwrap().starts_with("pi-"),
+        "confirmed row timed out into read-back: {request}"
+    );
+    assert_eq!(request["index"], 2);
+    wire.ack(&request).await;
+    next.await.unwrap().unwrap();
+}
