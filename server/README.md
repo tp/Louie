@@ -261,7 +261,7 @@ endpoints and related schemas and corrects known gateway/spec mismatches.
 module index, without HTTP client implementations, model docs, or generated tests.
 There is no JAR fallback or cloud generation.
 
-From the repository root, with Docker and Mike Farah's `yq` v4 installed:
+From the repository root, with Docker and Mike Farah's `yq` v4.53.2 installed (CI pins this version; newer releases restyle multiline strings):
 
 ```sh
 bash server/linn-ci-gateway/normalize.sh

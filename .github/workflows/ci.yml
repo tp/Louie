@@ -16,6 +16,18 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      - name: Install pinned yq
+        run: |
+          # The committed spec was normalized with yq v4.53.2. The runner image's
+          # newer yq rewrites quoted multiline descriptions as block literals.
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/yq" \
+            https://github.com/mikefarah/yq/releases/download/v4.53.2/yq_linux_amd64
+          echo "d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b  $RUNNER_TEMP/bin/yq" \
+            | sha256sum --check
+          chmod +x "$RUNNER_TEMP/bin/yq"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Check generated Linn gateway models
         run: |
           bash server/linn-ci-gateway/normalize.sh
