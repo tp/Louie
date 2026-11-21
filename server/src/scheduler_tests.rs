@@ -124,6 +124,7 @@ fn album(name: i32, count: Option<i32>) -> Command {
         placement: "replace".into(),
         count,
         preview: Some(song(name)),
+        duration: None,
     }
 }
 fn addition(placement: &str, count: Option<i32>) -> Command {
@@ -131,6 +132,7 @@ fn addition(placement: &str, count: Option<i32>) -> Command {
         placement: placement.into(),
         count,
         preview: None,
+        duration: None,
     }
 }
 
@@ -519,6 +521,7 @@ fn old_song_position_tick_is_not_seek_evidence_for_the_new_song() {
             placement: "now".into(),
             count: Some(1),
             preview: Some(song(1)),
+            duration: None,
         },
     ] {
         let mut s = Script::new();
@@ -734,4 +737,431 @@ fn review_double_skip_does_not_show_previous_songs_progress_for_next_song() {
         );
         assert!(view.now_playing.unwrap().timeline.is_none());
     }
+}
+
+// A pending track change shows the destination's known length, never a position.
+fn timed_rows(s: &mut Script) {
+    let queue = s.observed.now_playing.as_mut().unwrap().playlist.as_mut();
+    for row in &mut queue.unwrap().items {
+        row.duration_seconds = Some(200 + row.index * 15);
+    }
+}
+fn shown_timeline(s: &Script) -> Option<Timeline> {
+    s.view().now_playing.unwrap().timeline
+}
+fn length_only(seconds: i32) -> Option<Timeline> {
+    Some(Timeline {
+        duration_seconds: Some(seconds),
+        ..Timeline::default()
+    })
+}
+
+#[test]
+fn pending_row_shows_its_known_duration_without_a_position() {
+    for (command, expected) in [
+        (Command::Select(1), length_only(215)),
+        (Command::Skip, None),
+    ] {
+        let mut s = Script::new();
+        timed_rows(&mut s);
+        s.enqueue("change", command);
+        assert_eq!(s.send(), ["change"]);
+        let view = s.view();
+        assert!(view.pending.unwrap().timeline);
+        // A shuffle/unknown skip has no known destination, so no length either.
+        assert_eq!(
+            view.now_playing.unwrap().timeline,
+            expected,
+            "the pending row must show its length without the old song's position"
+        );
+    }
+}
+
+#[test]
+fn linn_duration_and_position_replace_the_rows_duration_on_release() {
+    let mut s = Script::new();
+    timed_rows(&mut s);
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.ack("row");
+    s.metadata(1);
+    // Linn's own length for the new song differs from the queue row's.
+    let linn = Some(Timeline {
+        position_seconds: Some(0),
+        duration_seconds: Some(214),
+        is_seekable: Some(true),
+        seek_lower_bound_seconds: Some(0),
+        seek_upper_bound_seconds: Some(214),
+        ..Timeline::default()
+    });
+    s.observed.now_playing.as_mut().unwrap().timeline = linn;
+    s.scheduler.observe("/V2/seek/status", &s.observed);
+    assert_eq!(
+        shown_timeline(&s),
+        length_only(215),
+        "the row's length is shown until the queue index confirms"
+    );
+    s.playlist(1, 2, 4);
+    let view = s.view();
+    assert!(!view.pending.unwrap().timeline);
+    assert_eq!(view.now_playing.unwrap().timeline, linn);
+}
+
+#[test]
+fn expired_track_change_drops_the_predicted_duration() {
+    let mut s = Script::new();
+    timed_rows(&mut s);
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.ack("row");
+    assert_eq!(shown_timeline(&s), length_only(215));
+    s.now += TRACK_SETTLE_LIMIT;
+    assert!(s.scheduler.tick(s.now));
+    let view = s.view();
+    assert_eq!(view.pending, Some(PendingState::default()));
+    assert_eq!(
+        view.now_playing.unwrap().timeline,
+        s.observed.now_playing.unwrap().timeline
+    );
+}
+
+#[test]
+fn waiting_row_projects_its_own_duration() {
+    let mut s = Script::new();
+    timed_rows(&mut s);
+    s.enqueue("one", Command::Select(1));
+    s.send();
+    s.enqueue("two", Command::Select(2));
+    let playing = s.view().now_playing.unwrap();
+    assert_eq!(
+        playing.current_item.unwrap().display_name,
+        song(2).display_name
+    );
+    assert_eq!(playing.timeline, length_only(230));
+}
+
+#[test]
+fn immediate_media_projects_the_first_tracks_duration() {
+    use crate::pb::{MediaItem, MediaItemType};
+    let track = MediaItem {
+        id: "t1".into(),
+        r#type: MediaItemType::Track as i32,
+        title: Some("Opening".into()),
+        duration_seconds: Some(181),
+        ..MediaItem::default()
+    };
+    let album = MediaItem {
+        id: "a1".into(),
+        r#type: MediaItemType::Album as i32,
+        title: Some("Album".into()),
+        child_count: Some(10),
+        ..MediaItem::default()
+    };
+    // Album replacement with its browsed first track, and a track played now.
+    for (queue, preview, first) in [("replace", &album, Some(&track)), ("now", &track, None)] {
+        let command = Command::from_request(
+            "/V2/media/select",
+            &serde_json::json!({"queue": queue}),
+            Some(preview),
+            first,
+        )
+        .unwrap();
+        let mut s = Script::new();
+        s.enqueue("media", command);
+        assert_eq!(s.send(), ["media"]);
+        let playing = s.view().now_playing.unwrap();
+        assert_eq!(
+            playing.current_item.unwrap().display_name.as_deref(),
+            Some("Opening")
+        );
+        assert_eq!(playing.timeline, length_only(181), "{queue}");
+    }
+}
+
+#[test]
+fn unexpected_song_does_not_inherit_the_predicted_rows_duration() {
+    let mut s = Script::new();
+    timed_rows(&mut s);
+    s.enqueue("row", Command::Select(1));
+    s.send();
+    s.ack("row");
+    // Linn may repeat the expected song's metadata; it keeps the length.
+    s.metadata(1);
+    s.metadata(1);
+    assert_eq!(shown_timeline(&s), length_only(215));
+    // Another controller reordered the queue: Linn starts Song 3 for row 1.
+    s.metadata(3);
+    let view = s.view();
+    assert!(view.pending.unwrap().timeline);
+    let playing = view.now_playing.unwrap();
+    assert_eq!(
+        playing.current_item.unwrap().display_name,
+        song(3).display_name
+    );
+    assert_eq!(
+        playing.timeline, None,
+        "Song 3 is shown with row 1's length"
+    );
+}
+
+#[test]
+fn seek_waiting_behind_a_pending_row_shows_its_position_with_the_rows_duration() {
+    let mut s = Script::new();
+    timed_rows(&mut s);
+    s.enqueue("row", Command::Select(1));
+    assert_eq!(s.send(), ["row"]);
+    // The seek applies to the new song once the row settles.
+    s.enqueue("seek", Command::Seek(60));
+    let view = s.view();
+    assert!(view.pending.unwrap().timeline);
+    let timeline = view.now_playing.unwrap().timeline.unwrap();
+    assert_eq!(
+        (timeline.position_seconds, timeline.duration_seconds),
+        (Some(60), Some(215)),
+        "the requested position is shown without the new song's length"
+    );
+}
+
+// Linn reports each applied volume/mute value about a second late, in order.
+fn report_volume(s: &mut Script, value: i32) {
+    let room = s
+        .observed
+        .now_playing
+        .as_mut()
+        .unwrap()
+        .room_volume
+        .as_mut();
+    room.unwrap().volume = Some(value);
+    s.scheduler.observe("volume", &s.observed);
+}
+fn report_mute(s: &mut Script, value: bool) {
+    let room = s
+        .observed
+        .now_playing
+        .as_mut()
+        .unwrap()
+        .room_volume
+        .as_mut();
+    room.unwrap().is_muted = Some(value);
+    s.scheduler.observe("mute", &s.observed);
+}
+fn shown_volume(s: &Script) -> (Option<i32>, bool) {
+    let view = s.view();
+    let volume = view.now_playing.unwrap().room_volume.unwrap().volume;
+    (volume, view.pending.unwrap().volume)
+}
+fn shown_mute(s: &Script) -> (Option<bool>, bool) {
+    let view = s.view();
+    let muted = view.now_playing.unwrap().room_volume.unwrap().is_muted;
+    (muted, view.pending.unwrap().mute)
+}
+fn send_acked(s: &mut Script, tag: &'static str, command: Command) {
+    s.enqueue(tag, command);
+    assert_eq!(s.send(), [tag]);
+    s.ack(tag);
+}
+
+#[test]
+fn late_volume_frame_does_not_confirm_the_latest_a_b_a_value() {
+    let mut s = Script::new(); // volume 10
+    send_acked(&mut s, "v20", Command::Volume(20, false));
+    send_acked(&mut s, "v30", Command::Volume(30, false));
+    send_acked(&mut s, "v20-again", Command::Volume(20, false));
+    report_volume(&mut s, 20); // belongs to the first command
+    assert_eq!(
+        shown_volume(&s),
+        (Some(20), true),
+        "the first 20's late frame confirmed the final 20"
+    );
+    report_volume(&mut s, 30); // belongs to the second command
+    assert_eq!(
+        shown_volume(&s),
+        (Some(20), true),
+        "the superseded 30 was published after the user chose 20"
+    );
+    report_volume(&mut s, 20);
+    assert_eq!(shown_volume(&s), (Some(20), false));
+}
+
+#[test]
+fn late_volume_frames_are_matched_oldest_first() {
+    let mut s = Script::new(); // volume 10
+    for (tag, value) in [("a", 20), ("b", 30), ("a-again", 20), ("b-again", 30)] {
+        send_acked(&mut s, tag, Command::Volume(value, false));
+    }
+    // Each late frame belongs to the oldest unreported command with its value.
+    for late in [20, 30, 20] {
+        report_volume(&mut s, late);
+        assert_eq!(
+            shown_volume(&s),
+            (Some(30), true),
+            "the late frame for {late} confirmed or replaced the final 30"
+        );
+    }
+    report_volume(&mut s, 30);
+    assert_eq!(shown_volume(&s), (Some(30), false));
+}
+
+#[test]
+fn late_mute_frame_does_not_confirm_the_latest_a_b_a_value() {
+    let mut s = Script::new(); // unmuted
+    send_acked(&mut s, "mute", Command::Mute(true, false));
+    send_acked(&mut s, "unmute", Command::Mute(false, false));
+    send_acked(&mut s, "mute-again", Command::Mute(true, false));
+    report_mute(&mut s, true);
+    assert_eq!(shown_mute(&s), (Some(true), true));
+    report_mute(&mut s, false);
+    assert_eq!(
+        shown_mute(&s),
+        (Some(true), true),
+        "the superseded unmute was published after the user muted"
+    );
+    report_mute(&mut s, true);
+    assert_eq!(shown_mute(&s), (Some(true), false));
+}
+
+#[test]
+fn volume_confirms_when_linn_skips_intermediate_reports() {
+    let mut s = Script::new(); // volume 10
+    send_acked(&mut s, "v20", Command::Volume(20, false));
+    send_acked(&mut s, "v30", Command::Volume(30, false));
+    send_acked(&mut s, "v40", Command::Volume(40, false));
+    report_volume(&mut s, 40);
+    assert_eq!(shown_volume(&s), (Some(40), false));
+    // Drain rule for A→B→A with 60 never reported: the first 50 frame belongs
+    // to the first 50 and does not confirm. Whether Linn pushes a second 50
+    // after 50→60→50 is unmeasured; without one the lane shows 50, pending,
+    // until SETTLE_LIMIT.
+    send_acked(&mut s, "v50", Command::Volume(50, false));
+    send_acked(&mut s, "v60", Command::Volume(60, false));
+    send_acked(&mut s, "v50-again", Command::Volume(50, false));
+    report_volume(&mut s, 50);
+    assert_eq!(shown_volume(&s), (Some(50), true));
+    report_volume(&mut s, 50);
+    assert_eq!(shown_volume(&s), (Some(50), false));
+}
+
+#[test]
+fn same_volume_and_mute_settle_on_ack_unless_an_older_value_is_unreported() {
+    // Linn does not push an unchanged value (PlayerBar re-sends the current
+    // volume when its popover closes).
+    let mut s = Script::new(); // volume 10, unmuted, already reported by Linn
+    send_acked(&mut s, "same-volume", Command::Volume(10, false));
+    send_acked(&mut s, "same-mute", Command::Mute(false, false));
+    let pending = s.view().pending.unwrap();
+    assert!(
+        !pending.volume && !pending.mute,
+        "a same-value command stays pending until its 3 s timeout"
+    );
+    // Returning to the reported value while 20 is still unreported does wait.
+    send_acked(&mut s, "v20", Command::Volume(20, false));
+    send_acked(&mut s, "v10", Command::Volume(10, false));
+    assert_eq!(shown_volume(&s), (Some(10), true));
+    report_volume(&mut s, 20);
+    assert_eq!(shown_volume(&s), (Some(10), true));
+    report_volume(&mut s, 10);
+    assert_eq!(shown_volume(&s), (Some(10), false));
+}
+
+#[test]
+fn repeated_volume_confirms_on_its_single_frame() {
+    let mut s = Script::new(); // volume 10
+    send_acked(&mut s, "v30", Command::Volume(30, false));
+    // The Lock Screen slider rounds several levels to the same step, so the
+    // same value can be sent again before Linn reports the first one.
+    send_acked(&mut s, "v30-again", Command::Volume(30, false));
+    // Linn applied 30 twice but pushes the unchanged value only once.
+    report_volume(&mut s, 30);
+    assert_eq!(
+        shown_volume(&s),
+        (Some(30), false),
+        "a repeated value waits for a frame Linn never sends"
+    );
+    // Another controller turns the volume within the settle window.
+    report_volume(&mut s, 45);
+    assert_eq!(
+        shown_volume(&s),
+        (Some(45), false),
+        "another controller's change is hidden"
+    );
+}
+
+#[test]
+fn repeated_mute_confirms_on_its_single_frame() {
+    let mut s = Script::new(); // unmuted
+    send_acked(&mut s, "mute", Command::Mute(true, false));
+    send_acked(&mut s, "mute-again", Command::Mute(true, false));
+    report_mute(&mut s, true);
+    assert_eq!(
+        shown_mute(&s),
+        (Some(true), false),
+        "a repeated mute waits for a frame Linn never sends"
+    );
+}
+
+#[test]
+fn coalesced_a_b_a_volume_burst_confirms_on_linns_single_frame() {
+    // The volume analog of pause→play→pause: 30 is in flight, the knob goes
+    // to 31 and back to 30, the waiting 31 is superseded and 30 is sent twice.
+    let mut s = Script::new(); // volume 10
+    s.enqueue("v30", Command::Volume(30, false));
+    assert_eq!(s.send(), ["v30"]);
+    s.enqueue("v31", Command::Volume(31, false));
+    s.enqueue("v30-again", Command::Volume(30, false));
+    s.ack("v30");
+    assert_eq!(s.send(), ["v30-again"]);
+    s.ack("v30-again");
+    report_volume(&mut s, 30);
+    assert_eq!(
+        shown_volume(&s),
+        (Some(30), false),
+        "Linn's only frame for 30 left the lane pending until the 3 s expiry"
+    );
+}
+
+#[test]
+fn a_b_a_drag_ending_on_a_repeated_value_confirms_on_its_single_frame() {
+    let mut s = Script::new(); // volume 10
+    // The knob goes 20→30→20 and the slider sends the final step twice.
+    for (tag, value) in [("a", 20), ("b", 30), ("a-again", 20), ("a-repeat", 20)] {
+        send_acked(&mut s, tag, Command::Volume(value, false));
+    }
+    // Linn reports 20, 30 and the final 20 once: the repeat is unchanged.
+    for late in [20, 30] {
+        report_volume(&mut s, late);
+        assert_eq!(
+            shown_volume(&s),
+            (Some(20), true),
+            "the late frame for {late} confirmed or replaced the final 20"
+        );
+    }
+    report_volume(&mut s, 20);
+    assert_eq!(
+        shown_volume(&s),
+        (Some(20), false),
+        "the drag's final value stays pending until the 3 s expiry"
+    );
+}
+
+#[test]
+fn redundant_pause_after_pause_play_pause_settles_on_ack() {
+    let mut s = Script::new(); // Linn is playing.
+    s.enqueue("pause", Command::Transport(TransportState::Paused as i32));
+    assert_eq!(s.send(), ["pause"]);
+    s.enqueue("play", Command::Transport(TransportState::Playing as i32));
+    s.enqueue(
+        "pause-again",
+        Command::Transport(TransportState::Paused as i32),
+    );
+    s.ack("pause");
+    s.transport(TransportState::Paused as i32);
+    // Linn is now paused and does not push an unchanged transport state.
+    assert_eq!(s.send(), ["pause-again"]);
+    s.ack("pause-again");
+    assert_eq!(s.view().pending, Some(PendingState::default()));
+    s.now += SETTLE_LIMIT;
+    assert!(
+        !s.scheduler.tick(s.now),
+        "the redundant pause blocked the playback lane into a read-back"
+    );
 }

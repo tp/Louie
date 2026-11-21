@@ -69,6 +69,29 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
         error.code == .cancelled && PiLinnRPCError(error).reason == .superseded
     }
 
+    /// Bounds the retry so an unreachable server fails no later than before.
+    static let reconnectRetryTimeout: Duration = .seconds(10)
+
+    /// After a long suspension the first call can go out on a connection iOS has already
+    /// reclaimed and fail at once with `.unavailable`, although the server is reachable. That
+    /// request never reached the server, so retry once and wait for the reconnect. Only for
+    /// playback and volume controls: if a connection drops after the server received a skip,
+    /// the retry skips twice, which is rarer and milder than a Lock Screen skip that is lost.
+    static func retryingUnavailable<Value>(
+        options: CallOptions,
+        isolation _: isolated (any Actor)? = #isolation,
+        _ call: (CallOptions) async throws -> Value
+    ) async throws -> Value {
+        do {
+            return try await call(options)
+        } catch let error as RPCError where error.code == .unavailable && !Task.isCancelled {
+            var retry = options
+            retry.waitForReady = true
+            retry.timeout = min(options.timeout ?? reconnectRetryTimeout, reconnectRetryTimeout)
+            return try await call(retry)
+        }
+    }
+
     func nowPlayingUpdates(room _: String?, updateInterval _: Int) async -> AsyncThrowingStream<Linn.Snapshot, Error> {
         // The server currently owns one Linn room and controls its update rate.
         updates(watch: { [self] receive in
@@ -160,45 +183,45 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
     }
 
     func play(room: String) async throws {
-        _ = try await remapCancellation { try await service().play(Google_Protobuf_Empty(), options: Self.commandOptions) }
+        _ = try await control { try await service().play(Google_Protobuf_Empty(), options: $0) }
     }
 
     func seek(to position: Int, room: String) async throws {
         var request = Louie_Linn_V1_SeekRequest()
         request.positionSeconds = Int32(clamping: position)
-        _ = try await remapCancellation { try await service().seek(request, options: Self.commandOptions) }
+        _ = try await control { try await service().seek(request, options: $0) }
     }
 
     func pause(room: String) async throws {
-        _ = try await remapCancellation { try await service().pause(Google_Protobuf_Empty(), options: Self.commandOptions) }
+        _ = try await control { try await service().pause(Google_Protobuf_Empty(), options: $0) }
     }
 
     func previous(room: String) async throws {
-        _ = try await remapCancellation { try await service().previous(Google_Protobuf_Empty(), options: Self.commandOptions) }
+        _ = try await control { try await service().previous(Google_Protobuf_Empty(), options: $0) }
     }
 
     func next(room: String) async throws {
-        _ = try await remapCancellation { try await service().next(Google_Protobuf_Empty(), options: Self.commandOptions) }
+        _ = try await control { try await service().next(Google_Protobuf_Empty(), options: $0) }
     }
 
     func selectPlaylistItem(at index: Int, room: String) async throws {
         var request = Louie_Linn_V1_SelectPlaylistItemRequest()
         request.index = Int32(clamping: index)
-        _ = try await remapCancellation { try await service().selectPlaylistItem(request, options: Self.commandOptions) }
+        _ = try await control { try await service().selectPlaylistItem(request, options: $0) }
     }
 
     func setVolume(_ volume: Int, room: String, group: Bool) async throws {
         var request = Louie_Linn_V1_SetVolumeRequest()
         request.volume = Int32(clamping: volume)
         request.scope = group ? .group : .room
-        _ = try await remapCancellation { try await service().setVolume(request, options: Self.commandOptions) }
+        _ = try await control { try await service().setVolume(request, options: $0) }
     }
 
     func setMuted(_ isMuted: Bool, room: String, group: Bool) async throws {
         var request = Louie_Linn_V1_SetMutedRequest()
         request.isMuted = isMuted
         request.scope = group ? .group : .room
-        _ = try await remapCancellation { try await service().setMuted(request, options: Self.commandOptions) }
+        _ = try await control { try await service().setMuted(request, options: $0) }
     }
 
     func mediaServices(room: String) async throws -> [Linn.LibraryService] {
@@ -256,6 +279,11 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
         request.mediaID = mediaID
         request.isFavourite = isFavourite
         _ = try await remapCancellation { try await service().setMediaFavourite(request, options: Self.commandOptions) }
+    }
+
+    /// A playback or volume control: survives a connection reclaimed during suspension.
+    private func control<Value>(_ call: (CallOptions) async throws -> Value) async throws -> Value {
+        try await remapCancellation { try await Self.retryingUnavailable(options: Self.commandOptions, call) }
     }
 
     private func remapCancellation<Value>(_ operation: () async throws -> Value) async throws -> Value {

@@ -449,3 +449,146 @@ async fn review_row_tap_while_playing_confirms_without_a_repeated_play_frame() {
     wire.ack(&request).await;
     next.await.unwrap().unwrap();
 }
+
+fn timed_playlist(index: i32, revision: i32) -> Value {
+    let children: serde_json::Map<String, Value> = (0..4)
+        .map(|i| {
+            let row = json!({"class":"track", "name":format!("Song {i}"), "duration":200 + i * 15, "selected":i == index});
+            (i.to_string(), row)
+        })
+        .collect();
+    json!({"requestPath":"/V2/playlist/subscribe", "data":{"total":4, "content_revision":revision, "children":children}})
+}
+
+#[tokio::test]
+async fn pending_skip_publishes_the_destination_rows_duration_without_a_position() {
+    let mut wire = Wire::new().await;
+    wire.update(timed_playlist(0, 1)).await;
+    let row_duration = |s: &StateSnapshot| {
+        let queue = s.now_playing.as_ref().and_then(|p| p.playlist.as_ref());
+        queue
+            .and_then(|q| q.items.get(1))
+            .and_then(|row| row.duration_seconds)
+    };
+    wire.wait(|s| row_duration(s) == Some(215)).await;
+    let gateway = wire.gateway.clone();
+    let skip = tokio::spawn(async move { gateway.skip(1).await });
+    let request = wire.next().await;
+    assert_eq!(request["index"], 1);
+    wire.wait(|s| s.pending.as_ref().unwrap().timeline).await;
+    let timeline = wire.gateway.snapshot().now_playing.unwrap().timeline;
+    assert_eq!(
+        timeline,
+        Some(crate::pb::Timeline {
+            duration_seconds: Some(215),
+            ..Default::default()
+        }),
+        "Now Playing starts the next song without its known duration"
+    );
+    wire.ack(&request).await;
+    skip.await.unwrap().unwrap();
+    wire.update(metadata(1)).await;
+    // Linn's own length differs from the queue row's; it wins on release.
+    wire.update(json!({"requestPath":"/V2/seek/status", "data":{"elapsed":0,"duration":214,"seekable":true}}))
+        .await;
+    wire.update(timed_playlist(1, 2)).await;
+    wire.wait(|s| !s.pending.as_ref().unwrap().timeline).await;
+    let timeline = wire
+        .gateway
+        .snapshot()
+        .now_playing
+        .unwrap()
+        .timeline
+        .unwrap();
+    assert_eq!(
+        (timeline.position_seconds, timeline.duration_seconds),
+        (Some(0), Some(214))
+    );
+}
+
+#[tokio::test]
+async fn volume_a_b_a_late_frames_keep_publishing_the_latest_value() {
+    let mut wire = Wire::new().await; // volume 10
+    for volume in [20, 30, 20] {
+        let gateway = wire.gateway.clone();
+        let call = tokio::spawn(async move {
+            gateway
+                .request(
+                    "/V2/volume/set_vol",
+                    json!({"room":"Linn","volume":volume,"group":false}),
+                )
+                .await
+        });
+        let request = wire.next().await;
+        assert_eq!(request["volume"], volume);
+        wire.ack(&request).await;
+        call.await.unwrap().unwrap();
+    }
+    // Linn applies 20, 30, 20 in order; its status frames lag by about a second.
+    wire.update(json!({"requestPath":"/V2/volume/status","data":{"volume":20}}))
+        .await;
+    wire.update(json!({"requestPath":"/V2/volume/status","data":{"volume":30}}))
+        .await;
+    // Fence: a later frame that changes the published snapshot.
+    wire.update(json!({"requestPath":"/V2/seek/status","data":{"elapsed":41,"duration":201,"seekable":true}}))
+        .await;
+    wire.wait(|s| {
+        s.now_playing
+            .as_ref()
+            .unwrap()
+            .timeline
+            .is_some_and(|t| t.duration_seconds == Some(201))
+    })
+    .await;
+    let snapshot = wire.gateway.snapshot();
+    assert_eq!(
+        snapshot.now_playing.unwrap().room_volume.unwrap().volume,
+        Some(20),
+        "WatchState shows the superseded 30 after the user chose 20 (pending.volume = {})",
+        snapshot.pending.unwrap().volume
+    );
+    wire.update(json!({"requestPath":"/V2/volume/status","data":{"volume":20}}))
+        .await;
+    wire.wait(|s| s.pending == Some(PendingState::default()))
+        .await;
+}
+
+#[tokio::test]
+async fn pause_play_pause_burst_does_not_block_the_next_command_on_read_back() {
+    let mut wire = Wire::new().await; // fake Linn reports "play"
+    let transport = |path: &'static str, gateway: Gateway| {
+        tokio::spawn(async move { gateway.request(path, json!({"room":"Linn"})).await })
+    };
+    let pause = transport("/V2/transport/pause", wire.gateway.clone());
+    let request = wire.next().await;
+    assert_eq!(request["requestPath"], "/V2/transport/pause");
+    let play = transport("/V2/transport/play", wire.gateway.clone());
+    wire.wait(|s| {
+        s.pending.as_ref().unwrap().transport
+            && s.now_playing.as_ref().unwrap().transport_state
+                == Some(TransportState::Playing as i32)
+    })
+    .await;
+    let pause_again = transport("/V2/transport/pause", wire.gateway.clone());
+    assert_eq!(
+        play.await.unwrap().unwrap_err().code(),
+        tonic::Code::Cancelled
+    );
+    wire.ack(&request).await;
+    pause.await.unwrap().unwrap();
+    wire.update(json!({"requestPath":"/V2/transport/status","data":{"transport_state":"pause"}}))
+        .await;
+    let redundant = wire.next().await;
+    assert_eq!(redundant["requestPath"], "/V2/transport/pause");
+    wire.ack(&redundant).await;
+    pause_again.await.unwrap().unwrap();
+    // Linn is already paused and pushes nothing. A row tap must not wait.
+    let started = tokio::time::Instant::now();
+    let _row = wire.row(1);
+    let next = wire.next().await;
+    assert!(
+        next["tag"].as_str().unwrap().starts_with("pi-"),
+        "row tap after pause→play→pause waited {:?} and hit a read-back first: {next}",
+        started.elapsed()
+    );
+}

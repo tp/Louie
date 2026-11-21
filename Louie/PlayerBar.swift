@@ -198,7 +198,6 @@ private struct PlayerBarVolumeButton: View {
 
     @State private var isShowingPopover = false
     @State private var localVolume = 0
-    @State private var volumeUpdateTask: Task<Void, Never>?
 
     private var volumeRange: ClosedRange<Int> {
         0 ... state.maximumVolume
@@ -239,34 +238,9 @@ private struct PlayerBarVolumeButton: View {
                 localVolume = displayedVolume
             }
             .onChange(of: localVolume) { _, newValue in
-                scheduleVolumeUpdate(newValue)
-            }
-            .onChange(of: state.volume) { _, newValue in
-                guard let newValue, !isShowingPopover else {
-                    return
-                }
-
-                localVolume = newValue
-            }
-            .onDisappear {
-                volumeUpdateTask?.cancel()
-                state.setVolume(localVolume)
-            }
-        }
-    }
-
-    private func scheduleVolumeUpdate(_ volume: Int) {
-        volumeUpdateTask?.cancel()
-        volumeUpdateTask = Task { [state] in
-            do {
-                try await Task.sleep(for: .milliseconds(180))
-            } catch {
-                // Superseded by a newer value — a swallowed `try?` here would
-                // send the stale volume immediately, defeating the debounce.
-                return
-            }
-            await MainActor.run {
-                state.setVolume(volume)
+                // Every step goes out so the speaker follows the finger; Linn
+                // keeps one request in flight and always sends the final value.
+                state.setVolume(newValue)
             }
         }
     }

@@ -42,8 +42,18 @@ public final class LinnNowPlayingPublisher {
         }
         var previous: LinnSessionAttributes?
         var wasForeground = false
+        #if os(iOS)
+        var wasConnected = false
+        #endif
         for await (connection, observed, songPending, foreground) in snapshots {
             if Task.isCancelled { break }
+            #if os(iOS)
+            // Linn applies a server frame before it reports `.connected`, so a reconnect carries fresh
+            // state and proves this phone reaches the server. Resuming alone proves neither: the app
+            // can still hold pre-suspension state that APNs has since replaced in the extension.
+            let reconnected = connection == .connected && !wasConnected
+            wasConnected = connection == .connected
+            #endif
             var attributes = observed
             if attributes.playback == previous?.playback {
                 attributes.timestamp = previous!.timestamp
@@ -73,7 +83,10 @@ public final class LinnNowPlayingPublisher {
                     started = true
                 }
                 if let session {
-                    if started || attributes != previous { try await session.update(attributes) }
+                    // Re-sending a reconnect's state, even unchanged, wakes the extension to retry the server.
+                    if started || attributes != previous || reconnected {
+                        try await session.update(attributes)
+                    }
                     if foreground && (started || !wasForeground) {
                         try await session.requestToBecomeSystemPrimary()
                     }

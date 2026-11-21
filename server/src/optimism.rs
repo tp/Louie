@@ -16,6 +16,7 @@ pub enum Command {
         placement: String,
         count: Option<i32>,
         preview: Option<CurrentItem>,
+        duration: Option<i32>,
     },
     Volume(i32, bool),
     Mute(bool, bool),
@@ -49,6 +50,13 @@ impl Command {
                     .and_then(media_preview)
                     .or_else(|| preview.and_then(media_preview))
                     .or_else(|| preview.and_then(container_preview)),
+                // The length of the same item the preview describes, if a track.
+                duration: [first, preview]
+                    .into_iter()
+                    .flatten()
+                    .find(|item| media_preview(item).is_some())
+                    .filter(|item| item.r#type == MediaItemType::Track as i32)
+                    .and_then(|item| item.duration_seconds),
             },
             _ => return None,
         })
@@ -71,8 +79,13 @@ pub struct Prediction {
     index: Option<Option<i32>>,
     total: Option<Option<i32>>,
     timeline: Option<Option<Timeline>>,
+    // The destination's known length and the title it belongs to.
+    duration: Option<(i32, Option<String>)>,
     volume: Option<i32>,
     mute: Option<bool>,
+    // Superseded values Linn has not reported yet, oldest first.
+    late_volumes: Vec<i32>,
+    late_mutes: Vec<bool>,
     clear_items: bool,
     baseline: NowPlayingState,
     queue_change: bool,
@@ -83,15 +96,53 @@ pub struct Prediction {
 
 impl Prediction {
     pub fn new(command: &Command, state: &StateSnapshot) -> Self {
+        Self::replacing(command, state, None)
+    }
+
+    /// Volume and mute dispatch the next value once the previous one is
+    /// acknowledged, before Linn reports it. Assuming Linn reports each applied
+    /// value late and in order (unmeasured; see the debug log), the older
+    /// prediction's unreported values carry over: their frames must neither
+    /// confirm nor contradict this value.
+    pub fn replacing(command: &Command, state: &StateSnapshot, older: Option<Self>) -> Self {
         let baseline = state.now_playing.clone().unwrap_or_default();
         let mut p = Self {
             baseline,
             ..Self::default()
         };
+        if let Some(older) = older {
+            p.late_volumes = older.late_volumes;
+            p.late_volumes.extend(older.volume);
+            p.late_mutes = older.late_mutes;
+            p.late_mutes.extend(older.mute);
+        }
+        // Linn does not push an unchanged value: repeating the newest
+        // unreported value adds no frame of its own.
         match command {
-            Command::Transport(value) => p.transport = Some(*value),
-            Command::Volume(value, _) => p.volume = Some(*value),
-            Command::Mute(value, _) => p.mute = Some(*value),
+            Command::Volume(value, _) if p.late_volumes.last() == Some(value) => {
+                p.late_volumes.pop();
+            }
+            Command::Mute(value, _) if p.late_mutes.last() == Some(value) => {
+                p.late_mutes.pop();
+            }
+            _ => {}
+        }
+        let room = p.baseline.room_volume.unwrap_or_default();
+        let mut known_length = None;
+        // Linn does not push an unchanged value. A target it already reports,
+        // with no older value still to come, settles on acknowledgement.
+        match command {
+            Command::Transport(value) => {
+                p.transport = (p.baseline.transport_state != Some(*value)).then_some(*value);
+            }
+            Command::Volume(value, _) => {
+                p.volume =
+                    (room.volume != Some(*value) || !p.late_volumes.is_empty()).then_some(*value);
+            }
+            Command::Mute(value, _) => {
+                p.mute =
+                    (room.is_muted != Some(*value) || !p.late_mutes.is_empty()).then_some(*value);
+            }
             Command::Seek(position) => {
                 let mut timeline = p.baseline.timeline.unwrap_or_default();
                 timeline.position_seconds = Some(*position);
@@ -100,13 +151,13 @@ impl Prediction {
             }
             Command::Select(index) => {
                 p.index = Some(Some(*index));
-                p.item = Some(
-                    p.baseline
-                        .playlist
-                        .as_ref()
-                        .and_then(|q| q.items.iter().find(|row| row.index == *index))
-                        .and_then(playlist_preview),
-                );
+                let row = p
+                    .baseline
+                    .playlist
+                    .as_ref()
+                    .and_then(|q| q.items.iter().find(|row| row.index == *index));
+                p.item = Some(row.and_then(playlist_preview));
+                known_length = row.and_then(|row| row.duration_seconds);
                 p.timeline = Some(None);
             }
             Command::Skip => {
@@ -119,6 +170,7 @@ impl Prediction {
                 placement,
                 count,
                 preview,
+                duration,
             } => {
                 p.queue_change = true;
                 if placement == "replace" {
@@ -137,10 +189,15 @@ impl Prediction {
                 }
                 if matches!(placement.as_str(), "now" | "replace") {
                     p.item = Some(preview.clone());
+                    known_length = *duration;
                     p.timeline = Some(None);
                 }
             }
         }
+        let song = title(p.item.as_ref().and_then(Option::as_ref)).map(str::to_owned);
+        p.duration = known_length
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| (seconds, song));
         if command.changes_track() {
             p.transport = Some(TransportState::Playing as i32);
             // An unchanged transport state need not be pushed again. A later
@@ -164,11 +221,10 @@ impl Prediction {
             }
             "volume" | "mute" => {
                 if let Some(room) = &actual.room_volume {
-                    if path == "volume" && self.volume == room.volume {
-                        self.volume = None;
-                    }
-                    if path == "mute" && self.mute == room.is_muted {
-                        self.mute = None;
+                    if path == "volume" {
+                        observe_latest(&mut self.volume, &mut self.late_volumes, room.volume);
+                    } else {
+                        observe_latest(&mut self.mute, &mut self.late_mutes, room.is_muted);
                     }
                 }
             }
@@ -225,6 +281,14 @@ impl Prediction {
                     self.item = None;
                     // A track change invalidates the old timeline, but only a
                     // subsequent seek event may supply the new track's position.
+                    // Another song than predicted must not inherit its length.
+                    if self
+                        .duration
+                        .as_ref()
+                        .is_some_and(|(_, song)| song.as_deref() != title(incoming))
+                    {
+                        self.duration = None;
+                    }
                 }
             }
             "/V2/seek/status" => {
@@ -296,7 +360,14 @@ impl Prediction {
             flags.current_item = true;
         }
         if let Some(value) = self.timeline {
-            playing.timeline = value;
+            // A pending track change shows only the destination's known length:
+            // never a position, seek range or sample anchor of the old song.
+            playing.timeline = value.or_else(|| {
+                self.duration.as_ref().map(|(seconds, _)| Timeline {
+                    duration_seconds: Some(*seconds),
+                    ..Timeline::default()
+                })
+            });
             flags.timeline = true;
         }
         if let Some(value) = self.index {
@@ -325,12 +396,36 @@ impl Prediction {
     }
 }
 
+/// Assumes Linn reports each applied value in order. A frame for a superseded
+/// value consumes the backlog through its first occurrence; only a value beyond
+/// the backlog can confirm the latest target. Anything else keeps waiting.
+fn observe_latest<T: Copy + PartialEq>(
+    target: &mut Option<T>,
+    late: &mut Vec<T>,
+    reported: Option<T>,
+) {
+    let Some(reported) = reported else {
+        return;
+    };
+    if let Some(position) = late.iter().position(|value| *value == reported) {
+        late.drain(..=position);
+    } else if *target == Some(reported) {
+        *target = None;
+        late.clear();
+    }
+}
+
+fn title(item: Option<&CurrentItem>) -> Option<&str> {
+    item.and_then(|item| {
+        item.track
+            .as_ref()
+            .and_then(|t| t.title.as_deref())
+            .or(item.display_name.as_deref())
+    })
+}
+
 fn has_title(item: &CurrentItem) -> bool {
-    item.track
-        .as_ref()
-        .and_then(|t| t.title.as_deref())
-        .or(item.display_name.as_deref())
-        .is_some_and(|s| !s.trim().is_empty())
+    title(Some(item)).is_some_and(|s| !s.trim().is_empty())
 }
 
 // The gateway exposes display metadata, not a stable track ID. This is evidence
