@@ -45,6 +45,7 @@ impl LinnService {
     }
 
     async fn skip(&self, step: i32) -> Result<Response<()>, Status> {
+        tracing::info!(step, "skip requested");
         self.gateway.skip(step).await?;
         Ok(Response::new(()))
     }

@@ -63,6 +63,9 @@ message PendingState {
   bool playback = 1;
   // Aggregate retained for older clients.
   bool queue = 2;
+  // During a pending track change, now_playing.timeline carries only the
+  // destination's known duration, never the old song's position. A seek
+  // queued behind the change adds its requested position.
   bool timeline = 3;
   bool volume = 4;
   bool mute = 5;
@@ -122,6 +125,10 @@ message PlaylistItem {
   bool is_current = 7;
 }
 
+// While a track change is pending, only duration_seconds may be set: the
+// destination's known length. Position, seek bounds and anchor stay absent
+// until Linn reports the new track, unless a seek queued behind the change
+// supplies its requested position and anchor.
 message Timeline {
   optional int32 position_seconds = 1;
   optional int32 duration_seconds = 2;

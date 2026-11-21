@@ -231,3 +231,38 @@ fn predicted_resume_anchors_at_publication_not_the_start_of_the_pause() {
         100.0
     );
 }
+
+#[test]
+fn pending_row_selection_pushes_the_destination_duration_without_a_position() {
+    // The Home Server knows every queued row's length from the playlist. A
+    // predicted row must not reach the Lock Screen without one (APNs content
+    // must survive the phone leaving the LAN, so no later local fill-in).
+    let update = registration(2);
+    let mut observed = snapshot();
+    observed.now_playing.as_mut().unwrap().playlist = Some(pb::Playlist {
+        current_index: Some(1),
+        total: Some(3),
+        items: (0..3)
+            .map(|index| pb::PlaylistItem {
+                index,
+                display_name: Some(format!("Song {index}")),
+                duration_seconds: Some(200 + index * 20),
+                is_current: index == 1,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let initial = plan(&observed, &update, &[], None, 100).unwrap();
+    let mut projected = observed.clone();
+    crate::optimism::Prediction::new(&crate::optimism::Command::Select(2), &observed)
+        .project(&mut projected);
+    let pushed = plan(&projected, &update, &[], Some(&initial), 101).unwrap();
+    let playback = &pushed["aps"]["attributes"]["playback"];
+    assert_eq!(playback["song"]["title"], "Song 2");
+    assert_eq!(
+        playback["timeline"],
+        json!({"position": null, "duration": 240, "progress": null, "seekableRange": null, "sampledAtSeconds": null}),
+        "the predicted song's payload carries no duration (or the old song's position)"
+    );
+}

@@ -501,6 +501,9 @@ nonisolated struct Louie_Linn_V1_PendingState: Sendable {
   /// Aggregate retained for older clients.
   var queue: Bool = false
 
+  /// During a pending track change, now_playing.timeline carries only the
+  /// destination's known duration, never the old song's position. A seek
+  /// queued behind the change adds its requested position.
   var timeline: Bool = false
 
   var volume: Bool = false
@@ -781,6 +784,10 @@ nonisolated struct Louie_Linn_V1_PlaylistItem: Sendable {
   fileprivate var _artworkURL: String? = nil
 }
 
+/// While a track change is pending, only duration_seconds may be set: the
+/// destination's known length. Position, seek bounds and anchor stay absent
+/// until Linn reports the new track, unless a seek queued behind the change
+/// supplies its requested position and anchor.
 nonisolated struct Louie_Linn_V1_Timeline: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for

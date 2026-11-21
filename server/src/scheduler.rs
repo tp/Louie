@@ -153,7 +153,8 @@ impl<T> Scheduler<T> {
                 continue;
             }
             // Volume/mute retain latest-value-wins after ack. Their old prediction
-            // is replaced permanently when the next value is dispatched.
+            // is replaced when the next value is dispatched; its unreported
+            // values remain expected as late frames.
             if lane
                 .active
                 .as_ref()
@@ -177,9 +178,10 @@ impl<T> Scheduler<T> {
                     cancel_dependents(lane, &next.tag, &mut self.completed);
                     continue;
                 }
+                let older = lane.active.take().map(|active| active.prediction);
                 lane.active = Some(Active {
                     tag: next.tag.clone(),
-                    prediction: Prediction::new(&next.command, observed),
+                    prediction: Prediction::replacing(&next.command, observed, older),
                     command: next.command,
                     acknowledged: false,
                     expires: now + ACK_LIMIT,

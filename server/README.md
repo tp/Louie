@@ -38,9 +38,13 @@ Row selection, skip and immediate media playback predict playing, including when
 starting from pause. That prediction survives intermediate paused/loading frames
 until transport confirms it or the command fails/expires. Already-playing transport
 is standing evidence; a later stopped/loading event invalidates it and requires a
-new playing event. A track's timeline is anchored by a near-zero position sample.
-Continuous progress beyond that reset counts only after the new song's metadata
-confirms; a jump away from the sequence discards the evidence. This lets a delayed
+new playing event. While a track change is pending, the projected timeline carries
+only the destination's known duration (its playlist row, or the first track of
+immediate media), never the old song's position, seek range or sample anchor; only a
+seek queued behind the change adds its requested position. A song other than the
+predicted one drops the duration. A track's timeline is anchored by a near-zero
+position sample. Continuous progress beyond that reset counts only after the new
+song's metadata confirms; a jump away from the sequence discards the evidence. This lets a delayed
 playlist update confirm after the new song has advanced beyond two seconds without
 extending old-song progress during a quick second skip.
 
@@ -51,9 +55,18 @@ Sequential skips accumulate against the projected row. Shuffle/unknown destinati
 stay unknown until observed. A→B→A sends A once if A settles successfully.
 
 Volume and mute have independent lanes and keep latest-value-wins dispatch after
-acknowledgement. Library browsing is independent of playback; searches retain their
-existing serial queue. Apple clients project server snapshots and retain immediate
-local volume/mute feedback and row markers.
+acknowledgement. The lanes assume Linn reports each applied value late and in order.
+This is unmeasured: `RUST_LOG=louie_server=debug` logs every dispatched, acknowledged
+and reported volume so it can be checked on the device. Values superseded before Linn
+reported them remain expected: their late frames neither confirm the latest value
+nor publish it as truth. Linn does not push an unchanged value, so repeating the
+newest unreported value expects no frame of its own, and a play/pause, volume or mute
+command that matches the reported state (with no superseded value still to come)
+settles on acknowledgement. If Linn skips reports, a final value that also appears
+earlier in the backlog is shown but stays pending until the settle limit. Library
+browsing is independent of playback; searches retain their existing serial queue.
+Apple clients project server snapshots and retain immediate local volume/mute
+feedback and row markers.
 
 | Limit | Behaviour |
 |---|---|
@@ -137,7 +150,7 @@ The systemd unit loads `~/.config/louie/server.env` on the Pi.
 | `LINN_ROOM` | `Linn` | Room name reported by the gateway |
 | `LINN_MAX_VOLUME` | `70` | Volume ceiling; startup rejects values outside 0–70 |
 | `LOUIE_GRPC_BIND` | `127.0.0.1:50051` | Listener address; use the Pi's reserved LAN IPv4 address for Apple clients |
-| `RUST_LOG` | `louie_server=info` | Log filter |
+| `RUST_LOG` | `louie_server=info` | Log filter; `louie_server=debug` adds volume dispatch, acknowledgement latency and reported values |
 | `SENTRY_DSN` | Unset | Optional warning, error, and panic reporting |
 
 For development, replace the Linn hostname below with your gateway:

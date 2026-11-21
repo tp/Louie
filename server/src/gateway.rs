@@ -9,7 +9,7 @@ use linn_ci_gateway::{models, websocket};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::optimism::Command;
 use crate::pb::{
@@ -55,6 +55,8 @@ struct Pending {
     reply: oneshot::Sender<Result<Value, tonic::Status>>,
     deadline: tokio::time::Instant,
     search: bool,
+    // Dispatch time of a volume command, to measure Linn's set_vol latency.
+    volume_sent: Option<tokio::time::Instant>,
 }
 
 struct TaggedRequest {
@@ -391,6 +393,14 @@ async fn run_connection(
                         scheduler.acknowledge(tag, tokio::time::Instant::now());
                         Ok(envelope.clone())
                     };
+                    if let Some(sent) = waiter.volume_sent {
+                        let elapsed_ms = sent.elapsed().as_millis() as u64;
+                        if result.is_ok() {
+                            debug!(tag, elapsed_ms, "volume acknowledged");
+                        } else {
+                            debug!(tag, elapsed_ms, "volume rejected");
+                        }
+                    }
                     let _ = waiter.reply.send(result);
                     if waiter.search {
                         search_in_flight =
@@ -480,7 +490,9 @@ async fn run_connection(
                         .and_then(|p| p.playlist.as_ref());
                     if !shuffle && let Some(current) = playlist.and_then(|p| p.current_index) {
                         let target = current.saturating_add(step);
-                        if target < 0 || playlist.and_then(|p| p.total).is_some_and(|n| target >= n) {
+                        let total = playlist.and_then(|p| p.total);
+                        if target < 0 || total.is_some_and(|n| target >= n) {
+                            info!(index = target, total = ?total, "skip ignored: no queue item");
                             let _ = request.reply.send(Ok(Value::Null));
                             continue;
                         }
@@ -564,6 +576,10 @@ async fn run_connection(
                 for tag in expired {
                     if let Some(waiter) = pending.remove(&tag) {
                         scheduler.reject(&tag);
+                        if let Some(sent) = waiter.volume_sent {
+                            let elapsed_ms = sent.elapsed().as_millis() as u64;
+                            debug!(tag, elapsed_ms, "volume timed out");
+                        }
                         let _ = waiter.reply.send(Err(tonic::Status::deadline_exceeded(
                             "Linn request timed out",
                         )));
@@ -593,6 +609,13 @@ async fn run_connection(
             }
         }
         for (request, result) in scheduler.take_completed() {
+            if request.path == "/V2/volume/set_vol"
+                && let Err(status) = &result
+            {
+                // Superseded (or expired) while waiting: never dispatched.
+                let volume = &request.body["volume"];
+                debug!(%volume, code = ?status.code(), "volume not sent");
+            }
             let _ = request.reply.send(result.map(|()| Value::Null));
         }
         let mut snapshot = scheduler.snapshot(observed);
@@ -735,6 +758,10 @@ async fn send_request(
     search: bool,
 ) -> Result<bool, String> {
     let TaggedRequest { tag, request } = tagged;
+    let volume_sent = (request.path == "/V2/volume/set_vol").then(|| {
+        debug!(tag, volume = %request.body["volume"], "volume dispatched");
+        tokio::time::Instant::now()
+    });
     let mut body = request.body;
     body["requestPath"] = json!(request.path);
     body["tag"] = json!(tag);
@@ -757,6 +784,7 @@ async fn send_request(
             reply: request.reply,
             deadline: tokio::time::Instant::now() + Duration::from_secs(5),
             search,
+            volume_sent,
         },
     );
     if let Some(started) = request.started {
@@ -941,6 +969,8 @@ fn apply_update(
             let Some(data) = response.data else {
                 return false;
             };
+            // With "volume dispatched", shows whether Linn reports every value.
+            debug!(volume = ?data.volume, mute = ?data.mute, "volume reported");
             let volume = now_playing.room_volume.get_or_insert_default();
             if let Some(level) = data.volume {
                 volume.volume = Some(level.min(volume.maximum_volume));
