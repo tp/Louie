@@ -66,6 +66,9 @@ public final class LinnNowPlayingPublisher {
                 // APNs can still keep the system session current off the home network.
                 if identity != nil && [.idle, .connecting, .serverUnreachable].contains(connection) { continue }
                 guard connection == .connected, attributes.hasContent else {
+                    if session != nil {
+                        Self.logger.notice("Ending Now Playing: connection=\(String(describing: connection), privacy: .public) hasContent=\(attributes.hasContent) state=\(attributes.playback.state?.rawValue ?? "nil", privacy: .public)")
+                    }
                     try await end()
                     previous = nil
                     wasForeground = foreground
@@ -79,6 +82,9 @@ public final class LinnNowPlayingPublisher {
                     session = existing.first { $0.id == attributes.id }
                     if session == nil {
                         session = try await RemoteMediaSession.start(attributes: attributes)
+                        Self.logger.notice("Started Now Playing session")
+                    } else {
+                        Self.logger.notice("Reusing Now Playing session")
                     }
                     started = true
                 }

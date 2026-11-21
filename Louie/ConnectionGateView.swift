@@ -17,6 +17,7 @@
 
 import Linn
 import LinnNowPlaying
+import OSLog
 import SwiftUI
 
 struct ConnectionGateView: View {
@@ -110,7 +111,9 @@ struct ConnectionGateView: View {
                 }
             }
         }
-        .onChange(of: scenePhase) { _, newPhase in
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            Logger(subsystem: "xyz.preetz.Louie", category: "App")
+                .notice("Scene phase \(String(describing: oldPhase), privacy: .public) -> \(String(describing: newPhase), privacy: .public)")
             nowPlaying.isForeground = newPhase == .active
             // Coming back from Settings or the permission prompt: retry now
             // instead of waiting out the backoff sleep.

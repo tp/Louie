@@ -44,7 +44,12 @@ public extension LinnGateway {
 public final class Linn {
     public let room: String
     public private(set) var maximumVolume: Int
-    public private(set) var connectionState: ConnectionState = .idle
+    public private(set) var connectionState: ConnectionState = .idle {
+        didSet {
+            guard oldValue != connectionState else { return }
+            Self.logger.notice("Connection \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.connectionState), privacy: .public)")
+        }
+    }
     public private(set) var library = Library()
     public private(set) var currentSong: Song?
     public private(set) var isCurrentSongPending = false
@@ -222,7 +227,8 @@ public final class Linn {
         volumeTask?.cancel()
     }
 
-    public func start() {
+    public func start(file: StaticString = #fileID, line: UInt = #line) {
+        Self.logger.notice("start() from \(file.description, privacy: .public):\(line)")
         if linnGateway == nil, !configurationLoadAttempted {
             configurationLoadAttempted = true
             do {
@@ -289,7 +295,8 @@ public final class Linn {
         }
     }
 
-    public func stop() {
+    public func stop(file: StaticString = #fileID, line: UInt = #line) {
+        Self.logger.notice("stop() from \(file.description, privacy: .public):\(line)")
         updatesTask?.cancel()
         updatesTask = nil
         invalidateConnectionWork()
