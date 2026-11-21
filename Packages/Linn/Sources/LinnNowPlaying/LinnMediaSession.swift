@@ -18,12 +18,20 @@ public final class LinnMediaSession {
     @ObservationIgnored private var monitoringEnabled = false
     @ObservationIgnored private var monitoringTask: Task<Void, Never>?
     @ObservationIgnored private var monitoringGeneration = 0
+    /// Diagnostics: only a session on the real gateway probes the network.
+    @ObservationIgnored private let probesNetwork: Bool
     private static let logger = Logger(subsystem: "xyz.preetz.Louie", category: "NowPlaying")
 
     public init(attributes: LinnSessionAttributes, gateway: (any LinnGateway)? = nil) {
         id = attributes.id
         self.attributes = attributes
         self.gateway = gateway ?? Linn.Configuration(serverURL: attributes.serverURL).makeGateway()
+        probesNetwork = gateway == nil
+        Self.logger.notice("Session created: host=\(attributes.serverURL.host() ?? "?", privacy: .public) \(Self.summary(attributes), privacy: .public)")
+    }
+
+    private static func summary(_ attributes: LinnSessionAttributes) -> String {
+        "state=\(attributes.playback.state.map(\.rawValue) ?? "nil") canControl=\(attributes.canControlPlayback) hasContent=\(attributes.hasContent) push=\(attributes.installationID != nil)"
     }
 
     @ObservationIgnored private var pushTokenTask: Task<Void, Never>?
@@ -53,6 +61,14 @@ public final class LinnMediaSession {
         guard monitoringTask == nil else { return }
         monitoringGeneration += 1
         let generation = monitoringGeneration
+        Self.logger.notice("Monitor \(generation) started, canReachServer=\(self.canReachServer)")
+        if probesNetwork {
+            let url = attributes.serverURL
+            Task {
+                let result = await ReachabilityProbe.describe(url)
+                Self.logger.notice("Monitor \(generation) network probe: \(result, privacy: .public)")
+            }
+        }
         monitoringTask = Task { [weak self, gateway, room = attributes.room] in
             do {
                 let updates = await gateway.nowPlayingUpdates(room: room, updateInterval: 1)
@@ -107,6 +123,7 @@ public final class LinnMediaSession {
             // Resuming often fails once on a socket iOS reclaimed while suspended. The gateway's
             // 1 s retry failing as well means this phone has no route to the server.
             consecutiveUnreachable += 1
+            Self.logger.notice("WatchState unreachable (\(self.consecutiveUnreachable) in a row)")
             if consecutiveUnreachable >= 2 { setCanReachServer(false) }
         case .connected, .connecting, .linnUnavailable:
             consecutiveUnreachable = 0
@@ -128,6 +145,7 @@ public final class LinnMediaSession {
 
     public func update(_ attributes: LinnSessionAttributes) {
         guard attributes.id == id else { return }
+        Self.logger.notice("Attributes update: \(Self.summary(attributes), privacy: .public) monitor=\(self.monitoringTask != nil) canReachServer=\(self.canReachServer)")
         self.attributes = attributes
         // APNs or the app woke the extension. A stopped monitor, or one backing off after
         // losing this phone's route, gets a fresh attempt so disabled controls can return.

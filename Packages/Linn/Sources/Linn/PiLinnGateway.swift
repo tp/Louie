@@ -1,6 +1,7 @@
 import Foundation
 import GRPCCore
 import GRPCNIOTransportHTTP2TransportServices
+import OSLog
 import SwiftProtobuf
 
 private actor WatchAttempt {
@@ -16,6 +17,14 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
     private typealias Client = Louie_Linn_V1_Linn.Client<Transport>
     typealias Watch = @Sendable (@escaping @Sendable (Louie_Linn_V1_StateSnapshot) async -> Void) async throws -> Void
     typealias Sleep = @Sendable (Int) async throws -> Void
+    private static let logger = Logger(subsystem: "Louie.Linn", category: "Gateway")
+
+    /// The gRPC code, message and transport cause, which the user-facing error drops.
+    static func diagnostics(_ error: any Error) -> String {
+        guard let error = error as? RPCError else { return String(describing: error) }
+        return "code=\(error.code) message=\(error.message) cause=\(error.cause.map { String(describing: $0) } ?? "none")"
+    }
+
     private static let commandOptions: CallOptions = {
         var options = CallOptions.defaults
         // 15 s bounded server queue + 5 s gateway acknowledgement, with margin.
@@ -120,6 +129,7 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
                             continuation.yield(PiLinnMapping.nowPlaying(snapshot))
                         }
                         guard !Task.isCancelled else { break }
+                        Self.logger.notice("WatchState ended without an error")
                         continuation.yield(Linn.Snapshot(connectionState: .serverUnreachable))
                     } catch is CancellationError {
                         break
@@ -128,6 +138,7 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
                         return
                     } catch let error as RPCError {
                         guard !Task.isCancelled else { break }
+                        Self.logger.notice("WatchState attempt failed: \(Self.diagnostics(error), privacy: .public)")
                         if Self.isTerminalStreamError(error.code) {
                             continuation.finish(throwing: PiLinnRPCError(error))
                             return
@@ -137,6 +148,7 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
                         // A Pi restart or network transition closes WatchState. Resume
                         // from its next complete snapshot on the same gRPC client.
                         guard !Task.isCancelled else { break }
+                        Self.logger.notice("WatchState attempt failed: \(Self.diagnostics(error), privacy: .public)")
                         continuation.yield(Linn.Snapshot(connectionState: .serverUnreachable))
                     }
                     if await attempt.hasReceivedSnapshot() { retrySeconds = 1 }
@@ -293,6 +305,7 @@ actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
             if error.code == .cancelled && (Task.isCancelled || Self.isSuperseded(error)) {
                 throw CancellationError()
             }
+            Self.logger.notice("RPC failed: \(Self.diagnostics(error), privacy: .public)")
             throw PiLinnRPCError(error)
         }
     }

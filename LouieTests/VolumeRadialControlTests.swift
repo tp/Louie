@@ -38,10 +38,30 @@ struct VolumeRadialControlTests {
     }
 
     @Test func wrapAroundJumpIsRejectedWhileSmallStepsPass() {
-        #expect(!VolumeRadialControl.acceptsDragValue(70, from: 0, in: range))
-        #expect(!VolumeRadialControl.acceptsDragValue(0, from: 70, in: range))
-        #expect(VolumeRadialControl.acceptsDragValue(1, from: 0, in: range))
-        #expect(VolumeRadialControl.acceptsDragValue(33, from: 36, in: range))
+        #expect(!VolumeRadialControl.acceptsDragProgress(1, from: 0))
+        #expect(!VolumeRadialControl.acceptsDragProgress(0, from: 1))
+        #expect(VolumeRadialControl.acceptsDragProgress(1 / 70, from: 0))
+        #expect(VolumeRadialControl.acceptsDragProgress(33 / 70, from: 36 / 70))
+    }
+
+    @Test func dragFollowsTheFingerBetweenWholeSteps() {
+        // The arc and thumb draw this progress, so it must not snap to steps;
+        // only the rounded value is sent, and it changes at the half step.
+        let step = 270.0 / 70
+        var drag = VolumeRadialControl.Drag(
+            start: pointOnTrack(degrees: degrees(for: 10)),
+            thumb: pointOnTrack(degrees: degrees(for: 10)),
+            center: center,
+            radius: radius,
+            tolerance: 32,
+        )
+        let partway = progress(of: &drag, at: degrees(for: 10) + 0.4 * step, from: 10.0 / 70)
+        let pastHalf = progress(of: &drag, at: degrees(for: 10) + 0.6 * step, from: partway)
+
+        #expect(abs(partway - 10.4 / 70) < 1e-9)
+        #expect(VolumeRadialControl.value(forProgress: partway, range: range) == 10)
+        #expect(abs(pastHalf - 10.6 / 70) < 1e-9)
+        #expect(VolumeRadialControl.value(forProgress: pastHalf, range: range) == 11)
     }
 
     @Test func turningAlongTheArcFollowsTheFinger() {
@@ -127,26 +147,42 @@ struct VolumeRadialControlTests {
             tolerance: 32,
         )
         var current = start
+        var shown = Double(start) / Double(range.upperBound)
         var heard: [Int] = []
         for sample in samples {
             guard
-                let next = drag.value(
+                let next = drag.progress(
                     at: sample,
-                    from: current,
+                    from: shown,
                     center: center,
                     radius: radius,
                     startAngle: .degrees(135),
                     endAngle: .degrees(405),
-                    range: range,
-                ),
-                next != current
+                )
             else {
+                // The view falls back to the last whole step.
+                shown = Double(current) / Double(range.upperBound)
                 continue
             }
 
-            current = next
-            heard.append(next)
+            shown = next
+            let stepped = VolumeRadialControl.value(forProgress: next, range: range)
+            if stepped != current {
+                current = stepped
+                heard.append(stepped)
+            }
         }
         return (heard, drag.isHolding)
+    }
+
+    private func progress(of drag: inout VolumeRadialControl.Drag, at degrees: Double, from current: Double) -> Double {
+        drag.progress(
+            at: pointOnTrack(degrees: degrees),
+            from: current,
+            center: center,
+            radius: radius,
+            startAngle: .degrees(135),
+            endAngle: .degrees(405),
+        ) ?? .nan
     }
 }

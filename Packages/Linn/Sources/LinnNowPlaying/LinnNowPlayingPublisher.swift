@@ -66,6 +66,9 @@ public final class LinnNowPlayingPublisher {
                 // APNs can still keep the system session current off the home network.
                 if identity != nil && [.idle, .connecting, .serverUnreachable].contains(connection) { continue }
                 guard connection == .connected, attributes.hasContent else {
+                    if session != nil {
+                        Self.logger.notice("Ending Now Playing: connection=\(String(describing: connection), privacy: .public) hasContent=\(attributes.hasContent) state=\(attributes.playback.state?.rawValue ?? "nil", privacy: .public)")
+                    }
                     try await end()
                     previous = nil
                     wasForeground = foreground
@@ -79,10 +82,21 @@ public final class LinnNowPlayingPublisher {
                     session = existing.first { $0.id == attributes.id }
                     if session == nil {
                         session = try await RemoteMediaSession.start(attributes: attributes)
+                        Self.logger.notice("Started Now Playing session")
+                    } else {
+                        Self.logger.notice("Reusing Now Playing session")
                     }
                     started = true
                 }
                 if let session {
+                    // A knob drag changes only the volume, many times a second, while the app
+                    // covers the Lock Screen anyway: coalesce those to one update per 300 ms.
+                    // Observations hands the newest value to the next iteration, so the final
+                    // volume is still sent.
+                    if !started, !reconnected, foreground, let previous,
+                       attributes.volume != previous.volume, attributes.ignoringVolume == previous.ignoringVolume {
+                        try await Task.sleep(for: .milliseconds(300))
+                    }
                     // Re-sending a reconnect's state, even unchanged, wakes the extension to retry the server.
                     if started || attributes != previous || reconnected {
                         try await session.update(attributes)
@@ -135,5 +149,13 @@ public final class LinnNowPlayingPublisher {
         session = nil
         model = nil
         #endif
+    }
+}
+
+private extension LinnSessionAttributes {
+    var ignoringVolume: Self {
+        var copy = self
+        copy.volume = nil
+        return copy
     }
 }

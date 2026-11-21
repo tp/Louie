@@ -44,7 +44,12 @@ public extension LinnGateway {
 public final class Linn {
     public let room: String
     public private(set) var maximumVolume: Int
-    public private(set) var connectionState: ConnectionState = .idle
+    public private(set) var connectionState: ConnectionState = .idle {
+        didSet {
+            guard oldValue != connectionState else { return }
+            Self.logger.notice("Connection \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.connectionState), privacy: .public)")
+        }
+    }
     public private(set) var library = Library()
     public private(set) var currentSong: Song?
     public private(set) var isCurrentSongPending = false
@@ -222,7 +227,8 @@ public final class Linn {
         volumeTask?.cancel()
     }
 
-    public func start() {
+    public func start(file: StaticString = #fileID, line: UInt = #line) {
+        Self.logger.notice("start() from \(file.description, privacy: .public):\(line)")
         if linnGateway == nil, !configurationLoadAttempted {
             configurationLoadAttempted = true
             do {
@@ -289,7 +295,8 @@ public final class Linn {
         }
     }
 
-    public func stop() {
+    public func stop(file: StaticString = #fileID, line: UInt = #line) {
+        Self.logger.notice("stop() from \(file.description, privacy: .public):\(line)")
         updatesTask?.cancel()
         updatesTask = nil
         invalidateConnectionWork()
@@ -926,7 +933,11 @@ public final class Linn {
         }
         currentSong = update.currentSong
         isCurrentSongPending = update.currentSong == nil && update.pending.currentItem
-        playlist = update.playlist
+        // Assign once, with stable ids: the setter skips identical frames, while
+        // mutating `playlist` in place would notify every observer each frame.
+        var incomingPlaylist = update.playlist
+        incomingPlaylist.songs = Self.stableQueueSongs(incomingPlaylist.songs)
+        playlist = incomingPlaylist
         timeline = update.timeline
         if let pendingQueueIndex,
            (pendingQueueExpiresAt.map({ Date() >= $0 }) ?? true
@@ -934,7 +945,6 @@ public final class Linn {
             self.pendingQueueIndex = nil
             pendingQueueExpiresAt = nil
         }
-        assignStableQueueSongIDs()
         if let serverMaximum = update.maximumVolume, serverMaximum > 0 {
             maximumVolume = serverMaximum
         }
@@ -1020,7 +1030,7 @@ public final class Linn {
         return target(current)
     }
 
-    private func assignStableQueueSongIDs() {
+    private static func stableQueueSongs(_ songs: [Song]) -> [Song] {
         // Content-based identity instead of the positional "playlist-<index>"
         // ids the gateway mapping produces. Positional ids make SwiftUI treat
         // a reorder as N in-place content swaps (wrong animations, broken
@@ -1029,7 +1039,7 @@ public final class Linn {
         // Metadata enrichment (such as a newly available duration) must not
         // change row identity.
         var occurrences: [String: Int] = [:]
-        playlist.songs = playlist.songs
+        return songs
             .sorted { ($0.queueIndex ?? 0) < ($1.queueIndex ?? 0) }
             .map { song in
                 var song = song
@@ -1096,7 +1106,7 @@ public final class Linn {
                 playlist.total = currentIndex + 1
             }
 
-            assignStableQueueSongIDs()
+            playlist.songs = Self.stableQueueSongs(playlist.songs)
         }
 
         /// Preview/mock-only adapter from button availability flags to the internal queue shape.

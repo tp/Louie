@@ -21,8 +21,15 @@ struct VolumeRadialControl: View {
     /// The touch in progress. A cancelled drag skips `onEnded`, but the next
     /// gesture has a new start and is checked again.
     @State private var drag: Drag?
+    /// Where the finger holds the knob, unrounded, so the arc and thumb follow
+    /// it smoothly. Only whole steps reach `value` and the speaker.
+    @State private var dragProgress: Double?
 
     private var progress: Double {
+        dragProgress ?? steppedProgress
+    }
+
+    private var steppedProgress: Double {
         guard range.upperBound > range.lowerBound else { return 0 }
 
         let clamped = min(max(value, range.lowerBound), range.upperBound)
@@ -63,6 +70,7 @@ struct VolumeRadialControl: View {
                     }
                     .onEnded { _ in
                         drag = nil
+                        dragProgress = nil
                     },
             )
         }
@@ -71,20 +79,25 @@ struct VolumeRadialControl: View {
 
     private func updateValue(at location: CGPoint, center: CGPoint, radius: CGFloat) {
         guard
-            let newValue = drag?.value(
+            let newProgress = drag?.progress(
                 at: location,
-                from: value,
+                from: progress,
                 center: center,
                 radius: radius,
                 startAngle: startAngle,
                 endAngle: endAngle,
-                range: range,
             )
         else {
+            // A touch that missed the thumb, or one that let go, shows the last whole step.
+            dragProgress = nil
             return
         }
 
-        value = newValue
+        dragProgress = newProgress
+        let stepped = Self.value(forProgress: newProgress, range: range)
+        if stepped != value {
+            value = stepped
+        }
     }
 
     private func angle(for progress: Double) -> Angle {
@@ -177,16 +190,16 @@ extension VolumeRadialControl {
             }
         }
 
-        /// The value for the finger at `location`, or nil if the knob stays put.
-        mutating func value(
+        /// The unrounded progress (0...1 along the sweep) for the finger at
+        /// `location`, or nil if the knob stays put.
+        mutating func progress(
             at location: CGPoint,
-            from current: Int,
+            from current: Double,
             center: CGPoint,
             radius: CGFloat,
             startAngle: Angle,
             endAngle: Angle,
-            range: ClosedRange<Int>,
-        ) -> Int? {
+        ) -> Double? {
             guard let grabOffset else { return nil }
 
             // Near the middle a tiny movement swings the angle right round.
@@ -196,13 +209,12 @@ extension VolumeRadialControl {
             }
 
             let fingerAngle = VolumeRadialControl.angle(of: location, around: center)
-            let candidate = VolumeRadialControl.value(
+            let candidate = VolumeRadialControl.progress(
                 at: .radians(fingerAngle.radians - grabOffset.radians),
                 startAngle: startAngle,
                 endAngle: endAngle,
-                range: range,
             )
-            guard VolumeRadialControl.acceptsDragValue(candidate, from: current, in: range) else {
+            guard VolumeRadialControl.acceptsDragProgress(candidate, from: current) else {
                 self.grabOffset = nil
                 return nil
             }
@@ -224,9 +236,15 @@ extension VolumeRadialControl {
         endAngle: Angle,
         range: ClosedRange<Int>,
     ) -> Int {
+        value(forProgress: progress(at: angle, startAngle: startAngle, endAngle: endAngle), range: range)
+    }
+
+    /// The unrounded position of `angle` along the sweep, from 0 to 1, with the
+    /// gap mapped to the nearer end (its exact middle to 0).
+    static func progress(at angle: Angle, startAngle: Angle, endAngle: Angle) -> Double {
         let fullTurn = 2 * Double.pi
         let sweep = endAngle.radians - startAngle.radians
-        guard sweep > 0 else { return range.lowerBound }
+        guard sweep > 0 else { return 0 }
 
         var relative = (angle.radians - startAngle.radians)
             .truncatingRemainder(dividingBy: fullTurn)
@@ -240,11 +258,13 @@ extension VolumeRadialControl {
             relative = overshoot < gap / 2 ? sweep : 0
         }
 
-        let rawValue =
-            Double(range.lowerBound)
-                + relative / sweep * Double(range.upperBound - range.lowerBound)
+        return relative / sweep
+    }
 
-        return Int(rawValue.rounded())
+    /// The whole step a progress rounds to; only these reach the speaker.
+    static func value(forProgress progress: Double, range: ClosedRange<Int>) -> Int {
+        let span = Double(range.upperBound - range.lowerBound)
+        return range.lowerBound + Int((min(max(progress, 0), 1) * span).rounded())
     }
 
     /// Like UISlider, a drag only starts on the thumb, so a stray touch on the
@@ -265,9 +285,8 @@ extension VolumeRadialControl {
 
     /// Rejects a sample that jumps more than half the range: the finger
     /// crossed the gap between the ends rather than turning the knob.
-    static func acceptsDragValue(_ candidate: Int, from current: Int, in range: ClosedRange<Int>) -> Bool {
-        let span = Double(range.upperBound - range.lowerBound)
-        return Double(abs(candidate - current)) <= span / 2
+    static func acceptsDragProgress(_ candidate: Double, from current: Double) -> Bool {
+        abs(candidate - current) <= 0.5
     }
 }
 
