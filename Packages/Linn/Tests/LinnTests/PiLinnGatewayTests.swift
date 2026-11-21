@@ -50,6 +50,41 @@ import Testing
     #expect(!PiLinnGateway.isSuperseded(RPCError(code: .cancelled, message: "superseded by a newer value")))
 }
 
+@Test @MainActor func controlRetriesOnceOnAReclaimedConnectionAndWaitsForTheReconnect() async throws {
+    var original = CallOptions.defaults
+    original.timeout = .seconds(25)
+    var attempts: [CallOptions] = []
+    let result = try await PiLinnGateway.retryingUnavailable(options: original) { options in
+        attempts.append(options)
+        if attempts.count == 1 {
+            throw RPCError(code: .unavailable, message: "Stream unexpectedly closed.")
+        }
+        return "delivered"
+    }
+
+    #expect(result == "delivered")
+    #expect(attempts.count == 2)
+    #expect(attempts[0].waitForReady != true)
+    #expect(attempts[0].timeout == .seconds(25))
+    // The retry queues for the reconnect, but an unreachable server still fails within the bound.
+    #expect(attempts[1].waitForReady == true)
+    #expect(attempts[1].timeout == PiLinnGateway.reconnectRetryTimeout)
+}
+
+@Test @MainActor func controlRetriesOnlyOnceAndOnlyWhenTheServerWasUnavailable() async {
+    for code in [RPCError.Code.failedPrecondition, .deadlineExceeded, .cancelled, .unavailable] {
+        var attempts = 0
+        await #expect(throws: RPCError.self) {
+            _ = try await PiLinnGateway.retryingUnavailable(options: .defaults) { _ -> Int in
+                attempts += 1
+                throw RPCError(code: code, message: "failed")
+            }
+        }
+        // A delivered request may have run; only a second `.unavailable` attempt is allowed.
+        #expect(attempts == (code == .unavailable ? 2 : 1), "\(code)")
+    }
+}
+
 private actor ScriptedWatch {
     private var attempts = 0
 

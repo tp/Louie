@@ -10,9 +10,15 @@ import OSLog
 public final class LinnMediaSession {
     public let id: String
     public private(set) var attributes: LinnSessionAttributes
+    /// This phone's own route to Louie Home Server, as seen by the WatchState stream.
+    /// APNs and app updates describe only the server's view, so `update(_:)` never changes it.
+    private(set) var canReachServer = true
+    @ObservationIgnored private var consecutiveUnreachable = 0
     @ObservationIgnored private let gateway: any LinnGateway
     @ObservationIgnored private var monitoringEnabled = false
     @ObservationIgnored private var monitoringTask: Task<Void, Never>?
+    @ObservationIgnored private var monitoringGeneration = 0
+    private static let logger = Logger(subsystem: "xyz.preetz.Louie", category: "NowPlaying")
 
     public init(attributes: LinnSessionAttributes, gateway: (any LinnGateway)? = nil) {
         id = attributes.id
@@ -45,6 +51,8 @@ public final class LinnMediaSession {
     public func startMonitoring() {
         monitoringEnabled = true
         guard monitoringTask == nil else { return }
+        monitoringGeneration += 1
+        let generation = monitoringGeneration
         monitoringTask = Task { [weak self, gateway, room = attributes.room] in
             do {
                 let updates = await gateway.nowPlayingUpdates(room: room, updateInterval: 1)
@@ -55,14 +63,23 @@ public final class LinnMediaSession {
             } catch is CancellationError {
             } catch {
                 self?.receive(Linn.Snapshot(connectionState: .serverUnreachable))
-                Logger(subsystem: "xyz.preetz.Louie", category: "NowPlaying")
-                    .error("Remote session subscription failed: \(String(describing: error), privacy: .public)")
+                // The stream failed for good, so no retry can prove reachability.
+                self?.setCanReachServer(false)
+                Self.logger.error("Remote session subscription failed: \(String(describing: error), privacy: .public)")
             }
-            self?.monitoringTask = nil
+            // A cancelled predecessor must not clear its replacement's handle.
+            if self?.monitoringGeneration == generation { self?.monitoringTask = nil }
         }
     }
 
+    private func restartMonitoring() {
+        monitoringTask?.cancel()
+        monitoringTask = nil
+        startMonitoring()
+    }
+
     func receive(_ update: Linn.Snapshot) {
+        recordReachability(update.connectionState)
         // Keep the existing system session until the server resolves an unknown song.
         // Authoritative stop, standby and disconnection still take effect immediately.
         if update.connectionState == .connected && !update.isStandby
@@ -82,9 +99,39 @@ public final class LinnMediaSession {
         }
     }
 
+    /// PiLinnGateway yields `.serverUnreachable` itself when a WatchState attempt fails.
+    /// Every other state in the stream is a frame from Louie Home Server.
+    private func recordReachability(_ connection: Linn.ConnectionState) {
+        switch connection {
+        case .serverUnreachable:
+            // Resuming often fails once on a socket iOS reclaimed while suspended. The gateway's
+            // 1 s retry failing as well means this phone has no route to the server.
+            consecutiveUnreachable += 1
+            if consecutiveUnreachable >= 2 { setCanReachServer(false) }
+        case .connected, .connecting, .linnUnavailable:
+            consecutiveUnreachable = 0
+            setCanReachServer(true)
+        case .idle, .failed:
+            break // App-side states; WatchState never carries them.
+        }
+    }
+
+    private func setCanReachServer(_ reachable: Bool) {
+        guard canReachServer != reachable else { return }
+        canReachServer = reachable
+        if reachable {
+            Self.logger.notice("Now Playing extension reached Louie Home Server; controls enabled")
+        } else {
+            Self.logger.notice("Now Playing extension cannot reach Louie Home Server; controls disabled")
+        }
+    }
+
     public func update(_ attributes: LinnSessionAttributes) {
         guard attributes.id == id else { return }
         self.attributes = attributes
+        // APNs or the app woke the extension. A stopped monitor, or one backing off after
+        // losing this phone's route, gets a fresh attempt so disabled controls can return.
+        if monitoringEnabled && (monitoringTask == nil || !canReachServer) { restartMonitoring() }
     }
 
     public var content: (any MediaContentRepresentable)? {
@@ -124,21 +171,52 @@ public final class LinnMediaSession {
         )
     }
 
+    /// Pushed attributes keep the content current off the home network, but a command
+    /// can only be delivered while this phone reaches the server itself.
+    var canSendCommands: Bool { attributes.canControlPlayback && canReachServer }
+
     public var commands: [MediaCommand] {
         guard attributes.canControlPlayback else { return [] }
         return [
-            .play { try await self.perform(.play) },
-            .pause { try await self.perform(.pause) },
-            .togglePlayPause { try await self.perform(.togglePlayPause) },
-            .previous { try await self.perform(.previous) }.enabled(attributes.hasPrevious),
-            .next { try await self.perform(.next) }.enabled(attributes.hasNext),
-            .seekToPosition { try await self.perform(.seek($0)) }
-                .enabled(attributes.playback.timeline?.seekableRange != nil),
+            .play { try await self.handleSystemRequest("play") { try await self.perform(.play) } }
+                .enabled(canReachServer),
+            .pause { try await self.handleSystemRequest("pause") { try await self.perform(.pause) } }
+                .enabled(canReachServer),
+            .togglePlayPause { try await self.handleSystemRequest("toggle") { try await self.perform(.togglePlayPause) } }
+                .enabled(canReachServer),
+            .previous { try await self.handleSystemRequest("previous") { try await self.perform(.previous) } }
+                .enabled(canReachServer && attributes.hasPrevious),
+            .next { try await self.handleSystemRequest("next") { try await self.perform(.next) } }
+                .enabled(canReachServer && attributes.hasNext),
+            .seekToPosition { position in try await self.handleSystemRequest("seek") { try await self.perform(.seek(position)) } }
+                .enabled(canReachServer && attributes.playback.timeline?.seekableRange != nil),
         ]
     }
 
     enum Command { case play, pause, togglePlayPause, previous, next, seek(TimeInterval) }
     enum CommandError: Error { case unavailable }
+
+    /// Logs the outcome of one system request. `perform` recurses for toggle, so this wraps it.
+    private func handleSystemRequest(
+        _ name: String, successLevel: OSLogType = .default, _ request: () async throws -> Void
+    ) async throws {
+        do {
+            try await request()
+            // Tells a server that accepted the request apart from a tap that never reached the extension.
+            Self.logger.log(level: successLevel, "Now Playing \(name, privacy: .public) completed")
+        } catch {
+            switch error {
+            case is CancellationError:
+                break
+            case is CommandError, is Linn.SeekError:
+                // Stale attributes or an invalid seek; the request never left the extension.
+                Self.logger.error("Now Playing \(name, privacy: .public) refused locally: \(String(describing: error), privacy: .public)")
+            default:
+                Self.logger.error("Now Playing \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+            throw error
+        }
+    }
 
     // Report the server acknowledgement or error to NowPlaying. Predictions arrive
     // through WatchState; the extension does not predict independently.
@@ -171,9 +249,14 @@ public final class LinnMediaSession {
     }
 
     func setVolume(_ level: Float) async throws {
+        if monitoringEnabled { startMonitoring() }
         guard attributes.canControlPlayback, level.isFinite else { throw CommandError.unavailable }
         let volume = Int((min(1, max(0, level)) * Float(effectiveMaximumVolume)).rounded())
-        try await gateway.setVolume(volume, room: attributes.room, group: false)
+        do {
+            try await gateway.setVolume(volume, room: attributes.room, group: false)
+        } catch is CancellationError {
+            // A newer value superseded this one on the server; WatchState reports the result.
+        }
     }
 }
 
@@ -183,9 +266,12 @@ extension LinnMediaSession: MediaSessionRepresentable {}
 extension LinnMediaSession: RemoteMediaSessionRepresentable {
     public var devices: [MediaDevice] {
         guard attributes.canControlPlayback else { return [] }
-        let capabilities: [MediaDevice.Capability] = normalizedVolume.map { volume in
+        // The speaker stays listed; its slider returns once this phone reaches the server again.
+        let volume = canReachServer ? normalizedVolume : nil
+        let capabilities: [MediaDevice.Capability] = volume.map { volume in
+            // A drag reports many levels; keep their successes out of the persisted log.
             [.absoluteVolume(volume) { level in
-                try await self.setVolume(level)
+                try await self.handleSystemRequest("volume", successLevel: .info) { try await self.setVolume(level) }
             }]
         } ?? []
         return [MediaDevice(id: id, name: attributes.room, type: .speaker, capabilities: capabilities)]
