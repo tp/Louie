@@ -111,11 +111,15 @@ public final class Linn {
         return max(0, total - currentIndex - 1)
     }
 
-    private var linnGateway: (any LinnGateway)?
+    /// Internal so tests can model `start()` assigning the gateway after a command.
+    var linnGateway: (any LinnGateway)?
     private var configurationLoadAttempted = false
     private var pendingQueueExpiresAt: Date?
     private var optimisticVolume: OptimisticVolume?
     private var optimisticMute: OptimisticMute?
+    /// Last values the Home Server reported; a rejected request returns to them.
+    private var serverVolume: Int?
+    private var serverMuted: Bool?
     private var libraryContentRevision: Int?
     private var libraryPageCache: [LibraryCacheKey: LibraryPage] = [:]
     private static let logger = Logger(subsystem: "Louie.Linn", category: "Linn")
@@ -123,6 +127,14 @@ public final class Linn {
     @ObservationIgnored private var wakeTask: Task<Void, Never>?
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
+    @ObservationIgnored private var volumeTask: Task<Void, Never>?
+    @ObservationIgnored private var volumeRequests: AsyncStream<VolumeRequest>.Continuation?
+    @ObservationIgnored private var latestVolumeRequestID = 0
+
+    private struct VolumeRequest {
+        var id: Int
+        var volume: Int
+    }
 
     private struct OptimisticVolume {
         var target: Int
@@ -207,6 +219,7 @@ public final class Linn {
         wakeTask?.cancel()
         updatesTask?.cancel()
         libraryTask?.cancel()
+        volumeTask?.cancel()
     }
 
     public func start() {
@@ -385,9 +398,53 @@ public final class Linn {
             target: clampedVolume,
             expiresAt: Date().addingTimeInterval(2.5)
         )
-        performControl { linnGateway, room in
-            try await linnGateway.setVolume(clampedVolume, room: room, group: false)
+        lastErrorMessage = nil
+        latestVolumeRequestID += 1
+        volumeRequestContinuation().yield(VolumeRequest(id: latestVolumeRequestID, volume: clampedVolume))
+    }
+
+    /// A single consumer sends volumes in order with at most one RPC in flight:
+    /// a drag reaches the speaker at once, values that arrive meanwhile collapse
+    /// to the newest, and that one is sent as soon as the previous RPC returns.
+    private func volumeRequestContinuation() -> AsyncStream<VolumeRequest>.Continuation {
+        if let volumeRequests {
+            return volumeRequests
         }
+
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: VolumeRequest.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        volumeRequests = continuation
+        volumeTask = Task { [weak self] in
+            for await request in stream {
+                // Read at send time: Linn(room:) assigns its gateway in start().
+                guard let linnGateway = self?.linnGateway, let room = self?.room else {
+                    continue
+                }
+                do {
+                    try await linnGateway.setVolume(request.volume, room: room, group: false)
+                } catch is CancellationError {
+                    // Superseded on the server by a newer value.
+                } catch {
+                    self?.volumeRequestFailed(request, error: error)
+                }
+            }
+        }
+        return continuation
+    }
+
+    private func volumeRequestFailed(_ request: VolumeRequest, error: any Error) {
+        // A newer value is already on its way; its outcome decides.
+        guard request.id == latestVolumeRequestID else {
+            return
+        }
+        if let serverError = error as? PiLinnRPCError, serverError.reason == .linnRejected {
+            Self.logger.error("Linn rejected volume: \(serverError.message, privacy: .private)")
+        }
+        lastErrorMessage = error.localizedDescription
+        optimisticVolume = nil
+        volume = serverVolume
     }
 
     public func setMuted(_ isMuted: Bool) {
@@ -396,7 +453,13 @@ public final class Linn {
             target: isMuted,
             expiresAt: Date().addingTimeInterval(2.5)
         )
-        performControl { linnGateway, room in
+        performControl(onRejection: { [weak self] in
+            guard let self, optimisticMute?.target == isMuted else {
+                return
+            }
+            optimisticMute = nil
+            self.isMuted = serverMuted
+        }) { linnGateway, room in
             try await linnGateway.setMuted(isMuted, room: room, group: false)
         }
     }
@@ -876,6 +939,7 @@ public final class Linn {
             maximumVolume = serverMaximum
         }
         let incomingVolume = update.volume.map { min($0, maximumVolume) }
+        serverVolume = incomingVolume
         volume = reconcileOptimistic(
             &optimisticVolume,
             target: \.target,
@@ -885,6 +949,7 @@ public final class Linn {
             matches: { $0 == $1 }
         ) ?? incomingVolume
         let incomingMuted = update.isMuted
+        serverMuted = incomingMuted
         isMuted = reconcileOptimistic(
             &optimisticMute,
             target: \.target,
@@ -976,8 +1041,11 @@ public final class Linn {
             }
     }
 
+    /// `onFailure` runs for any failure, including a superseded (cancelled)
+    /// command; `onRejection` only for real errors, which set `lastErrorMessage`.
     private func performControl(
         onFailure: (@MainActor () -> Void)? = nil,
+        onRejection: (@MainActor () -> Void)? = nil,
         operation: @escaping (any LinnGateway, String) async throws -> Void
     ) {
         lastErrorMessage = nil
@@ -1003,6 +1071,7 @@ public final class Linn {
                     Self.logger.error("Linn rejected command: \(serverError.message, privacy: .private)")
                 }
                 onFailure?()
+                onRejection?()
                 self.lastErrorMessage = error.localizedDescription
             }
         }
