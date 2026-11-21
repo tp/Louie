@@ -1,6 +1,9 @@
+mod apns;
 mod error;
 mod gateway;
 mod optimism;
+mod push;
+mod push_registry;
 mod scheduler;
 mod service;
 
@@ -17,7 +20,7 @@ use tracing::info;
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut sentry_options = sentry::ClientOptions::default();
     if env::var_os("SENTRY_RELEASE").is_none() {
         sentry_options.release = sentry::release_name!();
@@ -47,9 +50,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     let gateway = gateway::Gateway::start(gateway_url, room, maximum_volume);
+    let push = push::PushService::start(gateway.subscribe())?;
     info!("Serving Linn gRPC on {bind}");
     Server::builder()
-        .add_service(LinnServer::new(service::LinnService::new(gateway)))
+        .add_service(LinnServer::new(
+            service::LinnService::new(gateway).with_push(push),
+        ))
         .serve(bind)
         .await?;
     Ok(())

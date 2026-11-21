@@ -161,6 +161,11 @@
             yieldSnapshot()
         }
 
+        public func seek(to position: Int, room _: String) async throws {
+            self.position = position
+            yieldSnapshot()
+        }
+
         public func pause(room _: String) async throws {
             try await Task.sleep(for: .milliseconds(150))
             transportState = .paused
@@ -324,7 +329,8 @@
             snapshot.timeline = .init(
                 position: position,
                 duration: song.duration,
-                progress: song.duration > 0 ? Double(position) / Double(song.duration) : nil
+                progress: song.duration > 0 ? Double(position) / Double(song.duration) : nil,
+                seekableRange: song.duration > 0 ? 0...song.duration : nil
             )
             snapshot.volume = volume
             snapshot.isMuted = isMuted

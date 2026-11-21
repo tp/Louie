@@ -16,10 +16,12 @@
 //
 
 import Linn
+import LinnNowPlaying
 import SwiftUI
 
 struct ConnectionGateView: View {
     @State private var settings = GatewaySettings()
+    @State private var nowPlaying = LinnNowPlayingPublisher()
     @State private var linn: Linn?
     @State private var hasConnected = false
     /// Detailed connecting card (error copy + actions) instead of the splash.
@@ -52,6 +54,12 @@ struct ConnectionGateView: View {
             // the crossfade only ever unveils content, never moves it.
             if let linn {
                 ContentView(linn: linn)
+                    .task {
+                        if let configuration = settings.configuration {
+                            nowPlaying.isForeground = scenePhase == .active
+                            await nowPlaying.run(linn: linn, configuration: configuration)
+                        }
+                    }
                     // A closed window releases its connection. This stays on
                     // the branch, capturing this instance: the Group's
                     // modifiers apply to each branch, and the address screen
@@ -103,6 +111,7 @@ struct ConnectionGateView: View {
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
+            nowPlaying.isForeground = newPhase == .active
             // Coming back from Settings or the permission prompt: retry now
             // instead of waiting out the backoff sleep.
             guard newPhase == .active, !hasConnected, let linn else {

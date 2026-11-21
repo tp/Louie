@@ -8,6 +8,10 @@ public extension Linn {
             self.serverURL = serverURL
         }
 
+        package func makeGateway() -> any LinnGateway {
+            PiLinnGateway(serverURL: serverURL)
+        }
+
         public static func local(
             fileURL: URL? = nil,
             environment: [String: String] = ProcessInfo.processInfo.environment,

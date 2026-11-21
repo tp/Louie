@@ -239,3 +239,23 @@ private actor RetryDelays {
     snapshot.connectionStatus = .connected
     #expect(PiLinnMapping.nowPlaying(snapshot).connectionState == .connected)
 }
+
+@Test func serverSeekabilityControlsScrubbingAndClearsOldRanges() {
+    var snapshot = Louie_Linn_V1_StateSnapshot()
+    snapshot.connectionStatus = .connected
+    snapshot.nowPlaying.timeline.positionSeconds = 20
+    snapshot.nowPlaying.timeline.durationSeconds = 180
+    snapshot.nowPlaying.timeline.isSeekable = true
+    snapshot.nowPlaying.timeline.seekLowerBoundSeconds = 10
+    snapshot.nowPlaying.timeline.seekUpperBoundSeconds = 150
+    #expect(PiLinnMapping.nowPlaying(snapshot).timeline?.seekableRange == 10...150)
+    snapshot.nowPlaying.timeline.isSeekable = false
+    #expect(PiLinnMapping.nowPlaying(snapshot).timeline?.seekableRange == nil)
+    snapshot.nowPlaying.timeline.isSeekable = true
+    snapshot.nowPlaying.timeline.seekUpperBoundSeconds = 5
+    #expect(PiLinnMapping.nowPlaying(snapshot).timeline?.seekableRange == nil)
+    snapshot.nowPlaying.timeline.clearSeekUpperBoundSeconds()
+    #expect(PiLinnMapping.nowPlaying(snapshot).timeline?.seekableRange == nil)
+    snapshot.nowPlaying.clearTimeline()
+    #expect(PiLinnMapping.nowPlaying(snapshot).timeline == nil)
+}

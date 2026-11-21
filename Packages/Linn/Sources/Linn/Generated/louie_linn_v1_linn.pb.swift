@@ -393,6 +393,44 @@ nonisolated enum Louie_Linn_V1_NowPlayingTokenKind: SwiftProtobuf.Enum, Swift.Ca
 
 }
 
+nonisolated enum Louie_Linn_V1_APNsEnvironment: SwiftProtobuf.Enum, Swift.CaseIterable {
+  typealias RawValue = Int
+  case unspecified // = 0
+  case sandbox // = 1
+  case production // = 2
+  case UNRECOGNIZED(Int)
+
+  init() {
+    self = .unspecified
+  }
+
+  init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .sandbox
+    case 2: self = .production
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .sandbox: return 1
+    case .production: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  static let allCases: [Louie_Linn_V1_APNsEnvironment] = [
+    .unspecified,
+    .sandbox,
+    .production,
+  ]
+
+}
+
 nonisolated struct Louie_Linn_V1_StateSnapshot: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1186,6 +1224,11 @@ nonisolated struct Louie_Linn_V1_RegisterNowPlayingTokenRequest: Sendable {
   /// Required for SESSION_UPDATE, empty for PUSH_TO_START.
   var sessionID: String = String()
 
+  /// Endpoint the extension should use for controls; never contacted by APNs.
+  var serverURL: String = String()
+
+  var environment: Louie_Linn_V1_APNsEnvironment = .unspecified
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1201,6 +1244,11 @@ nonisolated struct Louie_Linn_V1_RemoveNowPlayingTokenRequest: Sendable {
   var kind: Louie_Linn_V1_NowPlayingTokenKind = .unspecified
 
   var sessionID: String = String()
+
+  /// Conditional removal: a late cleanup must not delete a rotated token.
+  var token: Data = Data()
+
+  var environment: Louie_Linn_V1_APNsEnvironment = .unspecified
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1241,6 +1289,10 @@ nonisolated extension Louie_Linn_V1_QueuePlacement: SwiftProtobuf._ProtoNameProv
 
 nonisolated extension Louie_Linn_V1_NowPlayingTokenKind: SwiftProtobuf._ProtoNameProviding {
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0NOW_PLAYING_TOKEN_KIND_UNSPECIFIED\0\u{1}NOW_PLAYING_TOKEN_KIND_PUSH_TO_START\0\u{1}NOW_PLAYING_TOKEN_KIND_SESSION_UPDATE\0")
+}
+
+nonisolated extension Louie_Linn_V1_APNsEnvironment: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0APNS_ENVIRONMENT_UNSPECIFIED\0\u{1}APNS_ENVIRONMENT_SANDBOX\0\u{1}APNS_ENVIRONMENT_PRODUCTION\0")
 }
 
 nonisolated extension Louie_Linn_V1_StateSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -2365,7 +2417,7 @@ nonisolated extension Louie_Linn_V1_SetMediaFavouriteRequest: SwiftProtobuf.Mess
 
 nonisolated extension Louie_Linn_V1_RegisterNowPlayingTokenRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".RegisterNowPlayingTokenRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}installation_id\0\u{1}kind\0\u{1}token\0\u{3}session_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}installation_id\0\u{1}kind\0\u{1}token\0\u{3}session_id\0\u{3}server_url\0\u{1}environment\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2377,6 +2429,8 @@ nonisolated extension Louie_Linn_V1_RegisterNowPlayingTokenRequest: SwiftProtobu
       case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
       case 3: try { try decoder.decodeSingularBytesField(value: &self.token) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.serverURL) }()
+      case 6: try { try decoder.decodeSingularEnumField(value: &self.environment) }()
       default: break
       }
     }
@@ -2395,6 +2449,12 @@ nonisolated extension Louie_Linn_V1_RegisterNowPlayingTokenRequest: SwiftProtobu
     if !self.sessionID.isEmpty {
       try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 4)
     }
+    if !self.serverURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.serverURL, fieldNumber: 5)
+    }
+    if self.environment != .unspecified {
+      try visitor.visitSingularEnumField(value: self.environment, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2403,6 +2463,8 @@ nonisolated extension Louie_Linn_V1_RegisterNowPlayingTokenRequest: SwiftProtobu
     if lhs.kind != rhs.kind {return false}
     if lhs.token != rhs.token {return false}
     if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.serverURL != rhs.serverURL {return false}
+    if lhs.environment != rhs.environment {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2410,7 +2472,7 @@ nonisolated extension Louie_Linn_V1_RegisterNowPlayingTokenRequest: SwiftProtobu
 
 nonisolated extension Louie_Linn_V1_RemoveNowPlayingTokenRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".RemoveNowPlayingTokenRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}installation_id\0\u{1}kind\0\u{3}session_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}installation_id\0\u{1}kind\0\u{3}session_id\0\u{1}token\0\u{1}environment\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2421,6 +2483,8 @@ nonisolated extension Louie_Linn_V1_RemoveNowPlayingTokenRequest: SwiftProtobuf.
       case 1: try { try decoder.decodeSingularStringField(value: &self.installationID) }()
       case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.token) }()
+      case 5: try { try decoder.decodeSingularEnumField(value: &self.environment) }()
       default: break
       }
     }
@@ -2436,6 +2500,12 @@ nonisolated extension Louie_Linn_V1_RemoveNowPlayingTokenRequest: SwiftProtobuf.
     if !self.sessionID.isEmpty {
       try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 3)
     }
+    if !self.token.isEmpty {
+      try visitor.visitSingularBytesField(value: self.token, fieldNumber: 4)
+    }
+    if self.environment != .unspecified {
+      try visitor.visitSingularEnumField(value: self.environment, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2443,6 +2513,8 @@ nonisolated extension Louie_Linn_V1_RemoveNowPlayingTokenRequest: SwiftProtobuf.
     if lhs.installationID != rhs.installationID {return false}
     if lhs.kind != rhs.kind {return false}
     if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.token != rhs.token {return false}
+    if lhs.environment != rhs.environment {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

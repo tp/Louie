@@ -11,7 +11,7 @@ private actor WatchAttempt {
 }
 
 /// One long-lived HTTP/2 connection to the Raspberry Pi. The Pi alone talks to Linn.
-actor PiLinnGateway: LinnGateway {
+actor PiLinnGateway: LinnGateway, NowPlayingPushGateway {
     private typealias Transport = HTTP2ClientTransport.TransportServices
     private typealias Client = Louie_Linn_V1_Linn.Client<Transport>
     typealias Watch = @Sendable (@escaping @Sendable (Louie_Linn_V1_StateSnapshot) async -> Void) async throws -> Void
@@ -138,8 +138,35 @@ actor PiLinnGateway: LinnGateway {
         _ = try await remapCancellation { try await service().wake(Google_Protobuf_Empty(), options: options) }
     }
 
+    func registerNowPlayingToken(_ registration: NowPlayingTokenRegistration) async throws {
+        var request = Louie_Linn_V1_RegisterNowPlayingTokenRequest()
+        request.installationID = registration.installationID
+        request.kind = registration.kind
+        request.token = registration.token
+        request.sessionID = registration.sessionID
+        request.serverURL = registration.serverURL.absoluteString
+        request.environment = registration.environment.proto
+        _ = try await remapCancellation { try await service().registerNowPlayingToken(request, options: Self.commandOptions) }
+    }
+
+    func removeNowPlayingToken(_ registration: NowPlayingTokenRegistration) async throws {
+        var request = Louie_Linn_V1_RemoveNowPlayingTokenRequest()
+        request.installationID = registration.installationID
+        request.kind = registration.kind
+        request.token = registration.token
+        request.sessionID = registration.sessionID
+        request.environment = registration.environment.proto
+        _ = try await remapCancellation { try await service().removeNowPlayingToken(request, options: Self.commandOptions) }
+    }
+
     func play(room: String) async throws {
         _ = try await remapCancellation { try await service().play(Google_Protobuf_Empty(), options: Self.commandOptions) }
+    }
+
+    func seek(to position: Int, room: String) async throws {
+        var request = Louie_Linn_V1_SeekRequest()
+        request.positionSeconds = Int32(clamping: position)
+        _ = try await remapCancellation { try await service().seek(request, options: Self.commandOptions) }
     }
 
     func pause(room: String) async throws {
@@ -371,10 +398,26 @@ enum PiLinnMapping {
             } else {
                 nil
             }
+            let seekableRange: ClosedRange<Int>?
+            if timeline.hasIsSeekable, timeline.isSeekable,
+               timeline.hasSeekLowerBoundSeconds, timeline.hasSeekUpperBoundSeconds,
+               timeline.seekLowerBoundSeconds >= 0,
+               timeline.seekUpperBoundSeconds > timeline.seekLowerBoundSeconds {
+                seekableRange = Int(timeline.seekLowerBoundSeconds)...Int(timeline.seekUpperBoundSeconds)
+            } else {
+                seekableRange = nil
+            }
+            // A pending Play still carries the paused timeline. Anchor that
+            // projection at publication, never at the beginning of the pause.
+            let anchor = snapshot.pending.transport
+                ? (snapshot.hasPublishedAt ? snapshot.publishedAt : nil)
+                : (timeline.hasPositionSampledAt ? timeline.positionSampledAt : nil)
             result.timeline = .init(
                 position: position,
                 duration: duration,
-                progress: progress
+                progress: progress,
+                seekableRange: seekableRange,
+                sampledAtSeconds: anchor.map { Double($0.seconds) + Double($0.nanos) / 1_000_000_000 }
             )
         }
         let volume = state.roomVolume

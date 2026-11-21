@@ -268,6 +268,12 @@ enum NowPlayingTokenKind {
   NOW_PLAYING_TOKEN_KIND_SESSION_UPDATE = 2;
 }
 
+enum APNsEnvironment {
+  APNS_ENVIRONMENT_UNSPECIFIED = 0;
+  APNS_ENVIRONMENT_SANDBOX = 1;
+  APNS_ENVIRONMENT_PRODUCTION = 2;
+}
+
 message RegisterNowPlayingTokenRequest {
   // Stable per app installation; shared with the Now Playing extension.
   string installation_id = 1;
@@ -275,10 +281,16 @@ message RegisterNowPlayingTokenRequest {
   bytes token = 3;
   // Required for SESSION_UPDATE, empty for PUSH_TO_START.
   string session_id = 4;
+  // Endpoint the extension should use for controls; never contacted by APNs.
+  string server_url = 5;
+  APNsEnvironment environment = 6;
 }
 
 message RemoveNowPlayingTokenRequest {
   string installation_id = 1;
   NowPlayingTokenKind kind = 2;
   string session_id = 3;
+  // Conditional removal: a late cleanup must not delete a rotated token.
+  bytes token = 4;
+  APNsEnvironment environment = 5;
 }
